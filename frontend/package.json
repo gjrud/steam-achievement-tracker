@@ -1,0 +1,22 @@
+{
+  "name": "steam-achievement-tracker-frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "vitest run",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/svelte": "^5.2.8",
+    "@testing-library/user-event": "^14.6.1",
+    "@sveltejs/vite-plugin-svelte": "^1.0.1",
+    "jsdom": "^22.1.0",
+    "svelte": "^3.49.0",
+    "vite": "^3.0.7",
+    "vitest": "^0.34.6"
+  }
+}

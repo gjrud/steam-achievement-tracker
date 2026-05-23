@@ -1,0 +1,33 @@
+html {
+  min-height: 100%;
+  background: #0b141f;
+  color: #f4fbff;
+}
+
+body {
+  margin: 0;
+  color: #f4fbff;
+  font-family: Inter, "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+  min-height: 100vh;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+::selection {
+  background: rgba(102, 192, 244, 0.35);
+}

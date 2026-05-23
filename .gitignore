@@ -1,0 +1,49 @@
+# Go binaries and test artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+
+# Wails v2 build/generated artifacts
+/steam-achievement-tracker
+build/bin/
+frontend/dist/
+frontend/wailsjs/
+package.json.md5
+frontend/package.json.md5
+
+# Frontend dependencies
+node_modules/
+frontend/node_modules/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local env/config/cache
+.env
+.env.*
+!.env.example
+tmp/
+.cache/
+.local/
+.vite/
+frontend/.vite/
+
+# Go workspace files
+go.work
+go.work.sum
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+*.swo

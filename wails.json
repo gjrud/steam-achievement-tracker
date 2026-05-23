@@ -1,0 +1,15 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "steam-achievement-tracker",
+  "outputfilename": "steam-achievement-tracker",
+  "frontend:install": "npm ci",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "gjrud",
+    "email": "2436317+gjrud@users.noreply.github.com"
+  },
+  "build:dev:tags": "webkit2_41",
+  "build:tags": "webkit2_41"
+}
