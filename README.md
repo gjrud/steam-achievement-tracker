@@ -39,8 +39,8 @@ Package names differ by distribution. On Debian/Ubuntu-style systems, look for p
 
 ### Development version
 
-- Go 1.23 or newer.
-- Node.js and npm.
+- Go 1.26.2 or newer.
+- Node.js frontend tooling required by Wails.
 - Wails v2 CLI. Example:
 
   ```sh
@@ -49,7 +49,6 @@ Package names differ by distribution. On Debian/Ubuntu-style systems, look for p
 
 - Linux build dependencies for Wails and CGO: C compiler, `pkg-config`, GTK3 development headers, WebKit2GTK 4.1 development headers, and libsoup 3 development headers.
 - SQLite CGO support through `github.com/mattn/go-sqlite3` dependencies, normally covered by the compiler and system SQLite/CGO toolchain.
-- Frontend dependencies installed in `frontend/`.
 - Same Secret Service, Steam Web API key, network, and public profile requirements as the compiled version for real sync testing.
 
 Use `wails doctor` to check local Wails dependencies.
@@ -97,12 +96,7 @@ If the API key is missing, the app opens to the key setup screen and shows the s
 
 ## Build & run
 
-Install frontend dependencies once:
-
-```sh
-cd frontend
-npm install
-```
+Wails handles frontend dependency installation and frontend builds through the hooks in `wails.json`.
 
 Run the desktop app in development mode from the repository root:
 
