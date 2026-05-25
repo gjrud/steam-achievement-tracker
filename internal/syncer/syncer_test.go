@@ -30,42 +30,13 @@ func TestFullSyncRecordsPartialFailureAndKeepsSuccessfulGame(t *testing.T) {
 	fake.schema[20] = []string{"ACH_FAIL"}
 	fake.playerError[20] = "player achievements unavailable"
 
-	result, err := (&Service{Repo: repo, Steam: fake.client}).FullSync(context.Background(), *profile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Status != "partial" || result.GamesTotal != 2 || result.GamesSynced != 1 || result.GamesFailed != 1 || result.Error == nil {
-		t.Fatalf("result = %#v, want partial 1/2 failure", result)
-	}
-	run, err := repo.LatestSyncRun(profile.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if run == nil || run.Status != "partial" || run.GamesSynced != 1 || run.GamesFailed != 1 || run.Error == nil {
-		t.Fatalf("sync run = %#v, want persisted partial status", run)
-	}
+	result := runFullSyncOK(t, repo, fake, profile)
+	requireSyncResult(t, result, expectedSyncResult{status: "partial", total: 2, synced: 1, failed: 1, hasError: true})
+	requireLatestSyncRun(t, repo, profile.ID, expectedSyncResult{status: "partial", total: 2, synced: 1, failed: 1, hasError: true})
 
-	summary, err := repo.Summary(profile.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if summary.OwnedGamesCount != 2 || summary.TotalAchievementsAvailable != 2 || summary.TotalAchievementsUnlocked != 1 {
-		t.Fatalf("summary = %#v, want warning game counted but only successful achievement stats", summary)
-	}
-	warnings, err := repo.GameCards(profile.ID, "warnings")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(warnings) != 1 || warnings[0].AppID != 20 || !warnings[0].SyncWarning || warnings[0].LastError == nil || !strings.Contains(*warnings[0].LastError, "player achievements unavailable") {
-		t.Fatalf("warnings = %#v, want broken game warning", warnings)
-	}
-	good, err := repo.ProfileGame(profile.ID, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !good.Exists || good.TotalAchievements != 2 || good.UnlockedAchievements != 1 || good.SyncWarning {
-		t.Fatalf("good game state = %#v, want successful stats without warning", good)
-	}
+	requireSummaryCounts(t, repo, profile.ID, summaryCounts{owned: 2, achievements: 2, unlocked: 1})
+	requireWarningCard(t, repo, profile.ID, 20, "player achievements unavailable")
+	requireGoodGameState(t, repo, profile.ID, 10)
 }
 
 func TestFullSyncClearsWarningAfterRecovery(t *testing.T) {
@@ -75,52 +46,18 @@ func TestFullSyncClearsWarningAfterRecovery(t *testing.T) {
 	fake.schema[20] = []string{"ACH_ONE", "ACH_TWO"}
 	fake.playerError[20] = "temporary Steam failure"
 
-	first, err := (&Service{Repo: repo, Steam: fake.client}).FullSync(context.Background(), *profile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Status != "partial" || first.GamesSynced != 0 || first.GamesFailed != 1 {
-		t.Fatalf("first result = %#v, want partial warning", first)
-	}
-	warnings, err := repo.GameCards(profile.ID, "warnings")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(warnings) != 1 || warnings[0].AppID != 20 || warnings[0].LastError == nil || !strings.Contains(*warnings[0].LastError, "temporary Steam failure") {
-		t.Fatalf("warnings after failure = %#v, want temporary failure warning", warnings)
-	}
+	first := runFullSyncOK(t, repo, fake, profile)
+	requireSyncResult(t, first, expectedSyncResult{status: "partial", total: 1, synced: 0, failed: 1, hasError: true})
+	requireWarningCard(t, repo, profile.ID, 20, "temporary Steam failure")
 
 	fake.playerError[20] = ""
 	fake.player[20] = map[string]bool{"ACH_ONE": true, "ACH_TWO": true}
 	fake.global[20] = map[string]float64{"ACH_ONE": 90, "ACH_TWO": 40}
-	second, err := (&Service{Repo: repo, Steam: fake.client}).FullSync(context.Background(), *profile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second.Status != "success" || second.GamesSynced != 1 || second.GamesFailed != 0 {
-		t.Fatalf("second result = %#v, want successful recovery", second)
-	}
-	state, err := repo.ProfileGame(profile.ID, 20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !state.Exists || state.SyncWarning || state.TotalAchievements != 2 || state.UnlockedAchievements != 2 || !state.IsCompleted {
-		t.Fatalf("recovered state = %#v, want completed stats without warning", state)
-	}
-	warnings, err = repo.GameCards(profile.ID, "warnings")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(warnings) != 0 {
-		t.Fatalf("warnings after recovery = %#v, want cleared warning", warnings)
-	}
-	completed, err := repo.GameCards(profile.ID, "completed")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(completed) != 1 || completed[0].AppID != 20 || completed[0].LastError != nil {
-		t.Fatalf("completed after recovery = %#v, want recovered completed game without error", completed)
-	}
+	second := runFullSyncOK(t, repo, fake, profile)
+	requireSyncResult(t, second, expectedSyncResult{status: "success", total: 1, synced: 1, failed: 0})
+	requireRecoveredGameState(t, repo, profile.ID, 20)
+	requireNoWarningCards(t, repo, profile.ID)
+	requireCompletedCard(t, repo, profile.ID, 20)
 }
 
 func TestFullSyncCancellationPersistsFailedRun(t *testing.T) {
@@ -238,29 +175,204 @@ func TestFullSyncLimitsConcurrencyAndPersistsProgress(t *testing.T) {
 		fake.schema[game.AppID] = []string{}
 	}
 
+	result := runFullSyncOK(t, repo, fake, profile)
+	requireSyncResult(t, result, expectedSyncResult{status: "success", total: len(owned), synced: len(owned), failed: 0})
+	requireConcurrentRange(t, fake, 2, 4)
+	requireLatestSyncRun(t, repo, profile.ID, expectedSyncResult{status: "success", total: len(owned), synced: len(owned), failed: 0})
+	requireSummaryCounts(t, repo, profile.ID, summaryCounts{owned: len(owned)})
+}
+
+type expectedSyncResult struct {
+	status   string
+	total    int
+	synced   int
+	failed   int
+	hasError bool
+}
+
+type summaryCounts struct {
+	owned        int
+	achievements int
+	unlocked     int
+}
+
+func runFullSyncOK(t *testing.T, repo *repository.Repository, fake *fakeSteamServer, profile *repository.Profile) Result {
+	t.Helper()
 	result, err := (&Service{Repo: repo, Steam: fake.client}).FullSync(context.Background(), *profile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "success" || result.GamesTotal != len(owned) || result.GamesSynced != len(owned) || result.GamesFailed != 0 {
-		t.Fatalf("result = %#v, want all games synced", result)
+	return result
+}
+
+func requireSyncResult(t *testing.T, result Result, want expectedSyncResult) {
+	t.Helper()
+	if result.Status != want.status {
+		t.Fatalf("status = %q, want %q; result = %#v", result.Status, want.status, result)
 	}
-	if got := fake.maxConcurrent(); got > 4 || got < 2 {
-		t.Fatalf("max concurrent per-game requests = %d, want between 2 and 4", got)
+	if result.GamesTotal != want.total {
+		t.Fatalf("games total = %d, want %d; result = %#v", result.GamesTotal, want.total, result)
 	}
-	run, err := repo.LatestSyncRun(profile.ID)
+	if result.GamesSynced != want.synced {
+		t.Fatalf("games synced = %d, want %d; result = %#v", result.GamesSynced, want.synced, result)
+	}
+	if result.GamesFailed != want.failed {
+		t.Fatalf("games failed = %d, want %d; result = %#v", result.GamesFailed, want.failed, result)
+	}
+	requireErrorPresence(t, result.Error, want.hasError, result)
+}
+
+func requireErrorPresence(t *testing.T, errText *string, want bool, context any) {
+	t.Helper()
+	if want && errText == nil {
+		t.Fatalf("error = nil, want error; context = %#v", context)
+	}
+	if !want && errText != nil {
+		t.Fatalf("error = %q, want nil; context = %#v", *errText, context)
+	}
+}
+
+func requireLatestSyncRun(t *testing.T, repo *repository.Repository, profileID int64, want expectedSyncResult) {
+	t.Helper()
+	run, err := repo.LatestSyncRun(profileID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run == nil || run.Status != "success" || run.GamesTotal != len(owned) || run.GamesSynced != len(owned) || run.GamesFailed != 0 {
-		t.Fatalf("sync run = %#v, want final progress persisted", run)
+	if run == nil {
+		t.Fatal("sync run = nil, want latest run")
 	}
-	summary, err := repo.Summary(profile.ID)
+	got := Result{Status: run.Status, GamesTotal: run.GamesTotal, GamesSynced: run.GamesSynced, GamesFailed: run.GamesFailed, Error: run.Error}
+	requireSyncResult(t, got, want)
+}
+
+func requireSummaryCounts(t *testing.T, repo *repository.Repository, profileID int64, want summaryCounts) {
+	t.Helper()
+	summary, err := repo.Summary(profileID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.OwnedGamesCount != len(owned) {
-		t.Fatalf("owned games count = %d, want %d", summary.OwnedGamesCount, len(owned))
+	if summary.OwnedGamesCount != want.owned {
+		t.Fatalf("owned games count = %d, want %d", summary.OwnedGamesCount, want.owned)
+	}
+	if summary.TotalAchievementsAvailable != want.achievements {
+		t.Fatalf("total achievements = %d, want %d", summary.TotalAchievementsAvailable, want.achievements)
+	}
+	if summary.TotalAchievementsUnlocked != want.unlocked {
+		t.Fatalf("unlocked achievements = %d, want %d", summary.TotalAchievementsUnlocked, want.unlocked)
+	}
+}
+
+func requireWarningCard(t *testing.T, repo *repository.Repository, profileID int64, appID int64, message string) {
+	t.Helper()
+	warnings := requireGameCards(t, repo, profileID, "warnings")
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %#v, want one warning", warnings)
+	}
+	card := warnings[0]
+	if card.AppID != appID {
+		t.Fatalf("warning appID = %d, want %d", card.AppID, appID)
+	}
+	if !card.SyncWarning {
+		t.Fatalf("warning card = %#v, want sync warning", card)
+	}
+	requireStringPtrContains(t, card.LastError, message, card)
+}
+
+func requireGoodGameState(t *testing.T, repo *repository.Repository, profileID int64, appID int64) {
+	t.Helper()
+	state := requireProfileGame(t, repo, profileID, appID)
+	if !state.Exists {
+		t.Fatalf("good game state = %#v, want existing state", state)
+	}
+	if state.TotalAchievements != 2 {
+		t.Fatalf("good total achievements = %d, want 2", state.TotalAchievements)
+	}
+	if state.UnlockedAchievements != 1 {
+		t.Fatalf("good unlocked achievements = %d, want 1", state.UnlockedAchievements)
+	}
+	if state.SyncWarning {
+		t.Fatalf("good game state = %#v, want no warning", state)
+	}
+}
+
+func requireRecoveredGameState(t *testing.T, repo *repository.Repository, profileID int64, appID int64) {
+	t.Helper()
+	state := requireProfileGame(t, repo, profileID, appID)
+	if !state.Exists {
+		t.Fatalf("recovered state = %#v, want existing state", state)
+	}
+	if state.SyncWarning {
+		t.Fatalf("recovered state = %#v, want no warning", state)
+	}
+	if state.TotalAchievements != 2 {
+		t.Fatalf("recovered total achievements = %d, want 2", state.TotalAchievements)
+	}
+	if state.UnlockedAchievements != 2 {
+		t.Fatalf("recovered unlocked achievements = %d, want 2", state.UnlockedAchievements)
+	}
+	if !state.IsCompleted {
+		t.Fatalf("recovered state = %#v, want completed", state)
+	}
+}
+
+func requireProfileGame(t *testing.T, repo *repository.Repository, profileID int64, appID int64) repository.ProfileGameState {
+	t.Helper()
+	state, err := repo.ProfileGame(profileID, appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
+func requireNoWarningCards(t *testing.T, repo *repository.Repository, profileID int64) {
+	t.Helper()
+	warnings := requireGameCards(t, repo, profileID, "warnings")
+	if len(warnings) != 0 {
+		t.Fatalf("warnings after recovery = %#v, want cleared warning", warnings)
+	}
+}
+
+func requireCompletedCard(t *testing.T, repo *repository.Repository, profileID int64, appID int64) {
+	t.Helper()
+	completed := requireGameCards(t, repo, profileID, "completed")
+	if len(completed) != 1 {
+		t.Fatalf("completed after recovery = %#v, want one completed card", completed)
+	}
+	if completed[0].AppID != appID {
+		t.Fatalf("completed appID = %d, want %d", completed[0].AppID, appID)
+	}
+	if completed[0].LastError != nil {
+		t.Fatalf("completed after recovery = %#v, want no error", completed)
+	}
+}
+
+func requireGameCards(t *testing.T, repo *repository.Repository, profileID int64, filter string) []repository.GameCard {
+	t.Helper()
+	cards, err := repo.GameCards(profileID, filter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cards
+}
+
+func requireStringPtrContains(t *testing.T, got *string, want string, context any) {
+	t.Helper()
+	if got == nil {
+		t.Fatalf("string = nil, want %q; context = %#v", want, context)
+	}
+	if !strings.Contains(*got, want) {
+		t.Fatalf("string = %q, want substring %q; context = %#v", *got, want, context)
+	}
+}
+
+func requireConcurrentRange(t *testing.T, fake *fakeSteamServer, min, max int) {
+	t.Helper()
+	got := fake.maxConcurrent()
+	if got < min {
+		t.Fatalf("max concurrent per-game requests = %d, want at least %d", got, min)
+	}
+	if got > max {
+		t.Fatalf("max concurrent per-game requests = %d, want at most %d", got, max)
 	}
 }
 

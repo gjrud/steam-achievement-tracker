@@ -58,13 +58,11 @@ func migrate(conn *sql.DB, paths appdata.Paths) error {
 	if err != nil {
 		return err
 	}
-	if state.version >= config.SchemaVersion && state.hasMigrations && state.userVersion >= config.SchemaVersion {
+	if schemaCurrent(state) {
 		return nil
 	}
-	if state.hasUserTables {
-		if err := backupDB(conn, paths); err != nil {
-			return err
-		}
+	if err := backupBeforeMigration(conn, paths, state); err != nil {
+		return err
 	}
 	tx, err := conn.Begin()
 	if err != nil {
@@ -72,40 +70,79 @@ func migrate(conn *sql.DB, paths appdata.Paths) error {
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations(
+	if err := ensureMigrationsTable(tx); err != nil {
+		return err
+	}
+	current, err := recordLegacyBaseline(tx, state)
+	if err != nil {
+		return err
+	}
+	if err := applyMigrations(tx, current); err != nil {
+		return err
+	}
+	if err := setUserVersion(tx, config.SchemaVersion); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func schemaCurrent(state schemaState) bool {
+	return state.version >= config.SchemaVersion && state.hasMigrations && state.userVersion >= config.SchemaVersion
+}
+
+func backupBeforeMigration(conn *sql.DB, paths appdata.Paths, state schemaState) error {
+	if !state.hasUserTables {
+		return nil
+	}
+	return backupDB(conn, paths)
+}
+
+func ensureMigrationsTable(tx *sql.Tx) error {
+	_, err := tx.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations(
   version integer primary key,
   name text not null,
   applied_at text not null
-);`); err != nil {
-		return err
-	}
+);`)
+	return err
+}
 
-	current := state.version
-	if !state.hasMigrations && state.isLegacyV1 {
-		if _, err := tx.Exec(`insert or ignore into schema_migrations(version, name, applied_at) values(1, 'initial_schema_legacy', ?)`, time.Now().UTC().Format(time.RFC3339)); err != nil {
-			return err
-		}
-		current = 1
+func recordLegacyBaseline(tx *sql.Tx, state schemaState) (int, error) {
+	if state.hasMigrations || !state.isLegacyV1 {
+		return state.version, nil
 	}
+	_, err := tx.Exec(`insert or ignore into schema_migrations(version, name, applied_at) values(1, 'initial_schema_legacy', ?)`, timestampUTC())
+	return 1, err
+}
 
+func applyMigrations(tx *sql.Tx, current int) error {
 	for _, m := range migrations {
 		if m.version <= current {
 			continue
 		}
-		if _, err := tx.Exec(m.sql); err != nil {
-			return fmt.Errorf("migration %03d %s: %w", m.version, m.name, err)
-		}
-		if _, err := tx.Exec(`insert into schema_migrations(version, name, applied_at) values(?,?,?)`, m.version, m.name, time.Now().UTC().Format(time.RFC3339)); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", m.version)); err != nil {
+		if err := applyMigration(tx, m); err != nil {
 			return err
 		}
 	}
-	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", config.SchemaVersion)); err != nil {
+	return nil
+}
+
+func applyMigration(tx *sql.Tx, m migration) error {
+	if _, err := tx.Exec(m.sql); err != nil {
+		return fmt.Errorf("migration %03d %s: %w", m.version, m.name, err)
+	}
+	if _, err := tx.Exec(`insert into schema_migrations(version, name, applied_at) values(?,?,?)`, m.version, m.name, timestampUTC()); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return setUserVersion(tx, m.version)
+}
+
+func setUserVersion(tx *sql.Tx, version int) error {
+	_, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", version))
+	return err
+}
+
+func timestampUTC() string {
+	return time.Now().UTC().Format(time.RFC3339)
 }
 
 func inspectSchema(conn *sql.DB) (schemaState, error) {

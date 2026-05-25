@@ -150,6 +150,35 @@ func (c *Cache) keepExistingCover(path, source string) (Result, error) {
 }
 
 func (c *Cache) fetchLibraryCapsuleSourceURLs(ctx context.Context, appIDs []int64) (map[int64]string, error) {
+	endpoint, encodedForm, err := storeItemsRequestEndpoint(appIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < 4; attempt++ {
+		if err := waitStoreItemsRetry(ctx, attempt); err != nil {
+			return nil, err
+		}
+		body, retry, err := c.doStoreItemsRequest(ctx, endpoint, encodedForm)
+		if err != nil {
+			lastErr = err
+			if retry {
+				continue
+			}
+			return nil, err
+		}
+
+		var payload storeItemsResponse
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return nil, fmt.Errorf("decode Steam store items: %w", err)
+		}
+		return storeItemsSourceURLs(payload), nil
+	}
+	return nil, lastErr
+}
+
+func storeItemsRequestEndpoint(appIDs []int64) (string, string, error) {
 	request := storeItemsRequest{IDs: make([]storeItemID, 0, len(appIDs))}
 	for _, appID := range appIDs {
 		request.IDs = append(request.IDs, storeItemID{AppID: appID})
@@ -159,70 +188,76 @@ func (c *Cache) fetchLibraryCapsuleSourceURLs(ctx context.Context, appIDs []int6
 
 	inputJSON, err := json.Marshal(request)
 	if err != nil {
-		return nil, err
+		return "", "", err
 	}
-	form := url.Values{"input_json": {string(inputJSON)}}
-	encodedForm := form.Encode()
-	endpoint := storeItemsEndpoint + "?" + encodedForm
+	encodedForm := url.Values{"input_json": {string(inputJSON)}}.Encode()
+	return storeItemsEndpoint + "?" + encodedForm, encodedForm, nil
+}
 
-	var lastErr error
-	for attempt := 0; attempt < 4; attempt++ {
-		if attempt > 0 {
-			d := time.Duration(300*(1<<uint(attempt-1))) * time.Millisecond
-			select {
-			case <-time.After(d):
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-		}
+func waitStoreItemsRetry(ctx context.Context, attempt int) error {
+	if attempt == 0 {
+		return nil
+	}
+	d := time.Duration(300*(1<<uint(attempt-1))) * time.Millisecond
+	select {
+	case <-time.After(d):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, strings.NewReader(encodedForm))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Accept", "application/json")
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+func (c *Cache) doStoreItemsRequest(ctx context.Context, endpoint, encodedForm string) ([]byte, bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, strings.NewReader(encodedForm))
+	if err != nil {
+		return nil, false, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-		resp, err := c.HTTPClient.Do(req)
-		if err != nil {
-			lastErr = err
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, true, err
+	}
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	resp.Body.Close()
+	if readErr != nil {
+		return nil, false, readErr
+	}
+	if storeItemsRetryStatus(resp.StatusCode) {
+		return nil, true, fmt.Errorf("Steam store items returned %s", resp.Status)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, false, fmt.Errorf("Steam store items returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	return body, false, nil
+}
+
+func storeItemsRetryStatus(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable:
+		return true
+	default:
+		return false
+	}
+}
+
+func storeItemsSourceURLs(payload storeItemsResponse) map[int64]string {
+	urls := make(map[int64]string, len(payload.Response.StoreItems))
+	for _, item := range payload.Response.StoreItems {
+		if item.Success != 1 {
 			continue
 		}
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-		resp.Body.Close()
-		if readErr != nil {
-			return nil, readErr
+		appID := item.AppID
+		if appID == 0 {
+			appID = item.ID
 		}
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusInternalServerError || resp.StatusCode == http.StatusServiceUnavailable {
-			lastErr = fmt.Errorf("Steam store items returned %s", resp.Status)
-			continue
+		sourceURL := coverSourceURL(appID, item.Assets.LibraryCapsule)
+		if appID > 0 && sourceURL != "" {
+			urls[appID] = sourceURL
 		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, fmt.Errorf("Steam store items returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
-		}
-
-		var payload storeItemsResponse
-		if err := json.Unmarshal(body, &payload); err != nil {
-			return nil, fmt.Errorf("decode Steam store items: %w", err)
-		}
-
-		urls := make(map[int64]string, len(payload.Response.StoreItems))
-		for _, item := range payload.Response.StoreItems {
-			if item.Success != 1 {
-				continue
-			}
-			appID := item.AppID
-			if appID == 0 {
-				appID = item.ID
-			}
-			sourceURL := coverSourceURL(appID, item.Assets.LibraryCapsule)
-			if appID > 0 && sourceURL != "" {
-				urls[appID] = sourceURL
-			}
-		}
-		return urls, nil
 	}
-	return nil, lastErr
+	return urls
 }
 
 func coverSourceURL(appID int64, libraryCapsule string) string {

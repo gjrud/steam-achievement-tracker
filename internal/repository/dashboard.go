@@ -70,49 +70,12 @@ func (r *Repository) GameCards(profileID int64, filter string) ([]GameCard, erro
 	defer rows.Close()
 	var cards []GameCard
 	for rows.Next() {
-		var c GameCard
-		var coverPath, coverSource, coverDownloadedAt, lastErr, lastErrAt, lastSynced, flagDisabledReason sql.NullString
-		var missing, score sql.NullFloat64
-		var has, completed, was, newly, warning, manual, dlc, flagDisabled int
-		if err := rows.Scan(&c.AppID, &c.Name, &c.PlaytimeForever, &coverPath, &coverSource, &coverDownloadedAt, &has, &c.AchievementStatus, &c.TotalAchievements, &c.UnlockedAchievements, &c.CompletionPercent, &missing, &score, &completed, &was, &newly, &warning, &lastErr, &lastErrAt, &lastSynced, &manual, &dlc, &flagDisabled, &flagDisabledReason); err != nil {
+		c, err := scanGameCard(rows, tagMap)
+		if err != nil {
 			return nil, err
 		}
-		c.CoverURL = coverURL(coverPath, coverDownloadedAt)
-		c.HasAchievements = has == 1
-		c.MissingAvgUnlock = floatPtr(missing)
-		c.SuggestionScore = floatPtr(score)
-		c.IsCompleted = completed == 1
-		c.WasCompleted = was == 1
-		c.NewlyIncomplete = newly == 1
-		c.SyncWarning = warning == 1
-		c.LastError = stringPtr(lastErr)
-		c.LastErrorAt = stringPtr(lastErrAt)
-		c.LastSyncedAt = stringPtr(lastSynced)
-		c.ManualWasCompleted = manual == 1
-		c.MissingDLC = dlc == 1
-		c.Disabled = flagDisabled == 1
-		c.Tags = tagMap[c.AppID]
-		if flagDisabledReason.Valid {
-			c.DisabledReason = stringPtr(flagDisabledReason)
-			c.ManualDisabled = flagDisabled == 1 && flagDisabledReason.String == "manual"
-		}
-		switch filter {
-		case "completed":
-			if !c.Disabled && c.IsCompleted {
-				cards = append(cards, c)
-			}
-		case "warnings":
-			if !c.Disabled && c.SyncWarning {
-				cards = append(cards, c)
-			}
-		case "disabled":
-			if c.Disabled {
-				cards = append(cards, c)
-			}
-		default:
-			if !c.Disabled && !c.IsCompleted {
-				cards = append(cards, c)
-			}
+		if includeGameCard(c, filter) {
+			cards = append(cards, c)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -120,6 +83,74 @@ func (r *Repository) GameCards(profileID int64, filter string) ([]GameCard, erro
 	}
 	sortGameCards(cards, filter)
 	return cards, nil
+}
+
+type gameCardScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanGameCard(scanner gameCardScanner, tagMap map[int64][]string) (GameCard, error) {
+	var c GameCard
+	var coverPath, ignoredCoverSource, coverDownloadedAt, lastErr, lastErrAt, lastSynced, flagDisabledReason sql.NullString
+	var missing, score sql.NullFloat64
+	var has, completed, was, newly, warning, manual, dlc, flagDisabled int
+	if err := scanner.Scan(&c.AppID, &c.Name, &c.PlaytimeForever, &coverPath, &ignoredCoverSource, &coverDownloadedAt, &has, &c.AchievementStatus, &c.TotalAchievements, &c.UnlockedAchievements, &c.CompletionPercent, &missing, &score, &completed, &was, &newly, &warning, &lastErr, &lastErrAt, &lastSynced, &manual, &dlc, &flagDisabled, &flagDisabledReason); err != nil {
+		return GameCard{}, err
+	}
+	applyGameCardScalars(&c, has, completed, was, newly, warning, manual, dlc, flagDisabled)
+	c.CoverURL = coverURL(coverPath, coverDownloadedAt)
+	c.MissingAvgUnlock = floatPtr(missing)
+	c.SuggestionScore = floatPtr(score)
+	c.LastError = stringPtr(lastErr)
+	c.LastErrorAt = stringPtr(lastErrAt)
+	c.LastSyncedAt = stringPtr(lastSynced)
+	c.Tags = tagMap[c.AppID]
+	applyDisabledReason(&c, flagDisabledReason)
+	return c, nil
+}
+
+func applyGameCardScalars(c *GameCard, has, completed, was, newly, warning, manual, dlc, flagDisabled int) {
+	c.HasAchievements = has == 1
+	c.IsCompleted = completed == 1
+	c.WasCompleted = was == 1
+	c.NewlyIncomplete = newly == 1
+	c.SyncWarning = warning == 1
+	c.ManualWasCompleted = manual == 1
+	c.MissingDLC = dlc == 1
+	c.Disabled = flagDisabled == 1
+}
+
+func applyDisabledReason(c *GameCard, reason sql.NullString) {
+	if !reason.Valid {
+		return
+	}
+	c.DisabledReason = stringPtr(reason)
+	c.ManualDisabled = c.Disabled && reason.String == "manual"
+}
+
+func includeGameCard(c GameCard, filter string) bool {
+	switch filter {
+	case "completed":
+		return isActiveCompleted(c)
+	case "warnings":
+		return isActiveWarning(c)
+	case "disabled":
+		return c.Disabled
+	default:
+		return isSuggestionCard(c)
+	}
+}
+
+func isActiveCompleted(c GameCard) bool {
+	return !c.Disabled && c.IsCompleted
+}
+
+func isActiveWarning(c GameCard) bool {
+	return !c.Disabled && c.SyncWarning
+}
+
+func isSuggestionCard(c GameCard) bool {
+	return !c.Disabled && !c.IsCompleted
 }
 
 func (r *Repository) ProfileGame(profileID, appID int64) (ProfileGameState, error) {

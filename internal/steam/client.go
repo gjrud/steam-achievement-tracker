@@ -242,55 +242,90 @@ func (c *Client) GetGlobalAchievementPercentages(ctx context.Context, appID int6
 }
 
 func (c *Client) getJSON(ctx context.Context, path string, q url.Values, target any) error {
-	base := strings.TrimRight(c.BaseURL, "/")
-	endpoint := base + path
-	if strings.Contains(path, "?") {
-		endpoint = base + path + "&" + q.Encode()
-	} else {
-		endpoint = base + path + "?" + q.Encode()
-	}
+	endpoint := c.endpoint(path, q)
 	var lastErr error
 	for attempt := 0; attempt < 4; attempt++ {
-		if attempt > 0 {
-			d := c.retryDelay(attempt)
-			if d > 0 {
-				select {
-				case <-time.After(d):
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			}
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-		if err != nil {
+		if err := c.waitRetry(ctx, attempt); err != nil {
 			return err
 		}
-		resp, err := c.HTTPClient.Do(req)
+		body, retry, err := c.getJSONBody(ctx, path, endpoint)
 		if err != nil {
 			lastErr = err
-			continue
+			if retry {
+				continue
+			}
+			return err
 		}
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-		resp.Body.Close()
-		if readErr != nil {
-			return readErr
-		}
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusInternalServerError || resp.StatusCode == http.StatusServiceUnavailable {
-			lastErr = fmt.Errorf("Steam API %s returned %s", path, resp.Status)
-			continue
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("Steam API %s returned %s: %s", path, resp.Status, strings.TrimSpace(string(body)))
-		}
-		if len(body) == 0 {
-			return nil
-		}
-		if err := json.Unmarshal(body, target); err != nil {
-			return fmt.Errorf("decode Steam API %s: %w", path, err)
-		}
-		return nil
+		return decodeJSONBody(path, body, target)
 	}
 	return lastErr
+}
+
+func (c *Client) endpoint(path string, q url.Values) string {
+	base := strings.TrimRight(c.BaseURL, "/")
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return base + path + separator + q.Encode()
+}
+
+func (c *Client) waitRetry(ctx context.Context, attempt int) error {
+	if attempt == 0 {
+		return nil
+	}
+	d := c.retryDelay(attempt)
+	if d <= 0 {
+		return nil
+	}
+	select {
+	case <-time.After(d):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *Client) getJSONBody(ctx context.Context, path, endpoint string) ([]byte, bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, true, err
+	}
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	resp.Body.Close()
+	if readErr != nil {
+		return nil, false, readErr
+	}
+	if retryableSteamStatus(resp.StatusCode) {
+		return nil, true, fmt.Errorf("Steam API %s returned %s", path, resp.Status)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, false, fmt.Errorf("Steam API %s returned %s: %s", path, resp.Status, strings.TrimSpace(string(body)))
+	}
+	return body, false, nil
+}
+
+func retryableSteamStatus(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable:
+		return true
+	default:
+		return false
+	}
+}
+
+func decodeJSONBody(path string, body []byte, target any) error {
+	if len(body) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(body, target); err != nil {
+		return fmt.Errorf("decode Steam API %s: %w", path, err)
+	}
+	return nil
 }
 
 func (c *Client) retryDelay(attempt int) time.Duration {
