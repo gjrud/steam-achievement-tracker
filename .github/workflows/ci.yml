@@ -44,18 +44,22 @@ jobs:
         run: npm ci
         working-directory: frontend
 
-      # main.go embeds frontend/dist, so this must exist before any Go step.
-      - name: Build frontend
-        run: npm run build
-        working-directory: frontend
-
-      # Generates the (git-ignored) frontend/wailsjs bindings so the drift check
-      # between the test mock and the real bindings runs instead of being skipped.
+      # frontend/wailsjs (git-ignored) is needed by the frontend build and by the
+      # mock drift check, but generating it compiles the Go app, whose main.go
+      # embeds frontend/dist. Break the cycle with a placeholder dist; the real
+      # build below overwrites it.
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
 
       - name: Generate Wails bindings
-        run: wails generate module -tags webkit2_41
+        run: |
+          mkdir -p frontend/dist
+          touch frontend/dist/.gitkeep
+          wails generate module -tags webkit2_41
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: frontend
 
       - name: Frontend tests
         run: npm test
