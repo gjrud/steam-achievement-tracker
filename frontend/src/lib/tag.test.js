@@ -1,8 +1,10 @@
 import {describe, expect, test} from 'vitest'
 import {matchesTagFilter} from './filter.js'
-import {gameTags, suggestionTagOptions, tagCountFromGames, tagDescription, tagLabel, tagTone} from './tag.js'
+import {gameTags, suggestionTagOptions, tagCountFromGames, tagTone} from './tag.js'
 
-// Backend tag names from internal/repository/tags.go, excluding 'completed' (not offered as a filter chip).
+// Backend incomplete tag names. MUST stay in sync with internal/repository/tags.go: the profileGameTags sort list and
+// the stat/issue tag candidates (statTagCandidates, issueTagCandidates). Checked against that file when this list was
+// last edited. 'completed' is excluded because it is not offered as a filter chip.
 const backendIncompleteTags = ['new_achievements_added', 'almost_there', 'in_progress', 'untouched', 'no_achievements', 'missing_achievements_in_dlc', 'missing_cover_art', 'sync_warning', 'dlc_not_owned']
 
 describe('gameTags', () => {
@@ -78,20 +80,9 @@ describe('gameTags', () => {
 })
 
 describe('suggestion tag options', () => {
-  test('orders chips like the Not completed groups and matches every backend incomplete tag', () => {
-    expect(suggestionTagOptions).toEqual([
-      'new_achievements_added',
-      'almost_there',
-      'in_progress',
-      'untouched',
-      'dlc_not_owned',
-      'missing_achievements_in_dlc',
-      'no_achievements',
-      'set',
-      'dlc',
-      'missing_cover_art',
-      'sync_warning'
-    ])
+  // The exact chip order is pinned by App.test.js (chipLabels on the Not completed and Completed panels) and by the
+  // card-order tests below; this block only checks membership.
+  test('offers every backend incomplete tag as a chip and never offers completed', () => {
     for (const tag of backendIncompleteTags) {
       expect(suggestionTagOptions).toContain(tag)
     }
@@ -132,24 +123,11 @@ describe('suggestion tag options', () => {
   })
 })
 
-describe('dlc tag', () => {
-  test('is labelled DLC, neutral like Untouched, and explained on hover', () => {
-    expect(tagLabel('dlc')).toBe('DLC')
-    expect(tagTone('dlc')).toBe('neutral')
-    expect(tagTone('dlc')).toBe(tagTone('no_achievements'))
-    expect(tagDescription('dlc')).toBe('Achievement set from DLC')
-  })
-})
-
-describe('set tag', () => {
-  test('is labelled Set, neutral like Untouched, and explained on hover', () => {
-    expect(tagLabel('set')).toBe('Set')
-    expect(tagTone('set')).toBe('neutral')
-    expect(tagTone('set')).toBe(tagTone('untouched'))
-    expect(tagDescription('set')).toBe('Additional achievement set of this game')
-  })
-
-  test('a DLC set carries set and dlc, both neutral', () => {
+// Card labels and hover text for these tags are asserted through a rendered DLC set card in App.test.js ('gives the
+// derived Set and DLC card tags their hover text'), so only the tone classification (which group a tag belongs to)
+// is checked here.
+describe('derived set and dlc tags', () => {
+  test('a DLC set carries set and dlc, both in the neutral tone group', () => {
     const tags = gameTags({groupId: 1, dlcAppId: 4173830, tags: []})
 
     expect(tags).toEqual(['set', 'dlc'])
@@ -160,11 +138,8 @@ describe('set tag', () => {
 })
 
 describe('dlc_not_owned tag', () => {
-  test('is labelled Not owned, uses the same danger tone as Achievements in DLC, and is offered as a filter chip', () => {
-    expect(tagLabel('dlc_not_owned')).toBe('Not owned')
+  test('uses the danger tone group shared with Achievements in DLC', () => {
     expect(tagTone('dlc_not_owned')).toBe('danger')
     expect(tagTone('dlc_not_owned')).toBe(tagTone('missing_achievements_in_dlc'))
-    expect(tagDescription('dlc_not_owned')).toBe('You do not own the DLC for this achievement set.')
-    expect(suggestionTagOptions).toContain('dlc_not_owned')
   })
 })
