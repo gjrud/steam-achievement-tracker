@@ -45,7 +45,7 @@ Package names differ by distribution. On Debian/Ubuntu-style systems, look for p
 - Wails v2 CLI. Example:
 
   ```sh
-  go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+  go install github.com/wailsapp/wails/v2/cmd/wails@v2.16.0
   ```
 
 - Linux build dependencies for Wails and CGO: C compiler, `pkg-config`, GTK3 development headers, WebKit2GTK 4.1 development headers, and libsoup 3 development headers.
