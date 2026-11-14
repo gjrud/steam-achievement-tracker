@@ -215,7 +215,7 @@ The main tabs are **Not completed**, **Completed**, **Sync errors**, **Disabled*
 Steam groups achievements into sets. A game with several sets (for example Team Fortress 2 classes, or a game with DLC) shows **one card per set** instead of one card for the whole game:
 
 - A set is completed on its own. A completed set moves to **Completed** while its unfinished siblings stay in **Not completed**.
-- Sets are named after the game when Steam does not name them, for example `Team Fortress 2 – Scout`. The card title shows the set name, and a **DLC** tag marks sets that belong to a DLC.
+- Sets are named after the game when Steam does not name them, for example `Team Fortress 2 – Scout`. The card title shows the set name, a **Set** tag marks every set other than the game's base set, and a **DLC** tag marks sets that belong to a DLC.
 - **DLC** sets (sets tied to a DLC app) are shown whether or not you own the DLC. A set for DLC you do not own is tagged **Not owned**, sits in **Not completed** with no progress tags, and is left out of the overall achievement totals, so it does not lower your overall completion percentage. Once you own the DLC, the next sync removes the tag and counts the set normally.
 - Achievements marked **archived** by Steam are not counted toward a set's total or completion. Locked archived achievements never block completion.
 - Set cards show the same playtime as their game, because Steam reports playtime per game.
@@ -246,7 +246,7 @@ This view lists non-disabled games that are not currently complete. Cards show c
 
 ![Not completed view](docs/not-completed.gif)
 
-Suggestion tags include **New achievements added**, **Almost there**, **In progress**, **Untouched**, **No achievements**, **DLC**, **Not owned**, **Achievements in DLC**, **Missing cover art**, and **Sync error**. Use the search box to filter by title and the tag chips to filter the **Not completed** list. Each chip shows how many cards match it.
+Suggestion tags include **New achievements added**, **Almost there**, **In progress**, **Untouched**, **Not owned**, **Achievements in DLC**, **No achievements**, **Set**, **DLC**, **Missing cover art**, and **Sync error**. Use the search box to filter by title and the tag chips to filter the **Not completed** and **Completed** lists. Each chip shows how many cards match it.
 
 #### Tags and sorting
 
@@ -259,6 +259,8 @@ The **Not completed** list is sorted to surface likely finishable games first:
 
 A set that is both **Not owned** and flagged **Achievements in DLC** is listed in group 2.
 
+The tag filter chips follow the same order as these groups: **New achievements added**, **Almost there**, **In progress**, **Untouched**, **Not owned**, **Achievements in DLC**, **No achievements**, **Set**, **DLC**, **Missing cover art**, **Sync error**. The chips appear in both **Not completed** and **Completed**, and each view lists only the tags that at least one of its cards carries. The active tag chip resets whenever you switch views; search still applies.
+
 Within active achievement games, the app sorts by suggestion score, highest first. Suggestion score is based on completion percentage and, when Steam global achievement percentages are available, the average unlock rate of the achievements you are missing. Games with a score of `40` or higher get the **Almost there** tag; other started games get **In progress**.
 
 Tag meanings:
@@ -268,6 +270,7 @@ Tag meanings:
 - **In progress**: the game has progress, but its suggestion score is below the **Almost there** threshold.
 - **Untouched**: the game has no recorded playtime.
 - **No achievements**: Steam reports no achievements for the game.
+- **Set**: the card is any achievement set other than the game's base set. Shown on every such card and filterable. A DLC set carries both **Set** and **DLC**.
 - **DLC**: the set belongs to a DLC app. Shown on every DLC set card and filterable.
 - **Not owned**: the set belongs to a DLC you do not own. It shows no progress tags, since it cannot be progressed.
 - **Achievements in DLC**: remaining achievements are manually flagged as DLC-related. Completed entries never show this tag.
@@ -276,7 +279,7 @@ Tag meanings:
 
 ### Review completed games
 
-The **Completed** tab lists non-disabled games where all known achievements are unlocked. Use search to filter by title. Right-click a card to change local flags or disable the game.
+The **Completed** tab lists non-disabled games where all known achievements are unlocked. Use search to filter by title, and the tag chips to narrow the list to cards carrying a given tag (for example **Set**, **DLC**, or **Missing cover art**). Right-click a card to change local flags or disable the game.
 
 <img src="docs/completed.png" alt="Completed games view" width="640">
 

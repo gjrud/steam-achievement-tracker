@@ -272,6 +272,7 @@ describe('App dashboard views', () => {
     const notOwnedOption = within(panel).getByRole('button', {name: /^Not owned\s+1$/})
     expect(within(panel).getByRole('button', {name: /^Achievements in DLC\s+1$/})).toBeInTheDocument()
     expect(within(panel).getByRole('button', {name: /^All\s+3$/})).toBeInTheDocument()
+    expect(within(panel).getByRole('button', {name: /^Set\s+2$/})).toBeInTheDocument()
 
     // Every DLC-bound set card shows the DLC chip, and the chip counts toward the filter.
     const ownedCard = screen.getByRole('heading', {name: 'DLC Owned Pack'}).closest('article')
@@ -290,6 +291,111 @@ describe('App dashboard views', () => {
 
     await user.click(within(panel).getByRole('button', {name: 'Clear tag filter'}))
     expect(screen.getByRole('heading', {name: 'Base Game'})).toBeInTheDocument()
+  })
+
+  test('orders not completed filter chips like the Not completed groups', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState({
+        suggestions: [
+          game({appid: 20, name: 'Late Sync', tags: ['sync_warning'], syncWarning: true}),
+          game({appid: 21, name: 'Art Missing', tags: ['missing_cover_art']}),
+          game({appid: 22, name: 'Unowned Set', groupId: 1, dlcAppId: 4173840, tags: ['dlc_not_owned'], dlcNotOwned: true}),
+          game({appid: 23, name: 'No Achievements Game', tags: ['no_achievements']}),
+          game({appid: 24, name: 'Untouched Game', tags: ['untouched']}),
+          game({appid: 25, name: 'Flagged DLC Set', groupId: 2, dlcAppId: 4173841, tags: ['missing_achievements_in_dlc'], missingAchievementsInDLC: true}),
+          game({appid: 26, name: 'Progress Game', tags: ['in_progress']}),
+          game({appid: 27, name: 'Almost Game', tags: ['almost_there']}),
+          game({appid: 28, name: 'New Achievements Game', tags: ['new_achievements_added']})
+        ]
+      }))
+    })
+
+    render(App)
+
+    const panel = await screen.findByLabelText('Filter not completed games by tag')
+    expect(chipLabels(panel)).toEqual(['All', 'New achievements added', 'Almost there', 'In progress', 'Untouched', 'Not owned', 'Achievements in DLC', 'No achievements', 'Set', 'DLC', 'Missing cover art', 'Sync error'])
+  })
+
+  test('filters completed games by the tags their cards carry', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState({
+        completed: [
+          game({appid: 6, name: 'Portal', tags: ['completed'], isCompleted: true, completionPercent: 100, unlockedAchievements: 15, totalAchievements: 15}),
+          game({appid: 30, groupId: 1, name: 'Completed DLC Pack', setName: 'Completed DLC Pack', dlcAppId: 4173830, tags: ['completed'], isCompleted: true, completionPercent: 100, unlockedAchievements: 10, totalAchievements: 10}),
+          game({appid: 31, name: 'Completed Missing Art', tags: ['completed', 'missing_cover_art'], isCompleted: true, completionPercent: 100, unlockedAchievements: 5, totalAchievements: 5}),
+          game({appid: 32, name: 'Completed Stale Issue', tags: ['completed', 'new_achievements_added', 'missing_achievements_in_dlc'], isCompleted: true, completionPercent: 100, unlockedAchievements: 5, totalAchievements: 5})
+        ]
+      }))
+    })
+    const user = userEvent.setup()
+
+    render(App)
+
+    await user.click(await screen.findByRole('button', {name: 'Completed'}))
+
+    const panel = await screen.findByLabelText('Filter completed games by tag')
+    expect(chipLabels(panel)).toEqual(['All', 'Set', 'DLC', 'Missing cover art'])
+    expect(within(panel).getByRole('button', {name: /^All\s+4$/})).toBeInTheDocument()
+    expect(within(panel).getByRole('button', {name: /^Set\s+1$/})).toBeInTheDocument()
+    expect(within(panel).getByRole('button', {name: /^DLC\s+1$/})).toBeInTheDocument()
+    expect(within(panel).getByRole('button', {name: /^Missing cover art\s+1$/})).toBeInTheDocument()
+    expect(within(screen.getByRole('heading', {name: 'Completed Stale Issue'}).closest('article')).queryByText('Achievements in DLC')).not.toBeInTheDocument()
+    expect(within(screen.getByRole('heading', {name: 'Completed Stale Issue'}).closest('article')).queryByText('New achievements added')).not.toBeInTheDocument()
+
+    await user.click(within(panel).getByRole('button', {name: /^DLC\s+1$/}))
+    expect(screen.getByRole('heading', {name: 'Completed DLC Pack'})).toBeInTheDocument()
+    expect(screen.queryByRole('heading', {name: 'Portal'})).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', {name: 'Completed Missing Art'})).not.toBeInTheDocument()
+
+    await user.type(screen.getByPlaceholderText('Search games in this view'), 'portal')
+    expect(screen.getByText('No matching games.')).toBeInTheDocument()
+
+    await user.click(within(panel).getByRole('button', {name: 'Clear tag filter'}))
+    expect(screen.getByRole('heading', {name: 'Portal'})).toBeInTheDocument()
+    expect(screen.queryByRole('heading', {name: 'Completed DLC Pack'})).not.toBeInTheDocument()
+  })
+
+  test('resets the tag filter when switching between Not completed and Completed', async () => {
+    // Both views carry a set card (groupId 1, so the 'set' tag), so the Set chip stays available after a switch
+    // and only the reset in changeView can clear the active filter.
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState({
+        suggestions: [
+          game({appid: 30, groupId: 1, name: 'Hades – Expansion', setName: 'Expansion', tags: ['almost_there'], completionPercent: 86, unlockedAchievements: 43, totalAchievements: 50}),
+          game({appid: 2, name: 'Vampire Survivors', tags: ['new_achievements_added'], completionPercent: 96, unlockedAchievements: 120, totalAchievements: 125})
+        ],
+        completed: [
+          game({appid: 31, groupId: 1, name: 'Completed DLC Pack', setName: 'Completed DLC Pack', dlcAppId: 4173830, tags: ['completed'], isCompleted: true, completionPercent: 100, unlockedAchievements: 10, totalAchievements: 10})
+        ]
+      }))
+    })
+    const user = userEvent.setup()
+
+    render(App)
+
+    let notCompletedPanel = await screen.findByLabelText('Filter not completed games by tag')
+    await user.click(within(notCompletedPanel).getByRole('button', {name: /^Set\s+1$/}))
+    expect(screen.getByRole('heading', {name: 'Hades – Expansion'})).toBeInTheDocument()
+    expect(screen.queryByRole('heading', {name: 'Vampire Survivors'})).not.toBeInTheDocument()
+    expect(within(notCompletedPanel).getByRole('button', {name: /^Set\s+1$/})).toHaveClass('active')
+
+    await user.click(screen.getByRole('button', {name: 'Completed'}))
+    expect(await screen.findByRole('heading', {name: 'Completed DLC Pack'})).toBeInTheDocument()
+    const completedPanel = screen.getByLabelText('Filter completed games by tag')
+    expect(within(completedPanel).getByRole('button', {name: /^All\s+1$/})).toHaveClass('active')
+    expect(within(completedPanel).getByRole('button', {name: /^Set\s+1$/})).not.toHaveClass('active')
+    expect(screen.queryByRole('button', {name: 'Clear tag filter'})).not.toBeInTheDocument()
+
+    await user.click(within(completedPanel).getByRole('button', {name: /^Set\s+1$/}))
+    expect(screen.getByRole('heading', {name: 'Completed DLC Pack'})).toBeInTheDocument()
+    expect(within(completedPanel).getByRole('button', {name: /^Set\s+1$/})).toHaveClass('active')
+
+    await user.click(screen.getByRole('button', {name: 'Not completed'}))
+    expect(await screen.findByRole('heading', {name: 'Vampire Survivors'})).toBeInTheDocument()
+    notCompletedPanel = screen.getByLabelText('Filter not completed games by tag')
+    expect(within(notCompletedPanel).getByRole('button', {name: /^All\s+2$/})).toHaveClass('active')
+    expect(within(notCompletedPanel).getByRole('button', {name: /^Set\s+1$/})).not.toHaveClass('active')
+    expect(screen.queryByRole('button', {name: 'Clear tag filter'})).not.toBeInTheDocument()
   })
 
   test('passes groupId to game actions from a set card', async () => {
@@ -421,6 +527,13 @@ describe('GameCard cover art', () => {
     expect(cover.querySelector('img')).toBeNull()
   })
 })
+
+// chipLabels returns the filter chip names in a tag filter panel, without counts.
+function chipLabels(panel) {
+  return within(panel).getAllByRole('button')
+    .filter((button) => button.classList.contains('tag-filter'))
+    .map((button) => button.textContent.replace(/\s*\d+$/, '').trim())
+}
 
 function baseState() {
   return {

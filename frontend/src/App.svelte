@@ -144,6 +144,12 @@
     }
   }
 
+  function changeView(value) {
+    if (value === activeView) return
+    activeView = value
+    activeTagFilter = ''
+  }
+
   function requestClearActiveUserData() {
     if (clearingData || !state?.profile) return
     clearConfirmInput = ''
@@ -168,6 +174,7 @@
       if (token === stateRequestToken) {
         state = nextState
         activeView = 'suggestions'
+        activeTagFilter = ''
         profileInput = ''
         preview = null
         clearConfirmOpen = false
@@ -264,15 +271,17 @@
   $: disabled = sortByTitle(dashboard?.disabled || [])
   $: normalizedViewSearch = viewSearch.trim().toLowerCase()
   $: warningGames = (dashboard?.warnings || []).filter((game) => game.syncWarning)
-  $: suggestionTagCounts = Object.fromEntries(suggestionTagOptions.map((tag) => [tag, tagCountFromGames(suggestions, tag)]))
-  $: visibleSuggestionTagOptions = suggestionTagOptions.filter((tag) => suggestionTagCounts[tag] > 0)
-  $: if (activeView !== 'suggestions' || (activeTagFilter && tagCountFromGames(suggestions, activeTagFilter) === 0)) activeTagFilter = ''
+  // Tag filter chips follow the active view's list; views without a tag filter get no games and no chips.
+  $: tagFilterGames = activeView === 'completed' ? completed : activeView === 'suggestions' ? suggestions : []
+  $: tagFilterCounts = Object.fromEntries(suggestionTagOptions.map((tag) => [tag, tagCountFromGames(tagFilterGames, tag)]))
+  $: visibleTagFilterOptions = suggestionTagOptions.filter((tag) => tagFilterCounts[tag] > 0)
+  $: if (activeTagFilter && !tagFilterCounts[activeTagFilter]) activeTagFilter = ''
   $: syncCardTone = syncIsRunning ? 'info' : latestSyncRun?.status === 'partial' || latestSyncRun?.status === 'failed' ? 'warn' : ''
   $: filteredSuggestions = suggestions.filter((game) => matchesViewFilters(game, normalizedViewSearch, activeTagFilter))
-  $: filteredCompleted = completed.filter((game) => matchesSearchQuery(game, normalizedViewSearch))
+  $: filteredCompleted = completed.filter((game) => matchesViewFilters(game, normalizedViewSearch, activeTagFilter))
   $: filteredWarnings = warningGames.filter((game) => matchesSearchQuery(game, normalizedViewSearch))
   $: filteredDisabled = disabled.filter((game) => matchesSearchQuery(game, normalizedViewSearch))
-  $: suggestionsFiltered = Boolean(viewSearch.trim() || activeTagFilter)
+  $: viewFiltered = Boolean(viewSearch.trim() || activeTagFilter)
   $: clearConfirmText = state?.profile ? state.profile.steamId64 || state.profile.displayName : ''
 </script>
 
@@ -312,18 +321,18 @@
     {viewSearch}
     {activeTagFilter}
     bind:viewSearchInput
-    {suggestions}
-    {suggestionTagCounts}
-    {visibleSuggestionTagOptions}
+    {tagFilterGames}
+    {tagFilterCounts}
+    {visibleTagFilterOptions}
     {filteredSuggestions}
     {filteredCompleted}
     {filteredWarnings}
     {filteredDisabled}
-    {suggestionsFiltered}
+    {viewFiltered}
     {gameActionLoading}
     {clearingData}
     onSyncNow={syncNow}
-    onActiveViewChange={(value) => (activeView = value)}
+    onActiveViewChange={changeView}
     onViewSearch={(value) => (viewSearch = value)}
     onActiveTagFilter={(value) => (activeTagFilter = value)}
     onOpenGameMenu={openGameMenu}
