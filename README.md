@@ -162,6 +162,29 @@ cd ..
 go test ./...
 ```
 
+Run the Go tests with the race detector (several tests, such as the asset handler and sync cancellation, only catch regressions under `-race`):
+
+```sh
+go test -race ./...
+```
+
+### Test suite layout
+
+- Go tests drive package APIs against real SQLite and a real image cache; only Steam HTTP endpoints are faked. `app_test.go` covers the Wails-bound orchestration with `HOME` set to a temp dir and the `go-keyring` mock backend.
+- Tests that need real retry paths without sleeping use `steam.Client.SetRetryBackoff`.
+- Frontend tests (vitest) cover sync polling with fake timers, error banners for rejected Wails calls, keyboard/modal flows, and a drift check between `frontend/src/test/wails-app-mock.js` and the generated `frontend/wailsjs` bindings (skipped when the bindings are absent; regenerate with `wails generate module`).
+- There is no coverage threshold. Coverage numbers overstate safety at the orchestration and async-UI boundaries, so use mutation testing as a diagnostic instead.
+
+### Mutation testing
+
+[gremlins](https://github.com/go-gremlins/gremlins) is configured in `.gremlins.yaml` (2 workers, timeout coefficient 20, `frontend/`, `wailsjs`, and `main.go` excluded). Run it per package, because whole-module runs report false timeouts:
+
+```sh
+gremlins unleash ./internal/<pkg> -o tmp/gremlins/<pkg>.json
+```
+
+Distrust any run with more than about 5% timed-out mutants; rerun with a higher coefficient first. Gremlins is a diagnostic only and must not be a CI gate.
+
 ## Usage
 
 ### Set up the API key
@@ -198,6 +221,9 @@ Sync behavior:
 - Steam API requests retry transient `429`, `500`, and `503` responses.
 - Failed per-game refreshes keep prior local data when available and appear in **Sync errors**.
 - If any per-game refresh fails, the sync run is marked `partial`.
+- A manually disabled game stays manually disabled if Steam stops reporting it and later reports it again; only the automatic "no longer owned" disable is lifted.
+- A cancelled sync (for example on app shutdown) ends the run as `failed` with no per-game warnings; games interrupted mid-sync keep their previously synced data.
+- Steam error text shown in the UI, saved as warnings, or written to logs never contains the Steam Web API key; the `key=` query value is replaced with `REDACTED`.
 
 ### Read the dashboard
 
