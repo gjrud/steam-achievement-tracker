@@ -21,7 +21,7 @@
 </script>
 
 <div class="modal-backdrop" role="presentation">
-  <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="clear-data-title">
+  <div class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="clear-data-title">
     <div class="confirm-modal-head">
       <p class="eyebrow">Danger zone</p>
       <h2 id="clear-data-title">Clear active user data?</h2>
@@ -62,5 +62,5 @@
       <button class="secondary" on:click={onCancel} disabled={clearing}>Cancel</button>
       <button class="danger" on:click={onConfirm} disabled={!canConfirm}>{clearing ? 'Clearing…' : 'Clear data'}</button>
     </div>
-  </section>
+  </div>
 </div>
