@@ -60,6 +60,7 @@ func deleteOrphanRowsForAppIDs(tx *sql.Tx, appIDs []int64) error {
 }
 
 // deleteOrphanCoverRows removes cached cover rows for the given image app ids that no remaining entry displays.
+// A game's cover also stays while any entry of that game remains, since its DLC entries fall back to it.
 // It returns the image app ids whose rows were actually deleted; only those have cached files to remove.
 func deleteOrphanCoverRows(tx *sql.Tx, imageAppIDs []int64) ([]int64, error) {
 	if len(imageAppIDs) == 0 {
@@ -73,7 +74,7 @@ func deleteOrphanCoverRows(tx *sql.Tx, imageAppIDs []int64) ([]int64, error) {
 	}
 	rows, err := tx.Query(`select image_appid from cover_images where image_appid in (`+strings.Join(pl, ",")+`) and not exists (
 		select 1 from profile_games pg left join game_sets gs on gs.appid=pg.appid and gs.groupid=pg.groupid
-		where `+imageAppIDSQL+` = cover_images.image_appid
+		where `+imageAppIDSQL+` = cover_images.image_appid or pg.appid = cover_images.image_appid
 	) order by image_appid`, args...)
 	if err != nil {
 		return nil, err

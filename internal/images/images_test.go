@@ -141,36 +141,51 @@ func TestStoreItemAssetsDecodesCapsulesAndSkipsUnsuccessful(t *testing.T) {
 		t.Fatalf("assets len = %d, want 1 (unsuccessful item omitted): %+v", len(assets), assets)
 	}
 	got := assets[dlcAppID]
-	want := ItemAssets{AppID: dlcAppID, Type: 4, ParentAppID: baseAppID, LibraryCapsule: "", HeroCapsule: "abc123/hero_capsule.jpg", MainCapsule: "def456/main_capsule.jpg"}
+	want := ItemAssets{AppID: dlcAppID, Type: 4, ParentAppID: baseAppID, LibraryCapsule: "", HeroCapsule: "abc123/hero_capsule.jpg", Header: "abc123/header.jpg", MainCapsule: "def456/main_capsule.jpg"}
 	if got != want {
 		t.Fatalf("assets = %+v, want %+v", got, want)
 	}
 }
 
-func TestLibraryCapsuleSourceURLsBuiltOnStoreAssets(t *testing.T) {
-	json := `{"response":{"store_items":[
-	 {"id":1,"appid":1,"success":1,"assets":{"library_capsule":"h/library_600x900.jpg"}},
-	 {"id":2,"appid":2,"success":1,"assets":{"library_capsule":null}}
-	]}}`
-	transport := &routeTransport{routes: []route{{prefix: storeAPI, contentType: "application/json", body: json}}}
-	cache, _ := testCache(t, transport)
-
-	urls, err := cache.LibraryCapsuleSourceURLs(context.Background(), []int64{1, 2})
-	if err != nil {
-		t.Fatal(err)
+func TestCapsuleCandidateURLsRejectsUnsafeValues(t *testing.T) {
+	cases := []struct {
+		name    string
+		format  string
+		capsule string
+		wantLen int
+	}{
+		{"plain listed capsule", "", "h/library_600x900.jpg", 2},
+		{"dots inside a name are fine", "", "h/a..b.jpg", 2},
+		{"dotdot capsule segment", "", "../../other/header.jpg", 0},
+		{"dotdot capsule mid path", "", "h/../header.jpg", 0},
+		{"dotdot bare capsule", "", "..", 0},
+		{"scheme in capsule", "", "https://evil.example/x.jpg", 0},
+		{"backslash in capsule", "", `h\header.jpg`, 0},
+		{"dotdot in format", "steam/apps/1/../../${FILENAME}", "header.jpg", 0},
+		{"scheme in format", "https://evil.example/${FILENAME}", "header.jpg", 0},
+		{"backslash in format", `steam\apps\${FILENAME}`, "header.jpg", 0},
+		{"valid format with query", "steam/apps/1/${FILENAME}?t=99", "header.jpg", 2},
 	}
-	if got, want := urls[1], akamai+"steam/apps/1/h/library_600x900.jpg"; got != want {
-		t.Fatalf("urls[1] = %q, want %q", got, want)
-	}
-	if got, want := urls[2], akamai+"steam/apps/2/library_600x900.jpg"; got != want {
-		t.Fatalf("urls[2] = %q, want %q", got, want)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assets := ItemAssets{AppID: 1, AssetURLFormat: tc.format}
+			got := capsuleCandidateURLs(assets, tc.capsule)
+			if len(got) != tc.wantLen {
+				t.Fatalf("capsuleCandidateURLs(format=%q, capsule=%q) = %v, want %d URLs", tc.format, tc.capsule, got, tc.wantLen)
+			}
+			for _, u := range got {
+				if strings.Contains(u, "/../") || strings.Contains(u, "\\") || strings.Count(u, "://") != 1 {
+					t.Fatalf("unsafe URL %q leaked through", u)
+				}
+			}
+		})
 	}
 }
 
 func TestRefreshCoverDLCChainFallsBackToHero(t *testing.T) {
 	transport := &routeTransport{routes: []route{
 		{prefix: storeAPI, contentType: "application/json", body: dlcStoreJSON},
-		// default library_600x900.jpg for the DLC is 404 (not routed); hashed hero is 200.
+		// listed library capsule is 404 (not routed); hashed hero is 200.
 		jpegRoute(akamai+fmt.Sprintf("steam/apps/%d/abc123/hero_capsule.jpg", dlcAppID), "hero-bytes"),
 	}}
 	cache, imagesDir := testCache(t, transport)
@@ -180,7 +195,9 @@ func TestRefreshCoverDLCChainFallsBackToHero(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := cache.RefreshCover(ctx, dlcAppID, assets[dlcAppID], Stored{})
+	dlc := assets[dlcAppID]
+	dlc.LibraryCapsule = "abc123/library_600x900.jpg" // listed by Steam for this test, but 404 (not routed)
+	res, err := cache.RefreshCover(ctx, dlcAppID, dlc, Stored{})
 	if err != nil {
 		t.Fatalf("refresh dlc cover: %v", err)
 	}
@@ -201,7 +218,7 @@ func TestRefreshCoverDLCChainFallsBackToHero(t *testing.T) {
 		t.Fatal("CheckedAt is zero")
 	}
 
-	// Library default was tried before hero; header.jpg never requested.
+	// Listed library capsule was tried before hero; hero found, so header.jpg never requested.
 	libIdx, heroIdx := -1, -1
 	for i, u := range transport.requests {
 		if strings.Contains(u, "library_600x900.jpg") && libIdx < 0 {
@@ -211,7 +228,7 @@ func TestRefreshCoverDLCChainFallsBackToHero(t *testing.T) {
 			heroIdx = i
 		}
 		if strings.Contains(u, "header.jpg") {
-			t.Fatalf("header.jpg requested: %s", u)
+			t.Fatalf("header.jpg requested although hero found: %s", u)
 		}
 	}
 	if libIdx < 0 || heroIdx < 0 || libIdx > heroIdx {
@@ -226,7 +243,7 @@ func TestRefreshCoverPrefersLibraryAndSkipsHero(t *testing.T) {
 	}}
 	cache, imagesDir := testCache(t, transport)
 
-	assets := ItemAssets{AppID: baseAppID, HeroCapsule: "h/hero_capsule.jpg"}
+	assets := ItemAssets{AppID: baseAppID, LibraryCapsule: "library_600x900.jpg", HeroCapsule: "h/hero_capsule.jpg"}
 	res, err := cache.RefreshCover(context.Background(), baseAppID, assets, Stored{})
 	if err != nil {
 		t.Fatal(err)
@@ -267,7 +284,9 @@ func TestRefreshCoverAllMissingReturnsEmptyWithoutError(t *testing.T) {
 	cache, imagesDir := testCache(t, transport)
 	ctx := context.Background()
 
-	res, err := cache.RefreshCover(ctx, dlcAppID, ItemAssets{AppID: dlcAppID, Type: 4, ParentAppID: baseAppID}, Stored{})
+	// Every listed capsule 404s; nothing else may be requested.
+	missing := ItemAssets{AppID: dlcAppID, Type: 4, ParentAppID: baseAppID, LibraryCapsule: "library_600x900.jpg", HeroCapsule: "h/hero_capsule.jpg", Header: "h/header.jpg", MainCapsule: "m/main_capsule.jpg"}
+	res, err := cache.RefreshCover(ctx, dlcAppID, missing, Stored{})
 	if err != nil {
 		t.Fatalf("refresh missing cover: %v", err)
 	}
@@ -283,11 +302,12 @@ func TestRefreshCoverAllMissingReturnsEmptyWithoutError(t *testing.T) {
 	dir := filepath.Join(imagesDir, fmt.Sprintf("%d", dlcAppID))
 	assertNoFile(t, filepath.Join(dir, LibraryFileName))
 	assertNoFile(t, filepath.Join(dir, HeroFileName))
+	assertNoFile(t, filepath.Join(dir, HeaderFileName))
 	assertNoFile(t, filepath.Join(dir, MainFileName))
+	if !strings.Contains(strings.Join(transport.requests, "\n"), "h/header.jpg") {
+		t.Fatalf("header capsule never requested: %v", transport.requests)
+	}
 	for _, u := range transport.requests {
-		if strings.Contains(u, "header.jpg") {
-			t.Fatalf("header.jpg requested: %s", u)
-		}
 		if strings.Contains(u, fmt.Sprintf("steam/apps/%d/", baseAppID)) {
 			t.Fatalf("base game cover requested for DLC: %s", u)
 		}
@@ -299,7 +319,7 @@ func TestRefreshCoverAllMissingReturnsEmptyWithoutError(t *testing.T) {
 	if cache.NeedsRefresh(dlcAppID, prev, res.CheckedAt.Add(time.Hour)) {
 		t.Fatal("NeedsRefresh(fresh missing) = true, want false")
 	}
-	again, err := cache.RefreshCover(ctx, dlcAppID, ItemAssets{}, prev)
+	again, err := cache.RefreshCover(ctx, dlcAppID, missing, prev)
 	if err != nil {
 		t.Fatalf("second refresh: %v", err)
 	}
@@ -311,7 +331,7 @@ func TestRefreshCoverAllMissingReturnsEmptyWithoutError(t *testing.T) {
 	if !cache.NeedsRefresh(dlcAppID, prev, res.CheckedAt.Add(MissingCoverRecheckInterval)) {
 		t.Fatal("NeedsRefresh(missing older than 7 days) = false, want true")
 	}
-	if _, err := cache.RefreshCover(ctx, dlcAppID, ItemAssets{}, Stored{Kind: prev.Kind, FileName: prev.FileName, CheckedAt: res.CheckedAt.Add(-MissingCoverRecheckInterval)}); err != nil {
+	if _, err := cache.RefreshCover(ctx, dlcAppID, missing, Stored{Kind: prev.Kind, FileName: prev.FileName, CheckedAt: res.CheckedAt.Add(-MissingCoverRecheckInterval)}); err != nil {
 		t.Fatalf("stale missing refresh: %v", err)
 	}
 	if len(transport.requests) <= before {
@@ -337,7 +357,7 @@ func TestRefreshCoverMirrorFallback(t *testing.T) {
 			}}
 			cache, imagesDir := testCache(t, transport)
 
-			res, err := cache.RefreshCover(context.Background(), baseAppID, ItemAssets{}, Stored{})
+			res, err := cache.RefreshCover(context.Background(), baseAppID, ItemAssets{AppID: baseAppID, LibraryCapsule: "library_600x900.jpg"}, Stored{})
 			if err != nil {
 				t.Fatalf("refresh with mirror: %v", err)
 			}
@@ -379,6 +399,7 @@ func TestRefreshCoverStaleExistingFailureKeepsFileAndDefers(t *testing.T) {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			transport := &statusTransport{status: status}
 			cache, imagesDir := testCache(t, transport)
+			listed := ItemAssets{LibraryCapsule: "library_600x900.jpg"}
 			coverPath := filepath.Join(imagesDir, "456", LibraryFileName)
 			if err := os.MkdirAll(filepath.Dir(coverPath), 0o755); err != nil {
 				t.Fatal(err)
@@ -388,7 +409,7 @@ func TestRefreshCoverStaleExistingFailureKeepsFileAndDefers(t *testing.T) {
 			}
 			prev := Stored{Kind: KindLibrary, FileName: LibraryFileName, CheckedAt: time.Now().Add(-31 * 24 * time.Hour)}
 
-			res, err := cache.RefreshCover(context.Background(), 456, ItemAssets{}, prev)
+			res, err := cache.RefreshCover(context.Background(), 456, listed, prev)
 			if err != nil {
 				t.Fatalf("refresh stale existing cover: %v", err)
 			}
@@ -408,7 +429,7 @@ func TestRefreshCoverStaleExistingFailureKeepsFileAndDefers(t *testing.T) {
 
 			// Caller persists res; next call within 30 days must not hit the network.
 			next := Stored{Kind: res.Kind, FileName: res.FileName, CheckedAt: res.CheckedAt}
-			res2, err := cache.RefreshCover(context.Background(), 456, ItemAssets{}, next)
+			res2, err := cache.RefreshCover(context.Background(), 456, listed, next)
 			if err != nil {
 				t.Fatalf("refresh deferred cover: %v", err)
 			}
@@ -462,7 +483,7 @@ func TestRefreshCoverReplacesHeroWithLibraryAndDeletesOldFile(t *testing.T) {
 	}
 	prev := Stored{Kind: KindHero, FileName: HeroFileName, CheckedAt: time.Now().Add(-31 * 24 * time.Hour)}
 
-	res, err := cache.RefreshCover(context.Background(), dlcAppID, ItemAssets{}, prev)
+	res, err := cache.RefreshCover(context.Background(), dlcAppID, ItemAssets{LibraryCapsule: "library_600x900.jpg"}, prev)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -528,6 +549,9 @@ func TestNeedsRefreshRules(t *testing.T) {
 		{"file gone", Stored{Kind: KindHero, FileName: HeroFileName, CheckedAt: fresh}, true},
 		{"main kind/file mismatch", Stored{Kind: KindMain, FileName: HeroFileName, CheckedAt: fresh}, true},
 		{"main file gone", Stored{Kind: KindMain, FileName: MainFileName, CheckedAt: fresh}, true},
+		{"header kind/file mismatch", Stored{Kind: KindHeader, FileName: MainFileName, CheckedAt: fresh}, true},
+		{"header file gone", Stored{Kind: KindHeader, FileName: HeaderFileName, CheckedAt: fresh}, true},
+		{"header stale", Stored{Kind: KindHeader, FileName: HeaderFileName, CheckedAt: now.Add(-CoverRefreshInterval)}, true},
 		{"fresh and present", Stored{Kind: KindLibrary, FileName: LibraryFileName, CheckedAt: fresh}, false},
 	}
 	for _, tc := range tests {
@@ -545,7 +569,7 @@ func TestRefreshCoverRejectsUnsupportedContentType(t *testing.T) {
 	}}
 	cache, imagesDir := testCache(t, transport)
 
-	_, err := cache.RefreshCover(context.Background(), 789, ItemAssets{}, Stored{})
+	_, err := cache.RefreshCover(context.Background(), 789, ItemAssets{LibraryCapsule: "library_600x900.jpg"}, Stored{})
 	if err == nil {
 		t.Fatal("refresh cover error = nil, want unsupported content type error")
 	}
@@ -558,7 +582,7 @@ func TestRefreshCoverLimitsDownloadedBytes(t *testing.T) {
 	}}
 	cache, imagesDir := testCache(t, transport)
 
-	_, err := cache.RefreshCover(context.Background(), 790, ItemAssets{}, Stored{})
+	_, err := cache.RefreshCover(context.Background(), 790, ItemAssets{LibraryCapsule: "library_600x900.jpg"}, Stored{})
 	if err == nil {
 		t.Fatal("refresh cover error = nil, want max bytes error")
 	}
@@ -567,13 +591,13 @@ func TestRefreshCoverLimitsDownloadedBytes(t *testing.T) {
 }
 
 func TestRefreshCoverMainChainFallsBackToMain(t *testing.T) {
-	// library default 404 and hero capsule 404 (not routed); hashed main capsule is 200.
+	// library, hero and header 404 (not routed); hashed main capsule is 200.
 	transport := &routeTransport{routes: []route{
 		jpegRoute(akamai+fmt.Sprintf("steam/apps/%d/m/main_capsule.jpg", dlcAppID), "main-bytes"),
 	}}
 	cache, imagesDir := testCache(t, transport)
 
-	assets := ItemAssets{AppID: dlcAppID, HeroCapsule: "h/hero_capsule.jpg", MainCapsule: "m/main_capsule.jpg"}
+	assets := ItemAssets{AppID: dlcAppID, HeroCapsule: "h/hero_capsule.jpg", Header: "h/header.jpg", MainCapsule: "m/main_capsule.jpg"}
 	res, err := cache.RefreshCover(context.Background(), dlcAppID, assets, Stored{})
 	if err != nil {
 		t.Fatalf("refresh main cover: %v", err)
@@ -590,11 +614,14 @@ func TestRefreshCoverMainChainFallsBackToMain(t *testing.T) {
 	}
 	assertNoFile(t, filepath.Join(dir, LibraryFileName))
 	assertNoFile(t, filepath.Join(dir, HeroFileName))
-	for _, u := range transport.requests {
-		if strings.Contains(u, "header.jpg") {
-			t.Fatalf("header.jpg requested: %s", u)
-		}
-	}
+	assertNoFile(t, filepath.Join(dir, HeaderFileName))
+	assertURLs(t, transport.requests, []string{
+		akamai + fmt.Sprintf("steam/apps/%d/h/hero_capsule.jpg", dlcAppID),
+		mirror + fmt.Sprintf("steam/apps/%d/h/hero_capsule.jpg", dlcAppID),
+		akamai + fmt.Sprintf("steam/apps/%d/h/header.jpg", dlcAppID),
+		mirror + fmt.Sprintf("steam/apps/%d/h/header.jpg", dlcAppID),
+		akamai + fmt.Sprintf("steam/apps/%d/m/main_capsule.jpg", dlcAppID),
+	})
 }
 
 func TestRefreshCoverHeroPreferredOverMain(t *testing.T) {
@@ -674,7 +701,7 @@ func TestRefreshCoverReplacesMainWithLibraryAndDeletesOldFile(t *testing.T) {
 	}
 	prev := Stored{Kind: KindMain, FileName: MainFileName, CheckedAt: time.Now().Add(-31 * 24 * time.Hour)}
 
-	res, err := cache.RefreshCover(context.Background(), dlcAppID, ItemAssets{MainCapsule: "m/main_capsule.jpg"}, prev)
+	res, err := cache.RefreshCover(context.Background(), dlcAppID, ItemAssets{LibraryCapsule: "library_600x900.jpg", MainCapsule: "m/main_capsule.jpg"}, prev)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -742,4 +769,373 @@ func TestRefreshCoverRejectsInvalidAppID(t *testing.T) {
 	if _, err := cache.RefreshCover(context.Background(), 0, ItemAssets{}, Stored{}); err == nil {
 		t.Fatal("error = nil for app id 0")
 	}
+}
+
+func TestRefreshCoverHeaderChosenWhenLibraryAndHeroMissing(t *testing.T) {
+	// library and hero 404 (not routed); header is 200. Main is listed but must never be requested.
+	transport := &routeTransport{routes: []route{
+		jpegRoute(akamai+fmt.Sprintf("steam/apps/%d/hd/header.jpg", dlcAppID), "header-bytes"),
+	}}
+	cache, imagesDir := testCache(t, transport)
+	dir := filepath.Join(imagesDir, fmt.Sprintf("%d", dlcAppID))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	heroPath := filepath.Join(dir, HeroFileName)
+	mainPath := filepath.Join(dir, MainFileName)
+	for _, p := range []string{heroPath, mainPath} {
+		if err := os.WriteFile(p, []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prev := Stored{Kind: KindMain, FileName: MainFileName, CheckedAt: time.Now().Add(-31 * 24 * time.Hour)}
+
+	assets := ItemAssets{AppID: dlcAppID, LibraryCapsule: "library_600x900.jpg", HeroCapsule: "h/hero_capsule.jpg", Header: "hd/header.jpg", MainCapsule: "m/main_capsule.jpg"}
+	res, err := cache.RefreshCover(context.Background(), dlcAppID, assets, prev)
+	if err != nil {
+		t.Fatalf("refresh header cover: %v", err)
+	}
+	if res.Kind != KindHeader || res.FileName != HeaderFileName || !res.Downloaded || !res.Changed {
+		t.Fatalf("result = %+v, want downloaded+changed header", res)
+	}
+	if res.Path != filepath.Join(dir, HeaderFileName) {
+		t.Fatalf("path = %q, want %q", res.Path, filepath.Join(dir, HeaderFileName))
+	}
+	if got := readFile(t, filepath.Join(dir, HeaderFileName)); got != "header-bytes" {
+		t.Fatalf("header contents = %q", got)
+	}
+	assertNoFile(t, heroPath)
+	assertNoFile(t, mainPath)
+	assertNoFile(t, filepath.Join(dir, LibraryFileName))
+	for _, u := range transport.requests {
+		if strings.Contains(u, "main_capsule") {
+			t.Fatalf("main requested although header found: %s", u)
+		}
+	}
+}
+
+func TestRefreshCoverHeaderPreferredOverMain(t *testing.T) {
+	transport := &routeTransport{routes: []route{
+		jpegRoute(akamai+fmt.Sprintf("steam/apps/%d/hd/header.jpg", dlcAppID), "header-bytes"),
+		jpegRoute(akamai+fmt.Sprintf("steam/apps/%d/m/main_capsule.jpg", dlcAppID), "main-bytes"),
+	}}
+	cache, imagesDir := testCache(t, transport)
+
+	assets := ItemAssets{AppID: dlcAppID, Header: "hd/header.jpg", MainCapsule: "m/main_capsule.jpg"}
+	res, err := cache.RefreshCover(context.Background(), dlcAppID, assets, Stored{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Kind != KindHeader || res.FileName != HeaderFileName {
+		t.Fatalf("kind/file = %q/%q, want header/%s", res.Kind, res.FileName, HeaderFileName)
+	}
+	dir := filepath.Join(imagesDir, fmt.Sprintf("%d", dlcAppID))
+	assertNoFile(t, filepath.Join(dir, MainFileName))
+	for _, u := range transport.requests {
+		if strings.Contains(u, "main_capsule") {
+			t.Fatalf("main requested although header found: %s", u)
+		}
+	}
+}
+
+func TestRefreshCoverFallsBackToMainWhenHeaderMissing(t *testing.T) {
+	// header listed but 404 (not routed); main is 200.
+	transport := &routeTransport{routes: []route{
+		jpegRoute(akamai+fmt.Sprintf("steam/apps/%d/m/main_capsule.jpg", dlcAppID), "main-bytes"),
+	}}
+	cache, imagesDir := testCache(t, transport)
+
+	res, err := cache.RefreshCover(context.Background(), dlcAppID, ItemAssets{AppID: dlcAppID, Header: "hd/header.jpg", MainCapsule: "m/main_capsule.jpg"}, Stored{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Kind != KindMain || res.FileName != MainFileName {
+		t.Fatalf("kind/file = %q/%q, want main/%s", res.Kind, res.FileName, MainFileName)
+	}
+	dir := filepath.Join(imagesDir, fmt.Sprintf("%d", dlcAppID))
+	assertNoFile(t, filepath.Join(dir, HeaderFileName))
+	if got := readFile(t, filepath.Join(dir, MainFileName)); got != "main-bytes" {
+		t.Fatalf("main contents = %q", got)
+	}
+}
+
+func TestRefreshCoverHeaderMirrorFallback(t *testing.T) {
+	headerPrimary := akamai + fmt.Sprintf("steam/apps/%d/hd/header.jpg", dlcAppID)
+	transport := &routeTransport{routes: []route{
+		{prefix: headerPrimary, err: errors.New("dial tcp: timeout")},
+		jpegRoute(mirror+fmt.Sprintf("steam/apps/%d/hd/header.jpg", dlcAppID), "header-mirror"),
+	}}
+	cache, imagesDir := testCache(t, transport)
+
+	res, err := cache.RefreshCover(context.Background(), dlcAppID, ItemAssets{Header: "hd/header.jpg"}, Stored{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Kind != KindHeader || !strings.HasPrefix(res.SourceURL, mirror) {
+		t.Fatalf("kind=%q source=%q, want header via mirror", res.Kind, res.SourceURL)
+	}
+	if got := readFile(t, filepath.Join(imagesDir, fmt.Sprintf("%d", dlcAppID), HeaderFileName)); got != "header-mirror" {
+		t.Fatalf("contents = %q", got)
+	}
+	assertURLs(t, transport.requests, []string{headerPrimary, mirror + fmt.Sprintf("steam/apps/%d/hd/header.jpg", dlcAppID)})
+}
+
+func TestRefreshCoverLibraryReplacesStaleHeaderAndDeletesOldFile(t *testing.T) {
+	transport := &routeTransport{routes: []route{
+		jpegRoute(akamai+fmt.Sprintf("steam/apps/%d/library_600x900.jpg", dlcAppID), "lib-new"),
+	}}
+	cache, imagesDir := testCache(t, transport)
+	dir := filepath.Join(imagesDir, fmt.Sprintf("%d", dlcAppID))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	headerPath := filepath.Join(dir, HeaderFileName)
+	if err := os.WriteFile(headerPath, []byte("header-old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prev := Stored{Kind: KindHeader, FileName: HeaderFileName, CheckedAt: time.Now().Add(-31 * 24 * time.Hour)}
+
+	res, err := cache.RefreshCover(context.Background(), dlcAppID, ItemAssets{LibraryCapsule: "library_600x900.jpg"}, prev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Kind != KindLibrary || !res.Changed {
+		t.Fatalf("result = %+v, want changed library", res)
+	}
+	assertNoFile(t, headerPath)
+}
+
+func TestRefreshCoverHeaderReplacesStaleCoversAndDeletesOldFiles(t *testing.T) {
+	transport := &routeTransport{routes: []route{
+		jpegRoute(akamai+fmt.Sprintf("steam/apps/%d/hd/header.jpg", dlcAppID), "header-new"),
+	}}
+	cache, imagesDir := testCache(t, transport)
+	dir := filepath.Join(imagesDir, fmt.Sprintf("%d", dlcAppID))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := []string{LibraryFileName, HeroFileName, MainFileName}
+	for _, name := range stale {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prev := Stored{Kind: KindHero, FileName: HeroFileName, CheckedAt: time.Now().Add(-31 * 24 * time.Hour)}
+
+	res, err := cache.RefreshCover(context.Background(), dlcAppID, ItemAssets{HeroCapsule: "h/hero_capsule.jpg", Header: "hd/header.jpg"}, prev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Kind != KindHeader || res.FileName != HeaderFileName || !res.Changed {
+		t.Fatalf("result = %+v, want changed header", res)
+	}
+	if got := readFile(t, filepath.Join(dir, HeaderFileName)); got != "header-new" {
+		t.Fatalf("header contents = %q", got)
+	}
+	for _, name := range stale {
+		assertNoFile(t, filepath.Join(dir, name))
+	}
+}
+
+func TestNeedsRefreshHeaderPresentOnDisk(t *testing.T) {
+	cache, imagesDir := testCache(t, &statusTransport{status: http.StatusNotFound})
+	now := time.Now()
+	dir := filepath.Join(imagesDir, "8")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, HeaderFileName), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prev := Stored{Kind: KindHeader, FileName: HeaderFileName, CheckedAt: now.Add(-time.Hour)}
+	if cache.NeedsRefresh(8, prev, now) {
+		t.Fatal("NeedsRefresh(fresh header present) = true, want false")
+	}
+}
+
+func assertURLs(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("urls = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("url[%d] = %q, want %q (all: %q)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// AssetURLFormat with a ?t= query must be substituted per capsule and keep the query on
+// both the primary CDN and the mirror.
+func TestAssetURLFormatSubstitutesFilenameWithQuery(t *testing.T) {
+	const appID = int64(735730)
+	const query = "?t=1732050499"
+	assets := ItemAssets{
+		AppID:          appID,
+		AssetURLFormat: "steam/apps/735730/${FILENAME}" + query,
+		LibraryCapsule: "library_600x900.jpg",
+		HeroCapsule:    "hero_capsule.jpg",
+		Header:         "header.jpg",
+		MainCapsule:    "capsule_616x353.jpg",
+	}
+
+	t.Run("every capsule 404s: exact primary then mirror order", func(t *testing.T) {
+		transport := &routeTransport{}
+		cache, _ := testCache(t, transport)
+		res, err := cache.RefreshCover(context.Background(), appID, assets, Stored{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Kind != "" {
+			t.Fatalf("kind = %q, want none", res.Kind)
+		}
+		assertURLs(t, transport.requests, []string{
+			akamai + "steam/apps/735730/library_600x900.jpg" + query,
+			mirror + "steam/apps/735730/library_600x900.jpg" + query,
+			akamai + "steam/apps/735730/hero_capsule.jpg" + query,
+			mirror + "steam/apps/735730/hero_capsule.jpg" + query,
+			akamai + "steam/apps/735730/header.jpg" + query,
+			mirror + "steam/apps/735730/header.jpg" + query,
+			akamai + "steam/apps/735730/capsule_616x353.jpg" + query,
+			mirror + "steam/apps/735730/capsule_616x353.jpg" + query,
+		})
+	})
+
+	tests := []struct {
+		name    string
+		assets  ItemAssets
+		kind    string
+		file    string
+		capsule string
+	}{
+		{"library", ItemAssets{AppID: appID, AssetURLFormat: assets.AssetURLFormat, LibraryCapsule: "library_600x900.jpg"}, KindLibrary, LibraryFileName, "library_600x900.jpg"},
+		{"hero", ItemAssets{AppID: appID, AssetURLFormat: assets.AssetURLFormat, HeroCapsule: "hero_capsule.jpg"}, KindHero, HeroFileName, "hero_capsule.jpg"},
+		{"header", ItemAssets{AppID: appID, AssetURLFormat: assets.AssetURLFormat, Header: "header.jpg"}, KindHeader, HeaderFileName, "header.jpg"},
+		{"main", ItemAssets{AppID: appID, AssetURLFormat: assets.AssetURLFormat, MainCapsule: "capsule_616x353.jpg"}, KindMain, MainFileName, "capsule_616x353.jpg"},
+	}
+	for _, tc := range tests {
+		t.Run("primary error uses mirror/"+tc.name, func(t *testing.T) {
+			primary := akamai + "steam/apps/735730/" + tc.capsule + query
+			mirrored := mirror + "steam/apps/735730/" + tc.capsule + query
+			transport := &routeTransport{routes: []route{
+				{prefix: primary, err: errors.New("reset")},
+				jpegRoute(mirrored, "mirror-bytes"),
+			}}
+			cache, imagesDir := testCache(t, transport)
+			res, err := cache.RefreshCover(context.Background(), appID, tc.assets, Stored{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Kind != tc.kind || res.FileName != tc.file || res.SourceURL != mirrored {
+				t.Fatalf("result kind/file/source = %q/%q/%q, want %q/%q/%q", res.Kind, res.FileName, res.SourceURL, tc.kind, tc.file, mirrored)
+			}
+			assertURLs(t, transport.requests, []string{primary, mirrored})
+			if got := readFile(t, filepath.Join(imagesDir, "735730", tc.file)); got != "mirror-bytes" {
+				t.Fatalf("contents = %q", got)
+			}
+		})
+	}
+}
+
+// Unlisted capsules are skipped with zero requests for that capsule.
+func TestUnlistedCapsulesAreSkippedWithoutRequests(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("unlisted library falls to hero", func(t *testing.T) {
+		transport := &routeTransport{routes: []route{
+			jpegRoute(akamai+"steam/apps/10/h/hero_capsule.jpg", "hero-bytes"),
+		}}
+		cache, _ := testCache(t, transport)
+		res, err := cache.RefreshCover(ctx, 10, ItemAssets{HeroCapsule: "h/hero_capsule.jpg"}, Stored{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Kind != KindHero {
+			t.Fatalf("kind = %q, want hero", res.Kind)
+		}
+		assertURLs(t, transport.requests, []string{akamai + "steam/apps/10/h/hero_capsule.jpg"})
+	})
+
+	t.Run("unlisted library and hero goes to main", func(t *testing.T) {
+		transport := &routeTransport{routes: []route{
+			jpegRoute(akamai+"steam/apps/10/m/main_capsule.jpg", "main-bytes"),
+		}}
+		cache, _ := testCache(t, transport)
+		res, err := cache.RefreshCover(ctx, 10, ItemAssets{MainCapsule: "m/main_capsule.jpg"}, Stored{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Kind != KindMain {
+			t.Fatalf("kind = %q, want main", res.Kind)
+		}
+		assertURLs(t, transport.requests, []string{akamai + "steam/apps/10/m/main_capsule.jpg"})
+	})
+
+	t.Run("nothing listed makes no requests", func(t *testing.T) {
+		transport := &routeTransport{}
+		cache, _ := testCache(t, transport)
+		res, err := cache.RefreshCover(ctx, 10, ItemAssets{}, Stored{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Kind != "" || res.Path != "" {
+			t.Fatalf("result = %+v, want empty", res)
+		}
+		if len(transport.requests) != 0 {
+			t.Fatalf("requests = %q, want none", transport.requests)
+		}
+	})
+}
+
+// Regression: Darkest Dungeon DLC 735730 has only a format and a main capsule.
+func TestDarkestDungeonDLCMainCapsuleFromAssetURLFormat(t *testing.T) {
+	const want = "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/735730/capsule_616x353.jpg?t=1732050499"
+	transport := &routeTransport{routes: []route{jpegRoute(want, "main-bytes")}}
+	cache, imagesDir := testCache(t, transport)
+
+	assets := ItemAssets{AssetURLFormat: "steam/apps/735730/${FILENAME}?t=1732050499", MainCapsule: "capsule_616x353.jpg"}
+	res, err := cache.RefreshCover(context.Background(), 735730, assets, Stored{})
+	if err != nil {
+		t.Fatalf("refresh DLC 735730: %v", err)
+	}
+	if res.Kind != KindMain || res.FileName != MainFileName || !res.Downloaded {
+		t.Fatalf("result = %+v, want downloaded main", res)
+	}
+	if res.SourceURL != want {
+		t.Fatalf("source = %q, want %q", res.SourceURL, want)
+	}
+	if got := readFile(t, filepath.Join(imagesDir, "735730", MainFileName)); got != "main-bytes" {
+		t.Fatalf("main contents = %q", got)
+	}
+	assertURLs(t, transport.requests, []string{want})
+}
+
+func TestStoreItemAssetsParsesAssetURLFormat(t *testing.T) {
+	const body = `{"response":{"store_items":[
+	 {"id":735730,"appid":735730,"success":1,"type":4,"assets":{"asset_url_format":"steam/apps/735730/${FILENAME}?t=1732050499","main_capsule":"capsule_616x353.jpg"}}
+	]}}`
+	transport := &routeTransport{routes: []route{{prefix: storeAPI, contentType: "application/json", body: body}}}
+	cache, _ := testCache(t, transport)
+
+	assets, err := cache.StoreItemAssets(context.Background(), []int64{735730})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := assets[735730]
+	if !ok {
+		t.Fatalf("assets = %+v, want app 735730", assets)
+	}
+	if want := "steam/apps/735730/${FILENAME}?t=1732050499"; got.AssetURLFormat != want {
+		t.Fatalf("AssetURLFormat = %q, want %q", got.AssetURLFormat, want)
+	}
+	if got.MainCapsule != "capsule_616x353.jpg" || got.LibraryCapsule != "" || got.HeroCapsule != "" {
+		t.Fatalf("capsules = %+v", got)
+	}
+}
+
+func TestMirrorSourceURLsKeepsQuery(t *testing.T) {
+	const path = "steam/apps/735730/capsule_616x353.jpg?t=1732050499"
+	want := []string{akamai + path, mirror + path}
+	assertURLs(t, mirrorSourceURLs(akamai+path), want)
+	assertURLs(t, mirrorSourceURLs("https://cdn.cloudflare.steamstatic.com/"+path), want)
 }

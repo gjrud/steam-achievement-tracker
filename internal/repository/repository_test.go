@@ -627,6 +627,162 @@ func TestSetEntriesSplitCompletedFromSuggestionsAndNameImages(t *testing.T) {
 	}
 }
 
+// seedDLCSetCoverGame syncs a completed base game (kept off the suggestions list) and one unfinished DLC set bound to 4173830.
+func seedDLCSetCoverGame(t *testing.T, repo *Repository, profileID int64) {
+	t.Helper()
+	saveSeedGame(t, repo, profileID, 2968420, "PowerWash Simulator 2", 300,
+		dashboardSeed{GroupID: 0, Total: 40, Unlocked: 40, Percent: 100, Completed: true, WasCompleted: true},
+		dashboardSeed{GroupID: 1, DLCAppID: 4173830, SetName: "PowerWash Simulator 2 DLC Pack", Total: 10, Unlocked: 3, Percent: 30})
+}
+
+func cardByEntryKey(t *testing.T, cards []GameCard, entryKey string) GameCard {
+	t.Helper()
+	for _, c := range cards {
+		if c.EntryKey == entryKey {
+			return c
+		}
+	}
+	t.Fatalf("entry %s not in cards", entryKey)
+	return GameCard{}
+}
+
+func TestDLCEntryFallsBackToParentCover(t *testing.T) {
+	repo := testRepository(t)
+	profile, err := repo.SaveProfile("11111111111111111", "User One", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedDLCSetCoverGame(t, repo, profile.ID)
+	mustSaveLibraryCover(t, repo, 2968420)
+
+	suggestions, err := repo.GameCards(profile.ID, "suggestions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dlc := cardByEntryKey(t, suggestions, "2968420:1")
+	if got := dlc.CoverURL; !strings.HasPrefix(got, "/game-covers/2968420/library_600x900.jpg?v=") || dlc.CoverKind != "library" {
+		t.Fatalf("dlc cover = %q kind %q, want parent library cover", got, dlc.CoverKind)
+	}
+	assertTag(t, repo, profile.ID, 2968420, 1, "missing_cover_art", false)
+
+	completed, err := repo.GameCards(profile.ID, "completed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cardByEntryKey(t, completed, "2968420:0").CoverURL; !strings.HasPrefix(got, "/game-covers/2968420/library_600x900.jpg?v=") {
+		t.Fatalf("base cover = %q, want parent library cover", got)
+	}
+}
+
+func TestDLCOwnCoverOverridesParentCover(t *testing.T) {
+	repo := testRepository(t)
+	profile, err := repo.SaveProfile("11111111111111111", "User One", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedDLCSetCoverGame(t, repo, profile.ID)
+	mustSaveLibraryCover(t, repo, 2968420)
+	mustSaveHeroCover(t, repo, 4173830)
+
+	suggestions, err := repo.GameCards(profile.ID, "suggestions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dlc := cardByEntryKey(t, suggestions, "2968420:1")
+	if got := dlc.CoverURL; !strings.HasPrefix(got, "/game-covers/4173830/hero_capsule.jpg?v=") || dlc.CoverKind != "hero" {
+		t.Fatalf("dlc cover = %q kind %q, want own hero cover of DLC id", got, dlc.CoverKind)
+	}
+	assertTag(t, repo, profile.ID, 2968420, 1, "missing_cover_art", false)
+
+	completed, err := repo.GameCards(profile.ID, "completed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cardByEntryKey(t, completed, "2968420:0").CoverURL; !strings.HasPrefix(got, "/game-covers/2968420/library_600x900.jpg?v=") {
+		t.Fatalf("base cover = %q, want parent library cover", got)
+	}
+}
+
+func TestDLCEmptyCoverRowFallsBackToParentCover(t *testing.T) {
+	repo := testRepository(t)
+	profile, err := repo.SaveProfile("11111111111111111", "User One", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedDLCSetCoverGame(t, repo, profile.ID)
+	mustSaveLibraryCover(t, repo, 2968420)
+	// DLC cover row exists without a cached file: the parent cover still shows.
+	if err := repo.SaveCover(CoverUpdate{ImageAppID: 4173830, Kind: "hero", FileName: "hero_capsule.jpg"}); err != nil {
+		t.Fatal(err)
+	}
+
+	suggestions, err := repo.GameCards(profile.ID, "suggestions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dlc := cardByEntryKey(t, suggestions, "2968420:1")
+	if got := dlc.CoverURL; !strings.HasPrefix(got, "/game-covers/2968420/library_600x900.jpg?v=") || dlc.CoverKind != "library" {
+		t.Fatalf("dlc cover = %q kind %q, want parent library cover", got, dlc.CoverKind)
+	}
+	assertTag(t, repo, profile.ID, 2968420, 1, "missing_cover_art", false)
+}
+
+func TestDLCWithoutCoverShowsMissingArtUntilParentCoverSaved(t *testing.T) {
+	repo := testRepository(t)
+	profile, err := repo.SaveProfile("11111111111111111", "User One", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedDLCSetCoverGame(t, repo, profile.ID)
+
+	suggestions, err := repo.GameCards(profile.ID, "suggestions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dlc := cardByEntryKey(t, suggestions, "2968420:1")
+	if dlc.CoverURL != "" {
+		t.Fatalf("dlc cover = %q, want none when neither DLC nor parent has a cover", dlc.CoverURL)
+	}
+	assertTag(t, repo, profile.ID, 2968420, 1, "missing_cover_art", true)
+
+	// Saving the parent cover recomputes the DLC entry's tags through its game id.
+	mustSaveLibraryCover(t, repo, 2968420)
+	suggestions, err = repo.GameCards(profile.ID, "suggestions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dlc = cardByEntryKey(t, suggestions, "2968420:1")
+	if !strings.HasPrefix(dlc.CoverURL, "/game-covers/2968420/library_600x900.jpg?v=") {
+		t.Fatalf("dlc cover = %q, want parent library cover after parent saved", dlc.CoverURL)
+	}
+	assertTag(t, repo, profile.ID, 2968420, 1, "missing_cover_art", false)
+}
+
+func TestClearProfileDataKeepsGameCoverUsedByDLCEntryOfOtherProfile(t *testing.T) {
+	repo := testRepository(t)
+	profile, err := repo.SaveProfile("11111111111111111", "User One", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := repo.SaveProfile("22222222222222222", "User Two", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveSeedGame(t, repo, profile.ID, 2968420, "PowerWash Simulator 2", 0, dashboardSeed{GroupID: 0, Total: 2, Unlocked: 2, Percent: 100, Completed: true, WasCompleted: true})
+	saveSeedGame(t, repo, other.ID, 2968420, "PowerWash Simulator 2", 0, dashboardSeed{GroupID: 1, DLCAppID: 4173830, SetName: "Pack", Total: 1, Unlocked: 0, Percent: 0})
+	mustSaveLibraryCover(t, repo, 2968420)
+
+	ids, err := repo.ClearProfileData(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The other profile's DLC entry falls back to the game cover, so the cover row must survive.
+	if len(ids) != 0 {
+		t.Fatalf("returned ids = %v, want none while other profile's DLC entry shows the game cover", ids)
+	}
+	assertCount(t, repo, `select count(*) from cover_images where image_appid=2968420`, 1)
+}
+
 func TestCoverURLForLibraryAndHero(t *testing.T) {
 	downloaded := sql.NullString{String: "2026-11-14T10:00:00Z", Valid: true}
 	if got, want := coverURL(42, "library_600x900.jpg", "/cache/42/library_600x900.jpg", downloaded), "/game-covers/42/library_600x900.jpg?v=2026-11-14T10:00:00Z"; got != want {

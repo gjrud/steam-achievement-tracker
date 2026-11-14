@@ -490,7 +490,7 @@ func removeCachedGameImages(root string, appIDs []int64) error {
 
 // servableCoverFile reports whether name is a cover file the image cache writes.
 func servableCoverFile(name string) bool {
-	return name == images.LibraryFileName || name == images.HeroFileName || name == images.MainFileName
+	return name == images.LibraryFileName || name == images.HeroFileName || name == images.HeaderFileName || name == images.MainFileName
 }
 
 func (a *App) assetHandler() http.Handler {

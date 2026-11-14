@@ -2,12 +2,14 @@ package syncer
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -448,6 +450,236 @@ func TestFullSyncFetchesCoverForUnownedDLCSet(t *testing.T) {
 	dlcCard := findCard(t, cards, 1)
 	if !dlcCard.DLCNotOwned || !strings.HasPrefix(dlcCard.CoverURL, "/game-covers/711/hero_capsule.jpg?v=") {
 		t.Fatalf("unowned DLC card = %#v, want flagged card with hero cover", dlcCard)
+	}
+}
+
+func TestFullSyncSkipsCoverWhenStoreLookupFails(t *testing.T) {
+	const appID = 720
+	repo, fake, svc, profile := setupBaseCoverSync(t, appID, "library_600x900.jpg")
+	// The owned-games file is not served (404), so the store lookup decides the cover and it fails first.
+	fake.store[appID] = storeFixture{library: "hashed/library_capsule.jpg"}
+	fake.images["720/hashed/library_capsule.jpg"] = true
+	fake.storeFailure = http.StatusBadGateway
+
+	first := runServiceOK(t, svc, profile)
+	requireSyncResult(t, first, expectedSyncResult{status: "success", total: 1, synced: 1, failed: 0})
+	if got := fake.count("store", appID); got != 1 {
+		t.Fatalf("store lookups during failing first sync = %d, want 1 attempt", got)
+	}
+	if _, ok, err := repo.GetCover(appID); err != nil || ok {
+		t.Fatalf("cover row after failed store lookup: ok=%v err=%v, want no row (not checked)", ok, err)
+	}
+
+	fake.storeFailure = 0
+	runServiceOK(t, svc, profile)
+	cover, ok, err := repo.GetCover(appID)
+	if err != nil || !ok {
+		t.Fatalf("cover after recovered store lookup = %#v ok=%v err=%v, want stored library cover", cover, ok, err)
+	}
+	if cover.Kind != images.KindLibrary || cover.FileName != images.LibraryFileName || cover.DownloadedAt == nil {
+		t.Fatalf("cover after recovered store lookup = %#v, want downloaded library cover", cover)
+	}
+}
+
+func TestFullSyncKeepsCachedBaseCoverWhenCapsuleGoneAndStoreEmpty(t *testing.T) {
+	const appID = 780
+	paths := testPaths(t)
+	repo := openTestRepository(t, paths)
+	profile := testProfile(t, repo)
+	fake := newFakeSteamServer(t, []steam.OwnedGame{{AppID: appID, Name: "Vanished Capsule Game", PlaytimeForever: 10, CapsuleFilename: "library_600x900.jpg"}})
+	svc := serviceWithImages(t, repo, fake, paths)
+	fake.images["780/library_600x900.jpg"] = true
+
+	requireSyncResult(t, runServiceOK(t, svc, profile), expectedSyncResult{status: "success", total: 1, synced: 1, failed: 0})
+	before, ok, err := repo.GetCover(appID)
+	if err != nil || !ok || before.Kind != images.KindLibrary || before.DownloadedAt == nil {
+		t.Fatalf("cover after first sync = %#v ok=%v err=%v, want downloaded library cover", before, ok, err)
+	}
+
+	// Age the stored check past CoverRefreshInterval, then remove the capsule from the CDN; the store lists nothing.
+	setCoverCheckedAt(t, paths, appID, "2000-01-01T00:00:00Z")
+	delete(fake.images, "780/library_600x900.jpg")
+
+	requireSyncResult(t, runServiceOK(t, svc, profile), expectedSyncResult{status: "success", total: 1, synced: 1, failed: 0})
+	if got := fake.count("store", appID); got != 1 {
+		t.Fatalf("store lookups on stale sync = %d, want 1 (owned-games file gone)", got)
+	}
+	after, ok, err := repo.GetCover(appID)
+	if err != nil || !ok {
+		t.Fatalf("cover after stale sync = %#v ok=%v err=%v, want stored cover kept", after, ok, err)
+	}
+	if after.Kind != images.KindLibrary || after.FileName != images.LibraryFileName {
+		t.Fatalf("cover after stale sync = %#v, want cached library cover kept", after)
+	}
+	if _, err := os.Stat(after.Path); err != nil {
+		t.Fatalf("cached cover file %q: %v, want file kept on disk", after.Path, err)
+	}
+}
+
+// setCoverCheckedAt rewrites the stored checked_at of one cover so the next sync treats it as stale.
+func setCoverCheckedAt(t *testing.T, paths appdata.Paths, imageAppID int64, checkedAt string) {
+	t.Helper()
+	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?_busy_timeout=5000", paths.DB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`update cover_images set checked_at=? where image_appid=?`, checkedAt, imageAppID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// setupBaseCoverSync returns a service for one owned base game (no achievements) whose GetOwnedGames entry
+// lists capsuleFilename. Callers add CDN files and store fixtures before syncing.
+func setupBaseCoverSync(t *testing.T, appID int64, capsuleFilename string) (*repository.Repository, *fakeSteamServer, *Service, *repository.Profile) {
+	t.Helper()
+	paths := testPaths(t)
+	repo := openTestRepository(t, paths)
+	profile := testProfile(t, repo)
+	fake := newFakeSteamServer(t, []steam.OwnedGame{{AppID: appID, Name: "Base Cover Game", PlaytimeForever: 10, CapsuleFilename: capsuleFilename}})
+	return repo, fake, serviceWithImages(t, repo, fake, paths), profile
+}
+
+func TestFullSyncBaseCoverFromCapsuleFilenameWithoutStoreLookup(t *testing.T) {
+	const appID = 730
+	repo, fake, svc, profile := setupBaseCoverSync(t, appID, "library_600x900.jpg")
+	fake.images["730/library_600x900.jpg"] = true
+
+	requireSyncResult(t, runServiceOK(t, svc, profile), expectedSyncResult{status: "success", total: 1, synced: 1, failed: 0})
+	cover, ok, err := repo.GetCover(appID)
+	if err != nil || !ok {
+		t.Fatalf("cover = %#v ok=%v err=%v, want stored library cover", cover, ok, err)
+	}
+	if cover.Kind != images.KindLibrary || cover.FileName != images.LibraryFileName || cover.DownloadedAt == nil {
+		t.Fatalf("cover = %#v, want downloaded library cover from capsule_filename", cover)
+	}
+	if got := fake.count("store", appID); got != 0 {
+		t.Fatalf("store lookups for base game with capsule_filename = %d, want 0", got)
+	}
+	if got := fake.count("asset", appID); got < 1 {
+		t.Fatalf("cover CDN requests for base game = %d, want at least 1 download request", got)
+	}
+}
+
+func TestFullSyncBaseCoverFromHashedCapsuleFilename(t *testing.T) {
+	const appID = 731
+	repo, fake, svc, profile := setupBaseCoverSync(t, appID, "abc/library_capsule.jpg")
+	fake.images["731/abc/library_capsule.jpg"] = true
+
+	requireSyncResult(t, runServiceOK(t, svc, profile), expectedSyncResult{status: "success", total: 1, synced: 1, failed: 0})
+	cover, ok, err := repo.GetCover(appID)
+	if err != nil || !ok {
+		t.Fatalf("cover = %#v ok=%v err=%v, want stored library cover", cover, ok, err)
+	}
+	if cover.Kind != images.KindLibrary || cover.FileName != images.LibraryFileName || cover.DownloadedAt == nil {
+		t.Fatalf("cover = %#v, want library cover saved as %s", cover, images.LibraryFileName)
+	}
+	if got := fake.count("store", appID); got != 0 {
+		t.Fatalf("store lookups = %d, want 0", got)
+	}
+}
+
+func TestFullSyncBaseCoverFallsBackToStoreWhenCapsuleFileMissing(t *testing.T) {
+	const appID = 740
+	repo, fake, svc, profile := setupBaseCoverSync(t, appID, "library_600x900.jpg")
+	// The owned-games file is not served (404); the store lists a hero instead.
+	fake.store[appID] = storeFixture{hero: "hashed/hero_capsule.jpg"}
+	fake.images["740/hashed/hero_capsule.jpg"] = true
+
+	requireSyncResult(t, runServiceOK(t, svc, profile), expectedSyncResult{status: "success", total: 1, synced: 1, failed: 0})
+	cover, ok, err := repo.GetCover(appID)
+	if err != nil || !ok {
+		t.Fatalf("cover = %#v ok=%v err=%v, want stored hero cover", cover, ok, err)
+	}
+	if cover.Kind != images.KindHero || cover.FileName != images.HeroFileName || cover.DownloadedAt == nil {
+		t.Fatalf("cover = %#v, want downloaded hero cover from store", cover)
+	}
+	if got := fake.count("store", appID); got != 1 {
+		t.Fatalf("store lookups = %d, want 1", got)
+	}
+}
+
+func TestFullSyncBaseCoverMissingWhenCapsuleFileAndStoreHaveNothing(t *testing.T) {
+	const appID = 750
+	repo, fake, svc, profile := setupBaseCoverSync(t, appID, "portrait.png")
+	// Neither the owned-games file nor the store has an image (store answers success=2).
+
+	requireSyncResult(t, runServiceOK(t, svc, profile), expectedSyncResult{status: "success", total: 1, synced: 1, failed: 0})
+	cover, ok, err := repo.GetCover(appID)
+	if err != nil || !ok {
+		t.Fatalf("cover = %#v ok=%v err=%v, want stored missing cover", cover, ok, err)
+	}
+	if cover.Kind != "" || cover.CheckedAt == nil {
+		t.Fatalf("cover = %#v, want Kind \"\" with CheckedAt set", cover)
+	}
+	if got := fake.count("store", appID); got != 1 {
+		t.Fatalf("store lookups = %d, want 1", got)
+	}
+	// The owned-games name is tried on the primary and the fallback CDN before giving up.
+	if got := fake.count("asset", appID); got < 2 {
+		t.Fatalf("cover CDN requests = %d, want at least 2 (primary and mirror)", got)
+	}
+}
+
+func TestFullSyncBaseCoverUsesStoreWhenCapsuleFilenameEmpty(t *testing.T) {
+	const appID = 760
+	repo, fake, svc, profile := setupBaseCoverSync(t, appID, "")
+	fake.store[appID] = storeFixture{library: "library_600x900.jpg"}
+	fake.images["760/library_600x900.jpg"] = true
+
+	requireSyncResult(t, runServiceOK(t, svc, profile), expectedSyncResult{status: "success", total: 1, synced: 1, failed: 0})
+	cover, ok, err := repo.GetCover(appID)
+	if err != nil || !ok {
+		t.Fatalf("cover = %#v ok=%v err=%v, want stored library cover", cover, ok, err)
+	}
+	if cover.Kind != images.KindLibrary || cover.DownloadedAt == nil {
+		t.Fatalf("cover = %#v, want downloaded library cover from store", cover)
+	}
+	if got := fake.count("store", appID); got != 1 {
+		t.Fatalf("store lookups = %d, want 1 when capsule_filename is empty", got)
+	}
+}
+
+func TestFullSyncBaseCoverFreshSecondSyncSkipsCDNAndStore(t *testing.T) {
+	const appID = 770
+	repo, fake, svc, profile := setupBaseCoverSync(t, appID, "library_600x900.jpg")
+	fake.images["770/library_600x900.jpg"] = true
+
+	runServiceOK(t, svc, profile)
+	if _, ok, err := repo.GetCover(appID); err != nil || !ok {
+		t.Fatalf("cover after first sync: ok=%v err=%v, want stored cover", ok, err)
+	}
+	assetsBefore := fake.count("asset", appID)
+
+	requireSyncResult(t, runServiceOK(t, svc, profile), expectedSyncResult{status: "success", total: 1, synced: 1, failed: 0})
+	if got := fake.count("asset", appID); got != assetsBefore {
+		t.Fatalf("cover CDN requests on fresh second sync = %d, want %d (no new request)", got, assetsBefore)
+	}
+	if got := fake.count("store", appID); got != 0 {
+		t.Fatalf("store lookups on fresh second sync = %d, want 0", got)
+	}
+}
+
+func TestFullSyncSavesMissingCoverWhenStoreLookupSucceedsWithoutApp(t *testing.T) {
+	paths := testPaths(t)
+	repo := openTestRepository(t, paths)
+	profile := testProfile(t, repo)
+	fake := newFakeSteamServer(t, []steam.OwnedGame{{AppID: 721, Name: "Unlisted Game", PlaytimeForever: 10}})
+	fake.gameBody[721] = gameJSON([]groupFixture{{id: 0}}, []achFixture{{name: "BASE", key: 1, group: 0}})
+	fake.userBody[721] = userJSON(nil, []int64{0})
+	// No store fixture: Steam answers success=2 for app 721, so the lookup succeeds without listing it.
+
+	result := runServiceOK(t, serviceWithImages(t, repo, fake, paths), profile)
+	requireSyncResult(t, result, expectedSyncResult{status: "success", total: 1, synced: 1, failed: 0})
+	cover, ok, err := repo.GetCover(721)
+	if err != nil || !ok {
+		t.Fatalf("cover = %#v ok=%v err=%v, want stored missing cover", cover, ok, err)
+	}
+	if cover.Kind != "" || cover.CheckedAt == nil {
+		t.Fatalf("cover = %#v, want Kind \"\" with CheckedAt set", cover)
+	}
+	if got := fake.count("asset", 721); got != 0 {
+		t.Fatalf("cover asset requests = %d, want 0 for unlisted app", got)
 	}
 }
 
@@ -1048,22 +1280,23 @@ type gameFailure struct {
 }
 
 type fakeSteamServer struct {
-	server      *httptest.Server
-	client      *steam.Client
-	schema      map[int64][]string
-	player      map[int64]map[string]bool
-	global      map[int64]map[string]float64
-	playerError map[int64]string // GetUserAchievements (and legacy player) answers 403/error with this text
-	gameFailure map[int64]gameFailure
-	gameBody    map[int64]string // raw GetGameAchievements body override
-	userBody    map[int64]string // raw GetUserAchievements body override
-	store       map[int64]storeFixture
-	images      map[string]bool // served store_item_assets paths relative to steam/apps/
-	delay       time.Duration
-	mu          sync.Mutex
-	counts      map[string]int
-	active      int
-	maxActive   int
+	server       *httptest.Server
+	client       *steam.Client
+	schema       map[int64][]string
+	player       map[int64]map[string]bool
+	global       map[int64]map[string]float64
+	playerError  map[int64]string // GetUserAchievements (and legacy player) answers 403/error with this text
+	gameFailure  map[int64]gameFailure
+	gameBody     map[int64]string // raw GetGameAchievements body override
+	userBody     map[int64]string // raw GetUserAchievements body override
+	store        map[int64]storeFixture
+	storeFailure int             // GetItems answers this HTTP status when non-zero (use a non-retried status)
+	images       map[string]bool // served store_item_assets paths relative to steam/apps/
+	delay        time.Duration
+	mu           sync.Mutex
+	counts       map[string]int
+	active       int
+	maxActive    int
 }
 
 func newFakeSteamServer(t *testing.T, owned []steam.OwnedGame) *fakeSteamServer {
@@ -1115,6 +1348,9 @@ func newFakeSteamServer(t *testing.T, owned []steam.OwnedGame) *fakeSteamServer 
 		case "/IStoreBrowseService/GetItems/v1/":
 			f.serveStoreItems(t, w, r)
 		default:
+			if strings.HasPrefix(r.URL.Path, "/store_item_assets/") {
+				f.increment("asset", assetAppID(r.URL.Path))
+			}
 			if rel, ok := strings.CutPrefix(r.URL.Path, "/store_item_assets/steam/apps/"); ok && f.images[rel] {
 				w.Header().Set("Content-Type", "image/jpeg")
 				fmt.Fprint(w, "jpeg-bytes")
@@ -1181,9 +1417,15 @@ func (f *fakeSteamServer) serveStoreItems(t *testing.T, w http.ResponseWriter, r
 	if err := json.Unmarshal([]byte(r.URL.Query().Get("input_json")), &input); err != nil {
 		t.Fatalf("bad store input_json: %v", err)
 	}
+	for _, id := range input.IDs {
+		f.increment("store", id.AppID) // counted even when the request fails
+	}
+	if f.storeFailure != 0 {
+		http.Error(w, "store unavailable", f.storeFailure)
+		return
+	}
 	items := make([]string, 0, len(input.IDs))
 	for _, id := range input.IDs {
-		f.increment("store", id.AppID)
 		fixture, ok := f.store[id.AppID]
 		if !ok {
 			items = append(items, fmt.Sprintf(`{"id":%d,"appid":%d,"success":2}`, id.AppID, id.AppID))
@@ -1193,6 +1435,17 @@ func (f *fakeSteamServer) serveStoreItems(t *testing.T, w http.ResponseWriter, r
 			id.AppID, id.AppID, fixture.library, fixture.hero))
 	}
 	fmt.Fprintf(w, `{"response":{"store_items":[%s]}}`, strings.Join(items, ","))
+}
+
+// assetAppID returns the app id of a store_item_assets path (steam/apps/<id>/...), or 0 when it has none.
+func assetAppID(path string) int64 {
+	rel, ok := strings.CutPrefix(path, "/store_item_assets/steam/apps/")
+	if !ok {
+		return 0
+	}
+	id, _, _ := strings.Cut(rel, "/")
+	n, _ := strconv.ParseInt(id, 10, 64)
+	return n
 }
 
 func (f *fakeSteamServer) increment(kind string, appID int64) {
@@ -1322,7 +1575,11 @@ func unlockedKeysFromNames(names []string, player map[string]bool) []int64 {
 func ownedGamesJSON(games []steam.OwnedGame) string {
 	parts := make([]string, 0, len(games))
 	for _, g := range games {
-		parts = append(parts, fmt.Sprintf(`{"appid":%d,"name":%q,"playtime_forever":%d}`, g.AppID, g.Name, g.PlaytimeForever))
+		entry := fmt.Sprintf(`{"appid":%d,"name":%q,"playtime_forever":%d`, g.AppID, g.Name, g.PlaytimeForever)
+		if g.CapsuleFilename != "" {
+			entry += fmt.Sprintf(`,"capsule_filename":%q`, g.CapsuleFilename)
+		}
+		parts = append(parts, entry+"}")
 	}
 	return fmt.Sprintf(`{"response":{"game_count":%d,"games":[%s]}}`, len(games), strings.Join(parts, ","))
 }

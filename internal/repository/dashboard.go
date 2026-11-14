@@ -12,7 +12,7 @@ const entryBaseFromSQL = `from profile_games pg
 		left join game_sets gs on gs.appid=pg.appid and gs.groupid=pg.groupid
 		left join profile_game_flags f on f.profile_id=pg.profile_id and f.appid=pg.appid and f.groupid=pg.groupid`
 
-const coverJoinSQL = `left join cover_images ci on ci.image_appid=` + imageAppIDSQL
+const coverJoinSQL = `left join cover_images ci on ci.image_appid=` + effectiveCoverAppIDSQL
 
 func (r *Repository) Dashboard(profileID int64) (Dashboard, error) {
 	summary, err := r.Summary(profileID)
@@ -72,7 +72,7 @@ func (r *Repository) GameCards(profileID int64, filter string) ([]GameCard, erro
 		return nil, err
 	}
 	rows, err := r.db.Query(`select pg.appid, pg.groupid, g.name, coalesce(gs.name,''), coalesce(gs.dlcappid,0), g.playtime_forever,
-		coalesce(ci.kind,''), coalesce(ci.file_name,''), coalesce(ci.path,''), ci.downloaded_at,
+		coalesce(ci.image_appid,0), coalesce(ci.kind,''), coalesce(ci.file_name,''), coalesce(ci.path,''), ci.downloaded_at,
 		g.has_achievements, g.achievement_status,
 		pg.total_achievements, pg.unlocked_achievements, pg.completion_percent, pg.missing_avg_unlock, pg.suggestion_score, pg.is_completed, pg.was_completed, pg.newly_incomplete, pg.sync_warning, pg.last_error, pg.last_error_at, pg.last_synced_at,
 		coalesce(f.manual_was_completed,0), coalesce(f.missing_achievements_in_dlc,0), coalesce(f.disabled,0), f.disabled_reason, pg.dlc_not_owned
@@ -106,23 +106,20 @@ type gameCardScanner interface {
 
 func scanGameCard(scanner gameCardScanner, tagMap map[entryRef][]string) (GameCard, error) {
 	var c GameCard
+	var coverImageAppID int64
 	var coverKind, coverFileName, coverPath string
 	var coverDownloadedAt, lastErr, lastErrAt, lastSynced, flagDisabledReason sql.NullString
 	var setName string
 	var missing, score sql.NullFloat64
 	var has, completed, was, newly, warning, manual, dlc, flagDisabled, dlcNotOwned int
 	if err := scanner.Scan(&c.AppID, &c.GroupID, &c.Name, &setName, &c.DLCAppID, &c.PlaytimeForever,
-		&coverKind, &coverFileName, &coverPath, &coverDownloadedAt,
+		&coverImageAppID, &coverKind, &coverFileName, &coverPath, &coverDownloadedAt,
 		&has, &c.AchievementStatus, &c.TotalAchievements, &c.UnlockedAchievements, &c.CompletionPercent, &missing, &score, &completed, &was, &newly, &warning, &lastErr, &lastErrAt, &lastSynced,
 		&manual, &dlc, &flagDisabled, &flagDisabledReason, &dlcNotOwned); err != nil {
 		return GameCard{}, err
 	}
 	applyGameCardScalars(&c, has, completed, was, newly, warning, manual, dlc, flagDisabled)
 	c.DLCNotOwned = dlcNotOwned == 1
-	imageAppID := c.AppID
-	if c.DLCAppID != 0 {
-		imageAppID = c.DLCAppID
-	}
 	c.EntryKey = EntryKey(c.AppID, c.GroupID)
 	c.IsSet = c.GroupID != 0
 	if c.IsSet {
@@ -130,7 +127,7 @@ func scanGameCard(scanner gameCardScanner, tagMap map[entryRef][]string) (GameCa
 	}
 	c.Name = DisplayName(c.Name, setName, c.GroupID)
 	c.CoverKind = coverKind
-	c.CoverURL = coverURL(imageAppID, coverFileName, coverPath, coverDownloadedAt)
+	c.CoverURL = coverURL(coverImageAppID, coverFileName, coverPath, coverDownloadedAt)
 	c.MissingAvgUnlock = floatPtr(missing)
 	c.SuggestionScore = floatPtr(score)
 	c.LastError = stringPtr(lastErr)

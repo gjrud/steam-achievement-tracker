@@ -38,6 +38,29 @@ func TestGetOwnedGamesPrivateProfilesAndFallbackNames(t *testing.T) {
 	}
 }
 
+func TestGetOwnedGamesRequestsExtendedAppInfoAndTrimsCapsuleFilename(t *testing.T) {
+	const path = "/IPlayerService/GetOwnedGames/v0001/"
+	client, log, closeServer := testSetClient(t, map[string]fixtureResponse{
+		path: {body: `{"response":{"game_count":2,"games":[{"appid":10,"name":"Capsule Game","playtime_forever":1,"capsule_filename":"  library_600x900.jpg \n"},{"appid":20,"name":"No Capsule","playtime_forever":2}]}}`},
+	})
+	defer closeServer()
+
+	games, err := client.GetOwnedGames(context.Background(), testSteamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := log.query(path)
+	if query.Get("include_appinfo") != "true" || query.Get("include_extended_appinfo") != "true" {
+		t.Fatalf("query = %v, want include_appinfo and include_extended_appinfo set", query)
+	}
+	if query.Get("language") != "" {
+		t.Fatalf("query language = %q, want unset", query.Get("language"))
+	}
+	if len(games) != 2 || games[0].CapsuleFilename != "library_600x900.jpg" || games[1].CapsuleFilename != "" {
+		t.Fatalf("games = %#v, want trimmed capsule file name for game 10 and empty for game 20", games)
+	}
+}
+
 func TestGetPlayerAchievementsFlexibleValuesAndNameFallback(t *testing.T) {
 	client, closeServer := testClient(t, map[string]string{
 		"/ISteamUserStats/GetPlayerAchievements/v1/": `{"playerstats":{"success":"1","achievements":[{"name":"NAME_FALLBACK","achieved":"true","unlocktime":"123"},{"apiname":"API_FALSE","achieved":0,"unlocktime":0}]}}`,
