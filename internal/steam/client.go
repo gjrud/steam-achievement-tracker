@@ -35,6 +35,9 @@ type OwnedGame struct {
 	AppID           int64
 	Name            string
 	PlaytimeForever int
+	// CapsuleFilename is the library capsule file name Steam lists for the game (trimmed). It is
+	// relative to steam/apps/<appid>/ and may be empty.
+	CapsuleFilename string
 }
 
 type SchemaAchievement struct {
@@ -172,10 +175,13 @@ func (c *Client) GetOwnedGames(ctx context.Context, steamID64 string) ([]OwnedGa
 				AppID           int64  `json:"appid"`
 				Name            string `json:"name"`
 				PlaytimeForever int    `json:"playtime_forever"`
+				CapsuleFilename string `json:"capsule_filename"`
 			} `json:"games"`
 		} `json:"response"`
 	}
-	q := url.Values{"key": {c.APIKey}, "steamid": {steamID64}, "include_appinfo": {"true"}, "include_played_free_games": {"true"}, "format": {"json"}}
+	// include_extended_appinfo adds capsule_filename. language is deliberately not set: with a language,
+	// Steam returns localized art file names for some games.
+	q := url.Values{"key": {c.APIKey}, "steamid": {steamID64}, "include_appinfo": {"true"}, "include_extended_appinfo": {"true"}, "include_played_free_games": {"true"}, "format": {"json"}}
 	if err := c.getJSON(ctx, "/IPlayerService/GetOwnedGames/v0001/", q, &payload); err != nil {
 		return nil, err
 	}
@@ -191,7 +197,7 @@ func (c *Client) GetOwnedGames(ctx context.Context, steamID64 string) ([]OwnedGa
 		if name == "" {
 			name = fmt.Sprintf("App %d", g.AppID)
 		}
-		games = append(games, OwnedGame{AppID: g.AppID, Name: name, PlaytimeForever: g.PlaytimeForever})
+		games = append(games, OwnedGame{AppID: g.AppID, Name: name, PlaytimeForever: g.PlaytimeForever, CapsuleFilename: strings.TrimSpace(g.CapsuleFilename)})
 	}
 	return games, nil
 }

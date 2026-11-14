@@ -53,10 +53,9 @@ func (s *Service) FullSync(ctx context.Context, profile repository.Profile) (Res
 	if err != nil {
 		return run.fail(err)
 	}
-	syncable, syncableIDs := syncableGames(owned, disabledIDs)
+	syncable := syncableGames(owned, disabledIDs)
 	run.result.GamesTotal = len(syncable)
-	coverAssets := s.loadCoverAssets(ctx, syncableIDs)
-	if err := run.syncGames(ctx, syncable, coverAssets); err != nil {
+	if err := run.syncGames(ctx, syncable); err != nil {
 		return run.fail(err)
 	}
 	run.finalize()
@@ -82,29 +81,27 @@ func (s *Service) prepareOwnedGames(ctx context.Context, profile repository.Prof
 	return owned, nil
 }
 
-func syncableGames(owned []steam.OwnedGame, disabledIDs map[int64]bool) ([]steam.OwnedGame, []int64) {
+func syncableGames(owned []steam.OwnedGame, disabledIDs map[int64]bool) []steam.OwnedGame {
 	syncable := make([]steam.OwnedGame, 0, len(owned))
-	ids := make([]int64, 0, len(owned))
 	for _, g := range owned {
 		if disabledIDs[g.AppID] {
 			continue
 		}
 		syncable = append(syncable, g)
-		ids = append(ids, g.AppID)
 	}
-	return syncable, ids
+	return syncable
 }
 
 func gameRecord(g steam.OwnedGame) repository.GameRecord {
 	return repository.GameRecord{AppID: g.AppID, Name: g.Name, PlaytimeForever: g.PlaytimeForever}
 }
 
-func (r *fullSyncRun) syncGames(ctx context.Context, games []steam.OwnedGame, coverAssets coverAssetBatch) error {
+func (r *fullSyncRun) syncGames(ctx context.Context, games []steam.OwnedGame) error {
 	jobs := make(chan steam.OwnedGame)
 	var wg sync.WaitGroup
 	for i := 0; i < 4; i++ {
 		wg.Add(1)
-		go r.syncWorker(ctx, jobs, coverAssets, &wg)
+		go r.syncWorker(ctx, jobs, &wg)
 	}
 	err := dispatchSyncJobs(ctx, jobs, games)
 	close(jobs)
@@ -112,10 +109,10 @@ func (r *fullSyncRun) syncGames(ctx context.Context, games []steam.OwnedGame, co
 	return err
 }
 
-func (r *fullSyncRun) syncWorker(ctx context.Context, jobs <-chan steam.OwnedGame, coverAssets coverAssetBatch, wg *sync.WaitGroup) {
+func (r *fullSyncRun) syncWorker(ctx context.Context, jobs <-chan steam.OwnedGame, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for game := range jobs {
-		if err := r.s.syncGame(ctx, r.profile, game, coverAssets); err != nil {
+		if err := r.s.syncGame(ctx, r.profile, game); err != nil {
 			r.recordGameFailure(game, err)
 			continue
 		}
@@ -198,7 +195,7 @@ func (r *fullSyncRun) finish() {
 
 // syncGame syncs one game for the profile: every eligible achievement set becomes one entry.
 // The new IPlayerService API is used first; only non-transient failures fall back to the legacy API.
-func (s *Service) syncGame(ctx context.Context, profile repository.Profile, game steam.OwnedGame, coverAssets coverAssetBatch) error {
+func (s *Service) syncGame(ctx context.Context, profile repository.Profile, game steam.OwnedGame) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	schema, err := s.Steam.GetGameAchievements(ctx, game.AppID)
 	if err != nil {
@@ -215,28 +212,28 @@ func (s *Service) syncGame(ctx context.Context, profile repository.Profile, game
 			return fmt.Errorf("achievement schema: %w", err)
 		}
 		log.Printf("appid %d: GetGameAchievements failed, using legacy achievement API: %v", game.AppID, err)
-		return s.syncGameLegacy(ctx, profile, game, coverAssets, now)
+		return s.syncGameLegacy(ctx, profile, game, now)
 	}
 	if len(schema.Achievements) == 0 {
-		return s.saveGameWithoutAchievements(ctx, profile, game, coverAssets, now)
+		return s.saveGameWithoutAchievements(ctx, profile, game, now)
 	}
 	user, err := s.Steam.GetUserAchievements(ctx, profile.SteamID64, game.AppID)
 	if err != nil {
 		return fmt.Errorf("user achievements: %w", err)
 	}
 	entries := buildSetEntries(game.AppID, schema, user)
-	return s.saveEntries(ctx, profile, game, entries, coverAssets, now)
+	return s.saveEntries(ctx, profile, game, entries, now)
 }
 
 // syncGameLegacy is the pre-IPlayerService path: one group-0 entry from the old Web API endpoints.
 // Remove together with the legacy client methods once Steam documents GetGameAchievements.
-func (s *Service) syncGameLegacy(ctx context.Context, profile repository.Profile, game steam.OwnedGame, coverAssets coverAssetBatch, now string) error {
+func (s *Service) syncGameLegacy(ctx context.Context, profile repository.Profile, game steam.OwnedGame, now string) error {
 	schema, err := s.Steam.GetSchemaForGame(ctx, game.AppID)
 	if err != nil {
 		return fmt.Errorf("achievement schema: %w", err)
 	}
 	if len(schema) == 0 {
-		return s.saveGameWithoutAchievements(ctx, profile, game, coverAssets, now)
+		return s.saveGameWithoutAchievements(ctx, profile, game, now)
 	}
 	playerAchievements, err := s.Steam.GetPlayerAchievements(ctx, profile.SteamID64, game.AppID)
 	if err != nil {
@@ -248,11 +245,11 @@ func (s *Service) syncGameLegacy(ctx context.Context, profile repository.Profile
 	}
 	stats := buildAchievementStats(schema, playerAchievements, globalPercentages)
 	entries := []setEntry{{GroupID: 0, ImageAppID: game.AppID, stats: stats}}
-	return s.saveEntries(ctx, profile, game, entries, coverAssets, now)
+	return s.saveEntries(ctx, profile, game, entries, now)
 }
 
 // saveGameWithoutAchievements stores the game as no_achievements with its group-0 entry only.
-func (s *Service) saveGameWithoutAchievements(ctx context.Context, profile repository.Profile, game steam.OwnedGame, coverAssets coverAssetBatch, now string) error {
+func (s *Service) saveGameWithoutAchievements(ctx context.Context, profile repository.Profile, game steam.OwnedGame, now string) error {
 	prev, err := s.Repo.ProfileGame(profile.ID, game.AppID, 0)
 	if err != nil {
 		return err
@@ -265,13 +262,13 @@ func (s *Service) saveGameWithoutAchievements(ctx context.Context, profile repos
 	if err := s.Repo.SaveGameSync(update); err != nil {
 		return err
 	}
-	s.refreshCovers(ctx, game.AppID, []int64{game.AppID}, coverAssets)
+	s.refreshCovers(ctx, game, []int64{game.AppID})
 	return nil
 }
 
 // saveEntries writes one successful game sync with the given entries, then refreshes the covers they show.
 // Entries may be empty (game has achievements but none is eligible); that prunes all entries of the game.
-func (s *Service) saveEntries(ctx context.Context, profile repository.Profile, game steam.OwnedGame, entries []setEntry, coverAssets coverAssetBatch, now string) error {
+func (s *Service) saveEntries(ctx context.Context, profile repository.Profile, game steam.OwnedGame, entries []setEntry, now string) error {
 	sets := make([]repository.SetSyncUpdate, 0, len(entries))
 	for _, entry := range entries {
 		prev, err := s.Repo.ProfileGame(profile.ID, game.AppID, entry.GroupID)
@@ -287,7 +284,7 @@ func (s *Service) saveEntries(ctx context.Context, profile repository.Profile, g
 	if err := s.Repo.SaveGameSync(update); err != nil {
 		return err
 	}
-	s.refreshCovers(ctx, game.AppID, coverImageAppIDs(game.AppID, entries), coverAssets)
+	s.refreshCovers(ctx, game, coverImageAppIDs(game.AppID, entries))
 	return nil
 }
 
@@ -565,29 +562,6 @@ func transientSteamStatus(code int) bool {
 	}
 }
 
-// coverAssetBatch is the store asset lookup for the base games about to sync.
-type coverAssetBatch struct {
-	items map[int64]images.ItemAssets
-	// failed is set when the batch lookup returned an error. A base game missing from items is then
-	// unknown, not unlisted, so its cover refresh is skipped and retried by the next sync.
-	failed bool
-}
-
-// loadCoverAssets fetches store assets for the base games about to sync, in one batch.
-// DLC ids are looked up later, only when their cover is stale. Failure keeps any partial result and
-// marks the batch failed.
-func (s *Service) loadCoverAssets(ctx context.Context, appIDs []int64) coverAssetBatch {
-	if s.Images == nil {
-		return coverAssetBatch{}
-	}
-	assets, err := s.Images.StoreItemAssets(ctx, appIDs)
-	if err != nil {
-		log.Printf("load cover assets: %v", err)
-		return coverAssetBatch{items: assets, failed: true}
-	}
-	return coverAssetBatch{items: assets}
-}
-
 // coverImageAppIDs lists the image app ids shown by a game's entries: the game id, then each distinct DLC id.
 func coverImageAppIDs(appID int64, entries []setEntry) []int64 {
 	ids := []int64{appID}
@@ -608,21 +582,23 @@ func containsAppID(ids []int64, id int64) bool {
 	return false
 }
 
-// refreshCovers refreshes the cover of every image app id. Failures are logged and never fail the game sync.
-func (s *Service) refreshCovers(ctx context.Context, appID int64, imageAppIDs []int64, coverAssets coverAssetBatch) {
+// refreshCovers refreshes the cover of every image app id of a game. Failures are logged and never fail the game sync.
+func (s *Service) refreshCovers(ctx context.Context, game steam.OwnedGame, imageAppIDs []int64) {
 	if s.Images == nil {
 		return
 	}
 	for _, imageAppID := range imageAppIDs {
-		if err := s.refreshCover(ctx, appID, imageAppID, coverAssets); err != nil {
+		if err := s.refreshCover(ctx, game, imageAppID); err != nil {
 			log.Printf("refresh cover %d: %v", imageAppID, err)
 		}
 	}
 }
 
-// refreshCover refreshes one cover. The game's own assets come from the batch. DLC assets are looked up
-// on demand, and only when the stored cover is stale (NeedsRefresh), so a fresh DLC cover costs no request.
-func (s *Service) refreshCover(ctx context.Context, appID, imageAppID int64, coverAssets coverAssetBatch) error {
+// refreshCover refreshes one cover, and only when the stored cover is stale (NeedsRefresh), so a fresh
+// cover costs no request. A base game first tries the library file Steam lists in GetOwnedGames
+// (capsule_filename). The store is asked only when capsule_filename is empty or that file is absent,
+// or for DLC ids.
+func (s *Service) refreshCover(ctx context.Context, game steam.OwnedGame, imageAppID int64) error {
 	prev, err := s.storedCover(imageAppID)
 	if err != nil {
 		return err
@@ -630,24 +606,30 @@ func (s *Service) refreshCover(ctx context.Context, appID, imageAppID int64, cov
 	if !s.Images.NeedsRefresh(imageAppID, prev, time.Now()) {
 		return nil
 	}
-	assets, listed := coverAssets.items[imageAppID]
-	if imageAppID != appID {
-		assets, err = s.lookupItemAssets(ctx, imageAppID)
+	if imageAppID == game.AppID && game.CapsuleFilename != "" {
+		owned := images.ItemAssets{AppID: imageAppID, LibraryCapsule: game.CapsuleFilename}
+		res, err := s.Images.RefreshCover(ctx, imageAppID, owned, prev)
 		if err != nil {
 			return err
 		}
-	} else if !listed && coverAssets.failed {
-		// The batch failed, so absence says nothing about this game. Keep the stored state; the next sync retries.
-		log.Printf("refresh cover %d: skipped, store asset lookup failed", imageAppID)
-		return nil
+		if res.Downloaded {
+			return s.saveCover(imageAppID, res)
+		}
+		// Not found under the owned-games name: ask the store, like a DLC cover.
 	}
-	res, err := s.Images.RefreshCover(ctx, imageAppID, assets, prev)
+	assets, err := s.lookupItemAssets(ctx, imageAppID)
 	if err != nil {
 		return err
 	}
-	if res.Skipped {
-		return nil
+	res, err := s.Images.RefreshCover(ctx, imageAppID, assets, prev)
+	if err != nil || res.Skipped {
+		return err
 	}
+	return s.saveCover(imageAppID, res)
+}
+
+// saveCover stores the cover state of one image app id.
+func (s *Service) saveCover(imageAppID int64, res images.Result) error {
 	// SaveCover overwrites kind, file, path and source; RefreshCover returns the kept file's values when
 	// it could not download, so the stored cover stays consistent with what is on disk.
 	return s.Repo.SaveCover(repository.CoverUpdate{

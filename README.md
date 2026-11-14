@@ -20,7 +20,7 @@ This app was born for personal use and was entirely vibecoded. I have entry-leve
 - **Disabled games view** for manually disabled games or games no longer owned by the active profile.
 - **Achievement sets**: each achievement set of a game (base game, named sets, DLC sets) is its own card, completed and disabled independently.
 - **Per-set actions** to mark a set as previously completed, flag missing achievements as DLC-related, disable a set, or re-enable it.
-- **Local cover cache** using Steam library capsule images, with hero, header and main capsule fallbacks for DLC sets.
+- **Local cover cache** using Steam library capsule images taken from the owned-games list; the store API is only queried for DLC sets and for base games without a listed cover, with hero, header and main capsule fallbacks.
 - **Profile-scoped data clear** that removes the active profile, tracked games, achievements, sync history, manual flags, and cached covers while keeping the Secret Service key and logs.
 - **Local SQLite storage** with migration backups, WAL mode, and app-local log rotation.
 
@@ -223,7 +223,9 @@ Steam groups achievements into sets. A game with several sets (for example Team 
 
 Search matches the game name, so searching for a game lists all of its set cards.
 
-Cover art for a DLC set uses this order:
+A base game's cover is the library capsule named in the owned-games list (`capsule_filename`), downloaded from the Steam asset host without any store request. The store API is asked for a single app only when a cover is stale and either the cover belongs to a DLC set, or the owned-games list has no capsule for the base game or its file does not exist. A sync where every stale cover is a base game with a working owned-games capsule makes no store requests; each stale DLC cover, and each base game without a usable capsule, costs one store request.
+
+Cover art for a DLC set (and for a base game that falls back to the store) uses this order:
 
 1. the DLC's Steam library capsule
 2. the DLC's Steam hero capsule (cropped to the 2:3 card shape)
@@ -231,7 +233,7 @@ Cover art for a DLC set uses this order:
 4. the DLC's Steam main capsule (last resort, landscape, rendered like the header)
 5. a placeholder with the first letter and **Missing cover art** when none of these images exists
 
-A capsule is only downloaded when Steam's store API lists it for that app; the app never guesses file names. If the store lookup fails during a sync, games without a cover are retried on the next sync instead of being marked as missing.
+A store-based capsule is only downloaded when Steam's store API lists it for that app; the app never guesses file names, and only builds the base game's `steam/apps/<appid>/<capsule_filename>` path from the owned-games list. If the cover download or the store lookup fails during a sync and no cover is cached yet, nothing is saved and the cover is retried on the next sync instead of being marked as missing. A cover that the store lists as absent is rechecked after 7 days.
 
 Custom (non-DLC) named sets use the base game's cover. DLC sets never fall back to the base game cover.
 
@@ -478,11 +480,11 @@ erDiagram
 | --- | --- |
 | `https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/` | Resolves Steam vanity names and `/id/<name>` profile URLs to SteamID64. Requires the API key. |
 | `https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/` | Loads profile display name and avatar URL for setup/confirmation. Requires the API key. |
-| `https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/` | Loads the public owned game list, app names, and playtime for the active profile. Requires the API key and public game details. |
+| `https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/` | Loads the public owned game list, app names, playtime, and the library cover file name (`include_extended_appinfo`) for the active profile. Requires the API key and public game details. |
 | `https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/` | Loads each game's achievement schema. Requires the API key. |
 | `https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v1/` | Loads per-profile unlocked achievements and unlock times for a game. Requires the API key and accessible profile/game stats. |
 | `https://api.steampowered.com/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v0002/` | Loads global achievement unlock percentages used for rarity/missing-average calculations. |
-| `https://api.steampowered.com/IStoreBrowseService/GetItems/v1/` | Loads Steam store item assets, including library, hero, header and main capsule source paths for cover art (base games and DLC). |
+| `https://api.steampowered.com/IStoreBrowseService/GetItems/v1/` | Loads Steam store item assets (library, hero, header and main capsule source paths) for one app at a time. Called only for stale DLC set covers and for base games whose owned-games cover is missing. |
 | `https://shared.akamai.steamstatic.com/store_item_assets/...` | Primary Steam static asset host for cached game cover downloads. |
 | `https://shared.steamstatic.com/store_item_assets/...` | Fallback Steam static asset host for cached game cover downloads. |
 | Steam avatar URLs returned by `GetPlayerSummaries` | Displayed in the app for the active profile; URL is stored in `profiles.avatar_url`. |

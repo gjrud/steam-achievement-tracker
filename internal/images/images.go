@@ -127,9 +127,10 @@ func New(paths appdata.Paths) *Cache {
 	return &Cache{Paths: paths, HTTPClient: &http.Client{Timeout: 30 * time.Second}}
 }
 
-// StoreItemAssets looks up store assets for app ids (base games and DLC) in
-// batches. Items Steam reports as unsuccessful are omitted. On error the
-// partial map collected so far is returned.
+// StoreItemAssets looks up store assets for app ids in batches of up to 100.
+// The syncer calls it with one id at a time, only for a DLC cover or for a base
+// game whose owned-games capsule_filename is empty or whose capsule file is absent. Items Steam reports as
+// unsuccessful are omitted. On error the partial map collected so far is returned.
 func (c *Cache) StoreItemAssets(ctx context.Context, appIDs []int64) (map[int64]ItemAssets, error) {
 	unique := uniqueAppIDs(appIDs)
 	out := make(map[int64]ItemAssets, len(unique))
@@ -188,8 +189,10 @@ func (c *Cache) NeedsRefresh(imageAppID int64, prev Stored, now time.Time) bool 
 // exists, an empty Result with nil error is returned. A transport or content
 // error with no file to keep is returned as an error.
 //
-// Callers that need assets for a DLC should first check NeedsRefresh and only
-// then call StoreItemAssets for that id.
+// Callers should first check NeedsRefresh and only then look up assets: for a
+// DLC id through StoreItemAssets, for a base game through the library file name
+// from GetOwnedGames (passed as LibraryCapsule), falling back to StoreItemAssets
+// only when that name is empty or the file is not found.
 func (c *Cache) RefreshCover(ctx context.Context, imageAppID int64, assets ItemAssets, prev Stored) (Result, error) {
 	if imageAppID <= 0 {
 		return Result{}, fmt.Errorf("invalid image app id %d", imageAppID)
