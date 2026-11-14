@@ -1,20 +1,30 @@
-// Filter chip order, shared by the Not completed and Completed views. Follows the Not completed groups
-// (candidates, not owned, flagged DLC, no achievements), then the derived set/dlc tags and issue tags.
+// Filter chip order, shared by the Not completed and Completed views and by the tags on every card. Follows the
+// Not completed groups (candidates, not owned, flagged DLC, no achievements), then the derived set/dlc tags and
+// issue tags.
 export const suggestionTagOptions = ['new_achievements_added', 'almost_there', 'in_progress', 'untouched', 'dlc_not_owned', 'missing_achievements_in_dlc', 'no_achievements', 'set', 'dlc', 'missing_cover_art', 'sync_warning']
 
 // Issue tags that describe an incomplete entry. Completed cards never show them, even if a stored tag is present.
 const incompleteOnlyTags = ['new_achievements_added', 'missing_achievements_in_dlc']
 
+// tagRank is the sort key for card tags: completed first, then the filter chip order, then unknown tags.
+// Unknown tags all share the last rank, so a stable sort keeps their original relative order.
+function tagRank(tag) {
+  if (tag === 'completed') return -1
+  const index = suggestionTagOptions.indexOf(tag)
+  return index === -1 ? suggestionTagOptions.length : index
+}
+
 // gameTags lists the tags shown on a card and used for filtering. 'set' is derived for every non-base achievement
-// set (groupId != 0) and 'dlc' from dlcAppId, so both are filterable like any other tag. Derived tags come first.
+// set (groupId != 0) and 'dlc' from dlcAppId, so both are filterable like any other tag. The result is de-duplicated
+// and sorted by tagRank, so card tags appear in the same order as the filter chips.
 export function gameTags(game) {
   const stored = Array.isArray(game?.tags) ? game.tags : []
   const derived = []
   if (typeof game?.groupId === 'number' && game.groupId !== 0) derived.push('set')
   if (game?.dlcAppId) derived.push('dlc')
   const tags = [...new Set([...derived, ...stored])]
-  if (!game?.isCompleted) return tags
-  return tags.filter((tag) => !incompleteOnlyTags.includes(tag))
+  const visible = game?.isCompleted ? tags.filter((tag) => !incompleteOnlyTags.includes(tag)) : tags
+  return visible.sort((a, b) => tagRank(a) - tagRank(b))
 }
 
 export function tagLabel(tag) {

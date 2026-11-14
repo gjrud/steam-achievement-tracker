@@ -24,20 +24,45 @@ describe('gameTags', () => {
   })
 
   test('derives a dlc tag for DLC-bound sets and de-duplicates it', () => {
-    expect(gameTags({dlcAppId: 4173830, tags: ['almost_there']})).toEqual(['dlc', 'almost_there'])
-    expect(gameTags({dlcAppId: 4173830, tags: ['dlc', 'almost_there']})).toEqual(['dlc', 'almost_there'])
+    expect(gameTags({dlcAppId: 4173830, tags: ['almost_there']})).toEqual(['almost_there', 'dlc'])
+    expect(gameTags({dlcAppId: 4173830, tags: ['dlc', 'almost_there']})).toEqual(['almost_there', 'dlc'])
     expect(gameTags({dlcAppId: 0, tags: ['almost_there']})).toEqual(['almost_there'])
     expect(gameTags({tags: ['in_progress']})).toEqual(['in_progress'])
   })
 
-  test('keeps the dlc tag on completed DLC sets', () => {
-    expect(gameTags({dlcAppId: 4173830, isCompleted: true, tags: ['completed', 'missing_achievements_in_dlc']})).toEqual(['dlc', 'completed'])
+  test('keeps the dlc tag on completed DLC sets, after completed', () => {
+    expect(gameTags({dlcAppId: 4173830, isCompleted: true, tags: ['completed', 'missing_achievements_in_dlc']})).toEqual(['completed', 'dlc'])
   })
 
-  test('derives a set tag for every non-base set and keeps it before stored tags', () => {
-    expect(gameTags({groupId: 3, tags: ['almost_there']})).toEqual(['set', 'almost_there'])
-    expect(gameTags({groupId: 3, tags: ['set', 'almost_there']})).toEqual(['set', 'almost_there'])
-    expect(gameTags({groupId: 1, isCompleted: true, tags: ['completed', 'missing_achievements_in_dlc']})).toEqual(['set', 'completed'])
+  test('derives a set tag for every non-base set and sorts it by the filter chip order', () => {
+    expect(gameTags({groupId: 3, tags: ['almost_there']})).toEqual(['almost_there', 'set'])
+    expect(gameTags({groupId: 3, tags: ['set', 'almost_there']})).toEqual(['almost_there', 'set'])
+    expect(gameTags({groupId: 1, isCompleted: true, tags: ['completed', 'missing_achievements_in_dlc']})).toEqual(['completed', 'set'])
+  })
+
+  test('sorts a completed card as completed, set, dlc, missing_cover_art', () => {
+    const tags = gameTags({groupId: 1, dlcAppId: 4173830, isCompleted: true, tags: ['missing_cover_art', 'completed', 'new_achievements_added']})
+
+    expect(tags).toEqual(['completed', 'set', 'dlc', 'missing_cover_art'])
+  })
+
+  test('sorts a mixed incomplete card by the filter chip order', () => {
+    const tags = gameTags({groupId: 2, dlcAppId: 4173830, tags: ['sync_warning', 'missing_cover_art', 'dlc_not_owned', 'in_progress', 'new_achievements_added']})
+
+    expect(tags).toEqual(['new_achievements_added', 'in_progress', 'dlc_not_owned', 'set', 'dlc', 'missing_cover_art', 'sync_warning'])
+  })
+
+  test('sorts unknown tags last and keeps their original relative order', () => {
+    const tags = gameTags({tags: ['zeta_tag', 'untouched', 'alpha_tag', 'almost_there']})
+
+    expect(tags).toEqual(['almost_there', 'untouched', 'zeta_tag', 'alpha_tag'])
+  })
+
+  test('does not mutate the stored tag array', () => {
+    const stored = ['sync_warning', 'almost_there']
+    gameTags({tags: stored})
+
+    expect(stored).toEqual(['sync_warning', 'almost_there'])
   })
 
   test('does not derive a set tag for the base set', () => {
@@ -46,8 +71,8 @@ describe('gameTags', () => {
     expect(gameTags({groupId: null, tags: ['almost_there']})).toEqual(['almost_there'])
   })
 
-  test('orders set before dlc on DLC sets', () => {
-    expect(gameTags({groupId: 1, dlcAppId: 4173830, tags: ['dlc_not_owned']})).toEqual(['set', 'dlc', 'dlc_not_owned'])
+  test('orders set before dlc on DLC sets, and both after dlc_not_owned', () => {
+    expect(gameTags({groupId: 1, dlcAppId: 4173830, tags: ['dlc_not_owned']})).toEqual(['dlc_not_owned', 'set', 'dlc'])
     expect(gameTags({groupId: 0, dlcAppId: 4173830, tags: []})).toEqual(['dlc'])
   })
 })
@@ -72,6 +97,12 @@ describe('suggestion tag options', () => {
     }
     expect(suggestionTagOptions).not.toContain('completed')
     expect(new Set(suggestionTagOptions).size).toBe(suggestionTagOptions.length)
+  })
+
+  test('card tags use the filter chip order for every chip tag', () => {
+    const game = {groupId: 1, dlcAppId: 4173830, tags: [...suggestionTagOptions].reverse()}
+
+    expect(gameTags(game)).toEqual(suggestionTagOptions)
   })
 
   test('counts derived dlc tags and filters on them', () => {

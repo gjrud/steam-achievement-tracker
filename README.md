@@ -215,7 +215,7 @@ The main tabs are **Not completed**, **Completed**, **Sync errors**, **Disabled*
 Steam groups achievements into sets. A game with several sets (for example Team Fortress 2 classes, or a game with DLC) shows **one card per set** instead of one card for the whole game:
 
 - A set is completed on its own. A completed set moves to **Completed** while its unfinished siblings stay in **Not completed**.
-- Sets are named after the game when Steam does not name them, for example `Team Fortress 2 – Scout`. The card title shows the set name, a **Set** tag marks every set other than the game's base set, and a **DLC** tag marks sets that belong to a DLC.
+- Sets are named after the game when Steam does not name them, for example `Team Fortress 2 – Scout`. The card title shows the set name, a **Set** tag marks every set other than the game's base set, and a **DLC** tag marks sets that belong to a DLC. A card lists its tags in the same order as the filter chips (see [Tags and sorting](#tags-and-sorting)), so **Set** and **DLC** appear after the status tags and before **Missing cover art** and **Sync error**.
 - **DLC** sets (sets tied to a DLC app) are shown whether or not you own the DLC. A set for DLC you do not own is tagged **Not owned**, sits in **Not completed** with no progress tags, and is left out of the overall achievement totals, so it does not lower your overall completion percentage. Once you own the DLC, the next sync removes the tag and counts the set normally.
 - Achievements marked **archived** by Steam are not counted toward a set's total or completion. Locked archived achievements never block completion.
 - Set cards show the same playtime as their game, because Steam reports playtime per game.
@@ -259,7 +259,7 @@ The **Not completed** list is sorted to surface likely finishable games first:
 
 A set that is both **Not owned** and flagged **Achievements in DLC** is listed in group 2.
 
-The tag filter chips follow the same order as these groups: **New achievements added**, **Almost there**, **In progress**, **Untouched**, **Not owned**, **Achievements in DLC**, **No achievements**, **Set**, **DLC**, **Missing cover art**, **Sync error**. The chips appear in both **Not completed** and **Completed**, and each view lists only the tags that at least one of its cards carries. The active tag chip resets whenever you switch views; search still applies.
+The tag filter chips and the tags shown on each card use the same order: **New achievements added**, **Almost there**, **In progress**, **Untouched**, **Not owned**, **Achievements in DLC**, **No achievements**, **Set**, **DLC**, **Missing cover art**, **Sync error**. On a completed card, **Completed** comes first, then the rest in that order. Tags the app does not recognize, if any, are shown last in their stored order. The chips appear in both **Not completed** and **Completed**, and each view lists only the tags that at least one of its cards carries. The active tag chip resets whenever you switch views; search still applies.
 
 Within active achievement games, the app sorts by suggestion score, highest first. Suggestion score is based on completion percentage and, when Steam global achievement percentages are available, the average unlock rate of the achievements you are missing. Games with a score of `40` or higher get the **Almost there** tag; other started games get **In progress**.
 

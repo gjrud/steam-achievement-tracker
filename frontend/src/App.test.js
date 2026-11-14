@@ -238,6 +238,29 @@ describe('App dashboard views', () => {
     expect(within(card).getByText('Achievements in DLC').getAttribute('title')).toContain('card menu')
   })
 
+  test('renders card tags in the same order as the filter chips', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState({
+        suggestions: [
+          game({appid: 40, groupId: 2, dlcAppId: 4173840, name: 'Mixed Set', setName: 'Mixed Set', totalAchievements: 10, unlockedAchievements: 3, completionPercent: 30, playtimeForever: 60, tags: ['missing_cover_art', 'sync_warning', 'in_progress']})
+        ],
+        completed: [
+          game({appid: 41, groupId: 1, dlcAppId: 4173841, name: 'Done Set', setName: 'Done Set', tags: ['missing_cover_art', 'completed', 'new_achievements_added'], isCompleted: true, completionPercent: 100, unlockedAchievements: 10, totalAchievements: 10})
+        ]
+      }))
+    })
+    const user = userEvent.setup()
+
+    render(App)
+
+    const mixedCard = (await screen.findByRole('heading', {name: 'Mixed Set'})).closest('article')
+    expect(cardTagLabels(mixedCard)).toEqual(['In progress', 'Set', 'DLC', 'Missing cover art', 'Sync error'])
+
+    await user.click(screen.getByRole('button', {name: 'Completed'}))
+    const completedCard = (await screen.findByRole('heading', {name: 'Done Set'})).closest('article')
+    expect(cardTagLabels(completedCard)).toEqual(['Completed', 'Set', 'DLC', 'Missing cover art'])
+  })
+
   test('shows an unowned DLC set with a Not owned tag explained on hover', async () => {
     __setWailsMocks({
       GetAppState: vi.fn(async () => dashboardState({
@@ -527,6 +550,11 @@ describe('GameCard cover art', () => {
     expect(cover.querySelector('img')).toBeNull()
   })
 })
+
+// cardTagLabels returns the tag chip labels rendered on one game card, in display order.
+function cardTagLabels(card) {
+  return Array.from(card.querySelectorAll('.tag-list .tag')).map((tag) => tag.textContent.trim())
+}
 
 // chipLabels returns the filter chip names in a tag filter panel, without counts.
 function chipLabels(panel) {
