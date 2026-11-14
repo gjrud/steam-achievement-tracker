@@ -91,7 +91,7 @@ func loadTagFacts(tx *sql.Tx, profileID, appID, groupID int64) (gameTagFacts, bo
 		pg.total_achievements, pg.unlocked_achievements, pg.completion_percent, pg.missing_avg_unlock, pg.suggestion_score, pg.is_completed, pg.newly_incomplete, pg.sync_warning, pg.last_synced_at, pg.dlc_not_owned
 		from profile_games pg join games g on g.appid=pg.appid
 		left join game_sets gs on gs.appid=pg.appid and gs.groupid=pg.groupid
-		left join cover_images ci on ci.image_appid=`+imageAppIDSQL+`
+		left join cover_images ci on ci.image_appid=`+effectiveCoverAppIDSQL+`
 		left join profile_game_flags f on f.profile_id=pg.profile_id and f.appid=pg.appid and f.groupid=pg.groupid
 		where pg.profile_id=? and pg.appid=? and pg.groupid=?`, profileID, appID, groupID)
 	var facts gameTagFacts

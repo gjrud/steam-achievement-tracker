@@ -20,7 +20,7 @@ This app was born for personal use and was entirely vibecoded. I have entry-leve
 - **Disabled games view** for manually disabled games or games no longer owned by the active profile.
 - **Achievement sets**: each achievement set of a game (base game, named sets, DLC sets) is its own card, completed and disabled independently.
 - **Per-set actions** to mark a set as previously completed, flag missing achievements as DLC-related, disable a set, or re-enable it.
-- **Local cover cache** using Steam library capsule images taken from the owned-games list; the store API is only queried for DLC sets and for base games without a listed cover, with hero, header and main capsule fallbacks.
+- **Local cover cache** using Steam library capsule images taken from the owned-games list; the store API is only queried for DLC sets and for base games without a listed cover, with hero, header and main capsule fallbacks. DLC sets without any image of their own show the parent game's cover.
 - **Profile-scoped data clear** that removes the active profile, tracked games, achievements, sync history, manual flags, and cached covers while keeping the Secret Service key and logs.
 - **Local SQLite storage** with migration backups, WAL mode, and app-local log rotation.
 
@@ -231,11 +231,12 @@ Cover art for a DLC set (and for a base game that falls back to the store) uses 
 2. the DLC's Steam hero capsule (cropped to the 2:3 card shape)
 3. the DLC's Steam header image (landscape; shown whole on a blurred backdrop instead of cropped)
 4. the DLC's Steam main capsule (last resort, landscape, rendered like the header)
-5. a placeholder with the first letter and **Missing cover art** when none of these images exists
+5. for a DLC set only: the parent game's cover, when the DLC has no cached image at all (the store page is unavailable, lists no images, or the lookup or download failed)
+6. a placeholder with the first letter and **Missing cover art** when neither the DLC nor the parent game has a cover
 
 A store-based capsule is only downloaded when Steam's store API lists it for that app; the app never guesses file names, and only builds the base game's `steam/apps/<appid>/<capsule_filename>` path from the owned-games list. If the cover download or the store lookup fails during a sync and no cover is cached yet, nothing is saved and the cover is retried on the next sync instead of being marked as missing. A cover that the store lists as absent is rechecked after 7 days.
 
-Custom (non-DLC) named sets use the base game's cover. DLC sets never fall back to the base game cover.
+Custom (non-DLC) named sets always use the base game's cover. A DLC set uses its own cover whenever one is cached, and only falls back to the base game's cover while it has none. The fallback is applied when cards are displayed, so a DLC cover that is found later replaces it automatically. The DLC cover is still retried on the normal schedule (next sync, or after 7 days when the store lists it as absent). Right after upgrading, a DLC set may keep a stale **Missing cover art** tag until its game is synced again.
 
 Disable, re-enable, and the manual flags apply to one set card at a time. Disabling one set of a game leaves its sibling sets active.
 
@@ -270,7 +271,7 @@ Tag meanings:
 - **DLC**: the set belongs to a DLC app. Shown on every DLC set card and filterable.
 - **Not owned**: the set belongs to a DLC you do not own. It shows no progress tags, since it cannot be progressed.
 - **Achievements in DLC**: remaining achievements are manually flagged as DLC-related. Completed entries never show this tag.
-- **Missing cover art**: no cover image is cached locally.
+- **Missing cover art**: no cover image is cached locally. A DLC set counts as having a cover when its parent game's cover is cached.
 - **Sync error**: the latest per-game refresh failed.
 
 ### Review completed games

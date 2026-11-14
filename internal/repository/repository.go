@@ -183,9 +183,17 @@ type entryRef struct {
 	GroupID int64
 }
 
-// imageAppIDSQL selects the app id whose store art is shown for an entry: DLC id when bound, else game id.
+// imageAppIDSQL selects the app id whose store art an entry owns: DLC id when bound, else game id.
+// It drives cover refresh, tag recompute scope and orphan cleanup, not what is displayed.
 // Requires aliases pg (profile_games) and gs (game_sets).
 const imageAppIDSQL = `(case when coalesce(gs.dlcappid,0)<>0 then gs.dlcappid else pg.appid end)`
+
+// effectiveCoverAppIDSQL selects the app id whose cached cover is displayed for an entry. A DLC-bound entry
+// shows its DLC's cover when that cover has a path, otherwise it falls back to the parent game's cover.
+// Non-DLC entries always use the game id. Requires aliases pg (profile_games) and gs (game_sets).
+const effectiveCoverAppIDSQL = `(case when coalesce(gs.dlcappid,0)<>0 and exists (
+		select 1 from cover_images own where own.image_appid=gs.dlcappid and trim(coalesce(own.path,''))<>''
+	) then gs.dlcappid else pg.appid end)`
 
 func (r *Repository) Close() error { return r.db.Close() }
 

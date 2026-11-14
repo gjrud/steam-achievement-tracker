@@ -92,11 +92,12 @@ func scanCover(scanner rowScanner) (CoverRecord, error) {
 	return c, nil
 }
 
-// entriesForImageApp lists profile entries whose store art comes from imageAppID.
+// entriesForImageApp lists profile entries whose cover may change when imageAppID's cover changes: entries that
+// own imageAppID's store art, and every entry of game imageAppID, since its DLC entries fall back to the game cover.
 func entriesForImageApp(tx *sql.Tx, imageAppID int64) ([]profileEntry, error) {
 	rows, err := tx.Query(`select pg.profile_id, pg.appid, pg.groupid from profile_games pg
 		left join game_sets gs on gs.appid=pg.appid and gs.groupid=pg.groupid
-		where `+imageAppIDSQL+` = ?`, imageAppID)
+		where `+imageAppIDSQL+` = ? or pg.appid = ?`, imageAppID, imageAppID)
 	if err != nil {
 		return nil, err
 	}
