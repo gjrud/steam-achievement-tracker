@@ -14,7 +14,7 @@ permissions:
 
 env:
   # Keep in sync with the wails version in go.mod.
-  WAILS_VERSION: v2.16.0
+  WAILS_VERSION: v2.17.1
 
 jobs:
   test:
