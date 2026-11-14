@@ -16,15 +16,17 @@ import (
 )
 
 const (
-	// KindLibrary, KindHero and KindMain are the values stored in cover_images.kind.
+	// KindLibrary, KindHero, KindHeader and KindMain are the values stored in cover_images.kind.
 	KindLibrary = "library"
 	KindHero    = "hero"
+	KindHeader  = "header"
 	KindMain    = "main"
 
-	// LibraryFileName, HeroFileName and MainFileName are the only file names written under
-	// GameImages/<imageAppID>/. Serving must whitelist exactly these.
+	// LibraryFileName, HeroFileName, HeaderFileName and MainFileName are the only file names
+	// written under GameImages/<imageAppID>/. Serving must whitelist exactly these.
 	LibraryFileName = "library_600x900.jpg"
 	HeroFileName    = "hero_capsule.jpg"
+	HeaderFileName  = "header.jpg"
 	MainFileName    = "main_capsule.jpg"
 
 	// CoverRefreshInterval is how long a checked cover (found or not) is trusted.
@@ -74,11 +76,15 @@ type Result struct {
 // ItemAssets is the subset of a Steam store item used for cover lookup.
 // Empty capsule fields mean Steam did not report that asset.
 type ItemAssets struct {
-	AppID          int64
-	Type           int
-	ParentAppID    int64
+	AppID       int64
+	Type        int
+	ParentAppID int64
+	// AssetURLFormat is Steam's assets.asset_url_format, e.g.
+	// "steam/apps/735730/${FILENAME}?t=1732050499". ${FILENAME} is replaced by a capsule value.
+	AssetURLFormat string
 	LibraryCapsule string
 	HeroCapsule    string
+	Header         string
 	MainCapsule    string
 }
 
@@ -104,8 +110,10 @@ type storeItemsResponse struct {
 			Success int   `json:"success"`
 			Type    int   `json:"type"`
 			Assets  struct {
+				AssetURLFormat string `json:"asset_url_format"`
 				LibraryCapsule string `json:"library_capsule"`
 				HeroCapsule    string `json:"hero_capsule"`
+				Header         string `json:"header"`
 				MainCapsule    string `json:"main_capsule"`
 			} `json:"assets"`
 			Related struct {
@@ -141,18 +149,6 @@ func (c *Cache) StoreItemAssets(ctx context.Context, appIDs []int64) (map[int64]
 	return out, nil
 }
 
-// LibraryCapsuleSourceURLs returns the primary library capsule URL per app id
-// (default library_600x900.jpg when Steam reports no capsule). Kept for
-// callers that only need the URL; RefreshCover does its own fallback chain.
-func (c *Cache) LibraryCapsuleSourceURLs(ctx context.Context, appIDs []int64) (map[int64]string, error) {
-	assets, err := c.StoreItemAssets(ctx, appIDs)
-	urls := make(map[int64]string, len(assets))
-	for appID, item := range assets {
-		urls[appID] = coverSourceURL(appID, item.LibraryCapsule)
-	}
-	return urls, err
-}
-
 // NeedsRefresh reports whether RefreshCover should contact Steam for this app.
 // It is true when the app was never checked, when there is no stored kind and the
 // last check is older than MissingCoverRecheckInterval, when a stored kind's check
@@ -179,10 +175,12 @@ func (c *Cache) NeedsRefresh(imageAppID int64, prev Stored, now time.Time) bool 
 
 // RefreshCover resolves and caches the cover for imageAppID.
 //
-// Chain: library capsule (assets.LibraryCapsule, then the default
-// library_600x900.jpg) -> hero capsule (assets.HeroCapsule) -> main capsule
-// (assets.MainCapsule) -> none. The first valid image wins. The header image and
-// base-game covers are never used.
+// Chain: library capsule -> hero capsule -> header -> main capsule -> none. An
+// asset is tried only when Steam lists it in assets; its URL is built from
+// assets.AssetURLFormat with ${FILENAME} replaced by the listed value. Each
+// listed asset is tried on the primary CDN, then the fallback CDN. The first
+// valid image wins. Base-game covers are never used for a DLC. Header and main
+// capsule are landscape; the UI renders those kinds differently.
 //
 // If prev is still fresh (see NeedsRefresh) nothing is fetched and the stored
 // state is returned with Skipped=true. If nothing is found and a previous file
@@ -242,13 +240,17 @@ type coverCandidate struct {
 	urls     []string
 }
 
-// coverCandidates lists the chain in priority order. Only the library entry has
-// a default URL; the hero and main capsules are used only when Steam reports them.
+// coverCandidates lists the chain in priority order. A capsule Steam does not
+// list gets no URLs and is skipped.
 func coverCandidates(imageAppID int64, assets ItemAssets) []coverCandidate {
+	if assets.AppID == 0 {
+		assets.AppID = imageAppID
+	}
 	return []coverCandidate{
-		{kind: KindLibrary, fileName: LibraryFileName, urls: libraryCandidateURLs(imageAppID, assets.LibraryCapsule)},
-		{kind: KindHero, fileName: HeroFileName, urls: capsuleCandidateURLs(imageAppID, assets.HeroCapsule)},
-		{kind: KindMain, fileName: MainFileName, urls: capsuleCandidateURLs(imageAppID, assets.MainCapsule)},
+		{kind: KindLibrary, fileName: LibraryFileName, urls: capsuleCandidateURLs(assets, assets.LibraryCapsule)},
+		{kind: KindHero, fileName: HeroFileName, urls: capsuleCandidateURLs(assets, assets.HeroCapsule)},
+		{kind: KindHeader, fileName: HeaderFileName, urls: capsuleCandidateURLs(assets, assets.Header)},
+		{kind: KindMain, fileName: MainFileName, urls: capsuleCandidateURLs(assets, assets.MainCapsule)},
 	}
 }
 
@@ -385,6 +387,7 @@ var knownCoverFiles = []struct {
 }{
 	{KindLibrary, LibraryFileName},
 	{KindHero, HeroFileName},
+	{KindHeader, HeaderFileName},
 	{KindMain, MainFileName},
 }
 
@@ -507,49 +510,61 @@ func storeItemsAssets(payload storeItemsResponse) map[int64]ItemAssets {
 			AppID:          appID,
 			Type:           item.Type,
 			ParentAppID:    item.Related.ParentAppID,
+			AssetURLFormat: strings.TrimSpace(item.Assets.AssetURLFormat),
 			LibraryCapsule: strings.TrimSpace(item.Assets.LibraryCapsule),
 			HeroCapsule:    strings.TrimSpace(item.Assets.HeroCapsule),
+			Header:         strings.TrimSpace(item.Assets.Header),
 			MainCapsule:    strings.TrimSpace(item.Assets.MainCapsule),
 		}
 	}
 	return out
 }
 
-func appAssetURL(appID int64, file string) string {
-	return primaryCoverURLBase + fmt.Sprintf("steam/apps/%d/%s", appID, strings.TrimLeft(strings.TrimSpace(file), "/"))
-}
+const assetFilenamePlaceholder = "${FILENAME}"
 
-func coverSourceURL(appID int64, libraryCapsule string) string {
-	libraryCapsule = strings.TrimSpace(libraryCapsule)
-	if libraryCapsule == "" {
-		return defaultCoverSourceURL(appID)
+// assetURL builds the asset path from Steam's asset_url_format by replacing
+// ${FILENAME} with file. When Steam sent no format, the documented default
+// "steam/apps/<appid>/${FILENAME}" is used. Returns "" when the format or file
+// is unsafe (see unsafeAssetPath).
+func assetURL(assets ItemAssets, file string) string {
+	format := strings.TrimLeft(assets.AssetURLFormat, "/")
+	if format == "" {
+		format = fmt.Sprintf("steam/apps/%d/%s", assets.AppID, assetFilenamePlaceholder)
 	}
-	return appAssetURL(appID, libraryCapsule)
-}
-
-func defaultCoverSourceURL(appID int64) string {
-	return appAssetURL(appID, LibraryFileName)
-}
-
-// libraryCandidateURLs: Steam's library capsule (with mirror), then the default
-// library_600x900.jpg (with mirror). Duplicates removed, order preserved.
-func libraryCandidateURLs(appID int64, librarySource string) []string {
-	urls := make([]string, 0, 4)
-	if strings.TrimSpace(librarySource) != "" {
-		urls = append(urls, mirrorSourceURLs(appAssetURL(appID, librarySource))...)
+	file = strings.TrimLeft(strings.TrimSpace(file), "/")
+	if !strings.Contains(format, assetFilenamePlaceholder) || unsafeAssetPath(format) || unsafeAssetPath(file) {
+		return ""
 	}
-	urls = append(urls, mirrorSourceURLs(defaultCoverSourceURL(appID))...)
-	return uniqueStrings(urls)
+	return primaryCoverURLBase + strings.ReplaceAll(format, assetFilenamePlaceholder, file)
 }
 
-// capsuleCandidateURLs: Steam's hero or main capsule (with mirror). Nothing is
-// guessed when Steam reports no capsule.
-func capsuleCandidateURLs(appID int64, capsule string) []string {
+// unsafeAssetPath reports whether a Steam-supplied asset value could leave the
+// asset base: a ".." path segment, a "://" scheme separator or a backslash.
+func unsafeAssetPath(value string) bool {
+	if strings.Contains(value, "\\") || strings.Contains(value, "://") {
+		return true
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// capsuleCandidateURLs: the listed capsule on the primary CDN, then the fallback
+// CDN. Nothing is guessed when Steam does not list the capsule, and an unsafe
+// capsule or format is treated as unlisted.
+func capsuleCandidateURLs(assets ItemAssets, capsule string) []string {
 	capsule = strings.TrimSpace(capsule)
 	if capsule == "" {
 		return nil
 	}
-	return uniqueStrings(mirrorSourceURLs(appAssetURL(appID, capsule)))
+	primary := assetURL(assets, capsule)
+	if primary == "" {
+		return nil
+	}
+	return mirrorSourceURLs(primary)
 }
 
 // mirrorSourceURLs returns [primary, mirror] with the akamai/steamstatic swap.

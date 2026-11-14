@@ -16,10 +16,17 @@
   export let formatPlaytime = (v) => v
   export let pct = (v) => v
   export let missingAvgUnlockLabel = () => ''
+
+  $: landscape = Boolean(game.coverUrl) && (game.coverKind === 'header' || game.coverKind === 'main')
+  $: coverStyle = game.coverUrl ? `--cover-url: url("${game.coverUrl}")` : undefined
 </script>
 
 <article class="game-card" title={gameWarning(game) || gameTitle(game)} on:contextmenu|preventDefault={(event) => onContextMenu(event, game)}>
-  <div class="cover">{#if game.coverUrl}<img src={game.coverUrl} alt="" loading="lazy" decoding="async" />{:else}<div class="cover-placeholder"><span>{gameTitle(game).slice(0, 1).toUpperCase()}</span><small>Missing cover</small></div>{/if}</div>
+  <div
+    class="cover"
+    class:cover-landscape={landscape}
+    style={coverStyle}
+  >{#if game.coverUrl}<img src={game.coverUrl} alt="" loading="lazy" decoding="async" />{:else}<div class="cover-placeholder"><span>{gameTitle(game).slice(0, 1).toUpperCase()}</span><small>Missing cover</small></div>{/if}</div>
   <div class="game-body">
     <h3>{gameTitle(game)}</h3>
     <div class="tag-list">{#each gameTags(game) as tag}<span class={`tag ${toneClass(tagTone(tag))}`} title={tagDescription(tag) || undefined}>{tagLabel(tag)}</span>{/each}</div>

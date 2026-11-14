@@ -451,6 +451,61 @@ func TestFullSyncFetchesCoverForUnownedDLCSet(t *testing.T) {
 	}
 }
 
+func TestFullSyncSkipsCoverWhenStoreLookupFails(t *testing.T) {
+	paths := testPaths(t)
+	repo := openTestRepository(t, paths)
+	profile := testProfile(t, repo)
+	fake := newFakeSteamServer(t, []steam.OwnedGame{{AppID: 720, Name: "Lookup Failed Game", PlaytimeForever: 10}})
+	fake.gameBody[720] = gameJSON([]groupFixture{{id: 0}}, []achFixture{{name: "BASE", key: 1, group: 0}})
+	fake.userBody[720] = userJSON(nil, []int64{0})
+	fake.images["720/library_600x900.jpg"] = true
+	fake.store[720] = storeFixture{library: "library_600x900.jpg"}
+	fake.storeFailure = http.StatusBadGateway
+	svc := serviceWithImages(t, repo, fake, paths)
+
+	first := runServiceOK(t, svc, profile)
+	requireSyncResult(t, first, expectedSyncResult{status: "success", total: 1, synced: 1, failed: 0})
+	if _, ok, err := repo.GetCover(720); err != nil || ok {
+		t.Fatalf("cover row after failed store lookup: ok=%v err=%v, want no row (not checked)", ok, err)
+	}
+	if got := fake.count("asset", 0); got != 0 {
+		t.Fatalf("cover asset requests after failed store lookup = %d, want 0", got)
+	}
+
+	fake.storeFailure = 0
+	runServiceOK(t, svc, profile)
+	cover, ok, err := repo.GetCover(720)
+	if err != nil || !ok {
+		t.Fatalf("cover after recovered store lookup = %#v ok=%v err=%v, want stored library cover", cover, ok, err)
+	}
+	if cover.Kind != images.KindLibrary || cover.DownloadedAt == nil {
+		t.Fatalf("cover after recovered store lookup = %#v, want downloaded library cover", cover)
+	}
+}
+
+func TestFullSyncSavesMissingCoverWhenStoreLookupSucceedsWithoutApp(t *testing.T) {
+	paths := testPaths(t)
+	repo := openTestRepository(t, paths)
+	profile := testProfile(t, repo)
+	fake := newFakeSteamServer(t, []steam.OwnedGame{{AppID: 721, Name: "Unlisted Game", PlaytimeForever: 10}})
+	fake.gameBody[721] = gameJSON([]groupFixture{{id: 0}}, []achFixture{{name: "BASE", key: 1, group: 0}})
+	fake.userBody[721] = userJSON(nil, []int64{0})
+	// No store fixture: Steam answers success=2 for app 721, so the lookup succeeds without listing it.
+
+	result := runServiceOK(t, serviceWithImages(t, repo, fake, paths), profile)
+	requireSyncResult(t, result, expectedSyncResult{status: "success", total: 1, synced: 1, failed: 0})
+	cover, ok, err := repo.GetCover(721)
+	if err != nil || !ok {
+		t.Fatalf("cover = %#v ok=%v err=%v, want stored missing cover", cover, ok, err)
+	}
+	if cover.Kind != "" || cover.CheckedAt == nil {
+		t.Fatalf("cover = %#v, want Kind \"\" with CheckedAt set", cover)
+	}
+	if got := fake.count("asset", 0); got != 0 {
+		t.Fatalf("cover asset requests = %d, want 0 for unlisted app", got)
+	}
+}
+
 func TestShouldFallbackToLegacy(t *testing.T) {
 	transport := &url.Error{Op: "Get", URL: "https://api.steampowered.com/", Err: errors.New("connection reset")}
 	status := func(code int) error {
@@ -1048,22 +1103,23 @@ type gameFailure struct {
 }
 
 type fakeSteamServer struct {
-	server      *httptest.Server
-	client      *steam.Client
-	schema      map[int64][]string
-	player      map[int64]map[string]bool
-	global      map[int64]map[string]float64
-	playerError map[int64]string // GetUserAchievements (and legacy player) answers 403/error with this text
-	gameFailure map[int64]gameFailure
-	gameBody    map[int64]string // raw GetGameAchievements body override
-	userBody    map[int64]string // raw GetUserAchievements body override
-	store       map[int64]storeFixture
-	images      map[string]bool // served store_item_assets paths relative to steam/apps/
-	delay       time.Duration
-	mu          sync.Mutex
-	counts      map[string]int
-	active      int
-	maxActive   int
+	server       *httptest.Server
+	client       *steam.Client
+	schema       map[int64][]string
+	player       map[int64]map[string]bool
+	global       map[int64]map[string]float64
+	playerError  map[int64]string // GetUserAchievements (and legacy player) answers 403/error with this text
+	gameFailure  map[int64]gameFailure
+	gameBody     map[int64]string // raw GetGameAchievements body override
+	userBody     map[int64]string // raw GetUserAchievements body override
+	store        map[int64]storeFixture
+	storeFailure int             // GetItems answers this HTTP status when non-zero (use a non-retried status)
+	images       map[string]bool // served store_item_assets paths relative to steam/apps/
+	delay        time.Duration
+	mu           sync.Mutex
+	counts       map[string]int
+	active       int
+	maxActive    int
 }
 
 func newFakeSteamServer(t *testing.T, owned []steam.OwnedGame) *fakeSteamServer {
@@ -1115,6 +1171,9 @@ func newFakeSteamServer(t *testing.T, owned []steam.OwnedGame) *fakeSteamServer 
 		case "/IStoreBrowseService/GetItems/v1/":
 			f.serveStoreItems(t, w, r)
 		default:
+			if strings.HasPrefix(r.URL.Path, "/store_item_assets/") {
+				f.increment("asset", 0)
+			}
 			if rel, ok := strings.CutPrefix(r.URL.Path, "/store_item_assets/steam/apps/"); ok && f.images[rel] {
 				w.Header().Set("Content-Type", "image/jpeg")
 				fmt.Fprint(w, "jpeg-bytes")
@@ -1180,6 +1239,10 @@ func (f *fakeSteamServer) serveStoreItems(t *testing.T, w http.ResponseWriter, r
 	}
 	if err := json.Unmarshal([]byte(r.URL.Query().Get("input_json")), &input); err != nil {
 		t.Fatalf("bad store input_json: %v", err)
+	}
+	if f.storeFailure != 0 {
+		http.Error(w, "store unavailable", f.storeFailure)
+		return
 	}
 	items := make([]string, 0, len(input.IDs))
 	for _, id := range input.IDs {

@@ -20,7 +20,7 @@ This app was born for personal use and was entirely vibecoded. I have entry-leve
 - **Disabled games view** for manually disabled games or games no longer owned by the active profile.
 - **Achievement sets**: each achievement set of a game (base game, named sets, DLC sets) is its own card, completed and disabled independently.
 - **Per-set actions** to mark a set as previously completed, flag missing achievements as DLC-related, disable a set, or re-enable it.
-- **Local cover cache** using Steam library capsule images, with hero and main capsule fallbacks for DLC sets.
+- **Local cover cache** using Steam library capsule images, with hero, header and main capsule fallbacks for DLC sets.
 - **Profile-scoped data clear** that removes the active profile, tracked games, achievements, sync history, manual flags, and cached covers while keeping the Secret Service key and logs.
 - **Local SQLite storage** with migration backups, WAL mode, and app-local log rotation.
 
@@ -227,8 +227,11 @@ Cover art for a DLC set uses this order:
 
 1. the DLC's Steam library capsule
 2. the DLC's Steam hero capsule (cropped to the 2:3 card shape)
-3. the DLC's Steam main capsule (last resort, used only when the library and hero capsules are missing)
-4. a placeholder with the first letter and **Missing cover art** when none of these images exists
+3. the DLC's Steam header image (landscape; shown whole on a blurred backdrop instead of cropped)
+4. the DLC's Steam main capsule (last resort, landscape, rendered like the header)
+5. a placeholder with the first letter and **Missing cover art** when none of these images exists
+
+A capsule is only downloaded when Steam's store API lists it for that app; the app never guesses file names. If the store lookup fails during a sync, games without a cover are retried on the next sync instead of being marked as missing.
 
 Custom (non-DLC) named sets use the base game's cover. DLC sets never fall back to the base game cover.
 
@@ -323,7 +326,8 @@ All app-owned files live under `~/.steam-achievement-tracker` unless noted. Dire
 | `~/.steam-achievement-tracker/cache/images/games/` | Startup initialization / cover cache | Game cover cache root. |
 | `~/.steam-achievement-tracker/cache/images/games/<appid>/library_600x900.jpg` | Cover sync | Cached Steam library capsule image for one app (or DLC app id for DLC sets). |
 | `~/.steam-achievement-tracker/cache/images/games/<appid>/hero_capsule.jpg` | Cover sync | Cached Steam hero capsule image, used when a DLC has no library capsule. |
-| `~/.steam-achievement-tracker/cache/images/games/<appid>/main_capsule.jpg` | Cover sync | Cached Steam main capsule image, the last fallback when neither the library nor the hero capsule is available. |
+| `~/.steam-achievement-tracker/cache/images/games/<appid>/header.jpg` | Cover sync | Cached Steam header image, the fallback when neither the library nor the hero capsule is available. |
+| `~/.steam-achievement-tracker/cache/images/games/<appid>/main_capsule.jpg` | Cover sync | Cached Steam main capsule image, the last fallback when the library capsule, hero capsule and header are all unavailable. |
 | `~/.steam-achievement-tracker/logs/` | Logging initialization | Log directory. |
 | `~/.steam-achievement-tracker/logs/app.log` | Logging initialization | Current application log. |
 | `~/.steam-achievement-tracker/logs/app.log*` | Log rotation | Rotated logs; max size is 5 MB with up to 5 backups. |
@@ -336,7 +340,7 @@ All app-owned files live under `~/.steam-achievement-tracker` unless noted. Dire
 | `settings` | `key` PK, `value` | App settings. Currently stores `active_profile_id`. |
 | `schema_migrations` | `version` PK, `name`, `applied_at` | Applied DB migrations. Current schema version is `10`. |
 | `game_sets` | `appid`, `groupid`, `name`, `dlcappid`, `sort_order`, `updated_at`; PK (`appid`, `groupid`) | Achievement set catalog per game. Group `0` is the base set; `dlcappid` ties a set to a DLC app. |
-| `cover_images` | `image_appid` PK, `kind`, `file_name`, `path`, `source_url`, `checked_at`, `downloaded_at` | Cover image per image app id (the game, or the DLC for DLC sets). `kind` is `library`, `hero` or `main`. |
+| `cover_images` | `image_appid` PK, `kind`, `file_name`, `path`, `source_url`, `checked_at`, `downloaded_at` | Cover image per image app id (the game, or the DLC for DLC sets). `kind` is `library`, `hero`, `header` or `main`. |
 | `profiles` | `id` PK, `steam_id64` unique, `display_name`, `avatar_url`, `created_at`, `updated_at`, `last_synced_at` | Steam profiles known to the app. |
 | `games` | `appid` PK, `name`, `playtime_forever`, `has_achievements`, `achievement_status`, `disabled`, `disabled_reason`, `cover_path`, `cover_source_url`, `cover_checked_at`, `cover_downloaded_at`, `created_at`, `updated_at` | Shared Steam app metadata and cover cache metadata. `disabled`/`disabled_reason` are legacy/global fields; current manual disables are profile-scoped. |
 | `profile_games` | `profile_id`, `appid`, `groupid`, `total_achievements`, `unlocked_achievements`, `completion_percent`, `missing_avg_unlock`, `suggestion_score`, `is_completed`, `was_completed`, `newly_incomplete`, `sync_warning`, `last_error`, `last_error_at`, `last_synced_at`, `dlc_not_owned`; PK (`profile_id`, `appid`, `groupid`) | Per-profile entry progress and latest warning state. `dlc_not_owned` is `1` for a DLC-bound set the profile does not own. |
@@ -478,7 +482,7 @@ erDiagram
 | `https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/` | Loads each game's achievement schema. Requires the API key. |
 | `https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v1/` | Loads per-profile unlocked achievements and unlock times for a game. Requires the API key and accessible profile/game stats. |
 | `https://api.steampowered.com/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v0002/` | Loads global achievement unlock percentages used for rarity/missing-average calculations. |
-| `https://api.steampowered.com/IStoreBrowseService/GetItems/v1/` | Loads Steam store item assets, including library, hero and main capsule source paths for cover art (base games and DLC). |
+| `https://api.steampowered.com/IStoreBrowseService/GetItems/v1/` | Loads Steam store item assets, including library, hero, header and main capsule source paths for cover art (base games and DLC). |
 | `https://shared.akamai.steamstatic.com/store_item_assets/...` | Primary Steam static asset host for cached game cover downloads. |
 | `https://shared.steamstatic.com/store_item_assets/...` | Fallback Steam static asset host for cached game cover downloads. |
 | Steam avatar URLs returned by `GetPlayerSummaries` | Displayed in the app for the active profile; URL is stored in `profiles.avatar_url`. |

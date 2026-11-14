@@ -597,6 +597,27 @@
     display: block;
   }
 
+  /* Header / main capsule are landscape: show them whole over a blurred copy instead of cropping. */
+  .cover-landscape {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .cover-landscape::before {
+    content: '';
+    position: absolute;
+    inset: -16px;
+    background: var(--cover-url) center / cover no-repeat;
+    filter: blur(14px) brightness(0.55);
+  }
+
+  .cover-landscape img {
+    position: relative;
+    height: auto;
+    max-height: 100%;
+    object-fit: contain;
+  }
+
   .cover-placeholder {
     display: grid;
     gap: 4px;

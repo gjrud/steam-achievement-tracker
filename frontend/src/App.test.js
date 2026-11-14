@@ -357,6 +357,71 @@ describe('App dashboard views', () => {
   })
 })
 
+describe('GameCard cover art', () => {
+  test('marks header and main covers as landscape with an inline cover url', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState({
+        suggestions: [
+          game({appid: 11, name: 'Header Cover', coverKind: 'header', coverUrl: '/game-covers/1/header.jpg?v=1'}),
+          game({appid: 12, name: 'Main Cover', coverKind: 'main', coverUrl: '/game-covers/1/main.jpg?v=1'})
+        ]
+      }))
+    })
+
+    render(App)
+
+    for (const name of ['Header Cover', 'Main Cover']) {
+      const row = (await screen.findByRole('heading', {name})).closest('article')
+      const cover = row.querySelector('.cover')
+
+      expect(cover).toHaveClass('cover-landscape')
+      expect(cover.getAttribute('style')).toContain('--cover-url')
+      expect(cover.getAttribute('style')).toContain(`/game-covers/1/${name === 'Header Cover' ? 'header' : 'main'}.jpg?v=1`)
+      expect(cover.querySelector('img').getAttribute('src')).toContain('/game-covers/1/')
+    }
+  })
+
+  test('does not use landscape styling for library or hero covers', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState({
+        suggestions: [
+          game({appid: 13, name: 'Library Cover', coverKind: 'library', coverUrl: '/game-covers/1/library.jpg?v=1'}),
+          game({appid: 14, name: 'Hero Cover', coverKind: 'hero', coverUrl: '/game-covers/1/hero.jpg?v=1'})
+        ]
+      }))
+    })
+
+    render(App)
+
+    for (const name of ['Library Cover', 'Hero Cover']) {
+      const row = (await screen.findByRole('heading', {name})).closest('article')
+      const cover = row.querySelector('.cover')
+
+      expect(cover).toBeInTheDocument()
+      expect(cover).not.toHaveClass('cover-landscape')
+      expect(cover.getAttribute('style')).toContain('--cover-url')
+    }
+  })
+
+  test('shows the placeholder without landscape styling when no cover url exists', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState({
+        suggestions: [game({appid: 15, name: 'No Cover', coverKind: 'header', coverUrl: ''})]
+      }))
+    })
+
+    render(App)
+
+    const row = (await screen.findByRole('heading', {name: 'No Cover'})).closest('article')
+    const cover = row.querySelector('.cover')
+
+    expect(cover).not.toHaveClass('cover-landscape')
+    expect(cover).not.toHaveAttribute('style')
+    expect(within(cover).getByText('Missing cover')).toBeInTheDocument()
+    expect(cover.querySelector('img')).toBeNull()
+  })
+})
+
 function baseState() {
   return {
     appName: 'Steam Achievement Tracker',

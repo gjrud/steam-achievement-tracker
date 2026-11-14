@@ -157,7 +157,7 @@ type SetSyncUpdate struct {
 }
 
 // CoverUpdate describes the cover cached for an image app id (appid, or DLC id for DLC-bound sets).
-// Kind is "library", "hero" or "main"; empty Path means no cover is available.
+// Kind is "library", "hero", "header" or "main"; empty Path means no cover is available.
 type CoverUpdate struct {
 	ImageAppID int64
 	Kind       string

@@ -123,6 +123,29 @@ func TestAssetHandlerServesMainCoverFallback(t *testing.T) {
 	}
 }
 
+func TestAssetHandlerServesHeaderCoverFallback(t *testing.T) {
+	imagesDir := t.TempDir()
+	headerPath := filepath.Join(imagesDir, "4173830", "header.jpg")
+	if err := os.MkdirAll(filepath.Dir(headerPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(headerPath, []byte("header-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{paths: appdata.Paths{GameImages: imagesDir}}
+
+	req := httptest.NewRequest(http.MethodGet, "/game-covers/4173830/header.jpg", nil)
+	rec := httptest.NewRecorder()
+	app.assetHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if got := rec.Body.String(); got != "header-bytes" {
+		t.Fatalf("body = %q, want header bytes", got)
+	}
+}
+
 func TestAssetHandlerRejectsInvalidCoverRoutes(t *testing.T) {
 	app := &App{paths: appdata.Paths{GameImages: t.TempDir()}}
 	tests := []struct {
@@ -134,7 +157,7 @@ func TestAssetHandlerRejectsInvalidCoverRoutes(t *testing.T) {
 		{http.MethodGet, "/game-covers/0/library_600x900.jpg"},
 		{http.MethodGet, "/game-covers/-5/library_600x900.jpg"},
 		{http.MethodGet, "/game-covers/123/other.jpg"},
-		{http.MethodGet, "/game-covers/123/header.jpg"},
+		{http.MethodGet, "/game-covers/123/header.png"},
 		{http.MethodGet, "/game-covers/123/../library_600x900.jpg"},
 		{http.MethodGet, "/game-covers/123/nested/library_600x900.jpg"},
 		{http.MethodGet, "/game-covers/123/hero_capsule.png"},
