@@ -48,6 +48,44 @@ type PlayerAchievement struct {
 	UnlockTime *int64
 }
 
+// AchievementSet is one achievement set (groupid) of a game from IPlayerService/GetGameAchievements.
+// GroupID 0 is the base game set. DLCAppID is non-zero when the set is bound to a DLC.
+type AchievementSet struct {
+	GroupID                int64
+	Name                   string
+	DLCAppID               int64
+	Order                  int
+	Archived               bool
+	DeveloperOnly          bool
+	Public                 bool
+	TotalAchievements      int
+	CompletionAchievements int
+}
+
+// SetAchievement is one achievement from IPlayerService/GetGameAchievements.
+// Key is the internal_key used by GetUserAchievements.
+type SetAchievement struct {
+	InternalName  string
+	Key           int64
+	GroupID       int64
+	Archived      bool
+	GlobalPercent *float64
+}
+
+// GameAchievements is the schema of a game: all achievements (every set) and set metadata.
+// An empty value (no Achievements, no Sets) means Steam reported no schema (EResult 42).
+type GameAchievements struct {
+	Achievements  []SetAchievement
+	Sets          []AchievementSet
+	SchemaVersion int
+}
+
+// UserAchievements lists the unlocked achievements of one player. Locked achievements are absent.
+type UserAchievements struct {
+	Unlocked map[int64]*int64 // internal_key -> unlock_time (nil when Steam sent 0)
+	Groups   map[int64]bool   // groupids present in the user response
+}
+
 func New(apiKey string) *Client {
 	return &Client{APIKey: apiKey, BaseURL: defaultBaseURL, HTTPClient: &http.Client{Timeout: 30 * time.Second}}
 }
@@ -241,24 +279,206 @@ func (c *Client) GetGlobalAchievementPercentages(ctx context.Context, appID int6
 	return values, nil
 }
 
+// EResult values returned in the x-eresult header by IPlayerService endpoints.
+const (
+	eresultOK      = 1
+	eresultNoMatch = 42
+)
+
+// HTTPStatusError is a non-2xx Steam response. Code is the HTTP status code. Error() text is
+// unchanged from the earlier string errors; callers classify with errors.As, not by message.
+type HTTPStatusError struct {
+	Path    string
+	Code    int
+	Status  string // resp.Status, e.g. "404 Not Found"
+	body    string // trimmed response body, shown only for non-retryable statuses
+	hasBody bool
+}
+
+func (e *HTTPStatusError) Error() string {
+	if e.hasBody {
+		return fmt.Sprintf("Steam API %s returned %s: %s", e.Path, e.Status, e.body)
+	}
+	return fmt.Sprintf("Steam API %s returned %s", e.Path, e.Status)
+}
+
+// EResultError is an IPlayerService x-eresult other than 0, 1 and 42. Code is the EResult value.
+type EResultError struct {
+	Path string
+	Code int
+}
+
+func (e *EResultError) Error() string {
+	return fmt.Sprintf("Steam API %s returned eresult %d", e.Path, e.Code)
+}
+
+// GetGameAchievements returns the achievement schema and set metadata for a game.
+// EResult 42 (no schema) yields an empty GameAchievements and no error.
+func (c *Client) GetGameAchievements(ctx context.Context, appID int64) (GameAchievements, error) {
+	var payload struct {
+		Response struct {
+			SchemaVersion int `json:"schema_version"`
+			Achievements  []struct {
+				InternalName          string         `json:"internal_name"`
+				InternalKey           int64          `json:"internal_key"`
+				GroupID               int64          `json:"groupid"`
+				Archived              bool           `json:"archived"`
+				PlayerPercentUnlocked *flexibleFloat `json:"player_percent_unlocked"`
+			} `json:"achievements"`
+			Groups []struct {
+				GroupID                int64  `json:"groupid"`
+				LocalizedName          string `json:"localized_name"`
+				DLCAppID               int64  `json:"dlcappid"`
+				Archived               bool   `json:"archived"`
+				DeveloperOnly          bool   `json:"developeronly"`
+				Order                  int    `json:"order"`
+				IsPublic               *bool  `json:"ispublic"`
+				TotalAchievements      int    `json:"total_achievements"`
+				CompletionAchievements int    `json:"completion_achievements"`
+			} `json:"groups"`
+		} `json:"response"`
+	}
+	q := url.Values{"key": {c.APIKey}, "appid": {strconv.FormatInt(appID, 10)}, "language": {"english"}, "format": {"json"}}
+	code, err := c.getJSONWithEResult(ctx, "/IPlayerService/GetGameAchievements/v1/", q, &payload)
+	if err != nil {
+		return GameAchievements{}, err
+	}
+	if code == eresultNoMatch {
+		return GameAchievements{}, nil
+	}
+	result := GameAchievements{
+		SchemaVersion: payload.Response.SchemaVersion,
+		Achievements:  make([]SetAchievement, 0, len(payload.Response.Achievements)),
+		Sets:          make([]AchievementSet, 0, len(payload.Response.Groups)),
+	}
+	for _, a := range payload.Response.Achievements {
+		if a.InternalName == "" {
+			continue
+		}
+		ach := SetAchievement{InternalName: a.InternalName, Key: a.InternalKey, GroupID: a.GroupID, Archived: a.Archived}
+		if a.PlayerPercentUnlocked != nil {
+			v := float64(*a.PlayerPercentUnlocked)
+			ach.GlobalPercent = &v
+		}
+		result.Achievements = append(result.Achievements, ach)
+	}
+	for _, g := range payload.Response.Groups {
+		public := true
+		if g.IsPublic != nil {
+			public = *g.IsPublic
+		}
+		result.Sets = append(result.Sets, AchievementSet{
+			GroupID:                g.GroupID,
+			Name:                   g.LocalizedName,
+			DLCAppID:               g.DLCAppID,
+			Order:                  g.Order,
+			Archived:               g.Archived,
+			DeveloperOnly:          g.DeveloperOnly,
+			Public:                 public,
+			TotalAchievements:      g.TotalAchievements,
+			CompletionAchievements: g.CompletionAchievements,
+		})
+	}
+	return result, nil
+}
+
+// GetUserAchievements returns the unlocked achievements and present groupids of a player for one game.
+// Locked achievements are not listed by Steam. EResult 42 yields empty maps and no error.
+func (c *Client) GetUserAchievements(ctx context.Context, steamID64 string, appID int64) (UserAchievements, error) {
+	var payload struct {
+		Response struct {
+			Achievements []struct {
+				InternalKey int64        `json:"internal_key"`
+				Unlocked    flexibleBool `json:"unlocked"`
+				UnlockTime  flexibleInt  `json:"unlock_time"`
+			} `json:"achievements"`
+			Groups []struct {
+				GroupID int64 `json:"groupid"`
+			} `json:"groups"`
+		} `json:"response"`
+	}
+	q := url.Values{"key": {c.APIKey}, "steamid": {steamID64}, "appid": {strconv.FormatInt(appID, 10)}, "format": {"json"}}
+	result := UserAchievements{Unlocked: map[int64]*int64{}, Groups: map[int64]bool{}}
+	code, err := c.getJSONWithEResult(ctx, "/IPlayerService/GetUserAchievements/v1/", q, &payload)
+	if err != nil {
+		return UserAchievements{}, err
+	}
+	if code == eresultNoMatch {
+		return result, nil
+	}
+	for _, a := range payload.Response.Achievements {
+		if !bool(a.Unlocked) {
+			continue
+		}
+		var unlock *int64
+		if a.UnlockTime > 0 {
+			v := int64(a.UnlockTime)
+			unlock = &v
+		}
+		result.Unlocked[a.InternalKey] = unlock
+	}
+	for _, g := range payload.Response.Groups {
+		result.Groups[g.GroupID] = true
+	}
+	return result, nil
+}
+
 func (c *Client) getJSON(ctx context.Context, path string, q url.Values, target any) error {
+	_, err := c.fetchJSON(ctx, path, q, target, false)
+	return err
+}
+
+// getJSONWithEResult is getJSON plus x-eresult header handling: 0/1 decode the body,
+// 42 returns (42, nil) without decoding, any other value is an error.
+func (c *Client) getJSONWithEResult(ctx context.Context, path string, q url.Values, target any) (int, error) {
+	return c.fetchJSON(ctx, path, q, target, true)
+}
+
+func (c *Client) fetchJSON(ctx context.Context, path string, q url.Values, target any, checkEResult bool) (int, error) {
 	endpoint := c.endpoint(path, q)
 	var lastErr error
 	for attempt := 0; attempt < 4; attempt++ {
 		if err := c.waitRetry(ctx, attempt); err != nil {
-			return err
+			return 0, err
 		}
-		body, retry, err := c.getJSONBody(ctx, path, endpoint)
+		body, eresultHeader, retry, err := c.getJSONBody(ctx, path, endpoint)
 		if err != nil {
 			lastErr = err
 			if retry {
 				continue
 			}
-			return err
+			return 0, err
 		}
-		return decodeJSONBody(path, body, target)
+		if !checkEResult {
+			return 0, decodeJSONBody(path, body, target)
+		}
+		code, err := parseEResult(path, eresultHeader)
+		if err != nil {
+			return 0, err
+		}
+		switch code {
+		case 0, eresultOK:
+			return code, decodeJSONBody(path, body, target)
+		case eresultNoMatch:
+			return code, nil
+		default:
+			return code, &EResultError{Path: path, Code: code}
+		}
 	}
-	return lastErr
+	return 0, lastErr
+}
+
+// parseEResult reads the x-eresult header. A missing header is treated as 0 (not reported).
+func parseEResult(path, header string) (int, error) {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return 0, nil
+	}
+	code, err := strconv.Atoi(header)
+	if err != nil {
+		return 0, fmt.Errorf("Steam API %s returned invalid x-eresult %q", path, header)
+	}
+	return code, nil
 }
 
 func (c *Client) endpoint(path string, q url.Values) string {
@@ -286,27 +506,30 @@ func (c *Client) waitRetry(ctx context.Context, attempt int) error {
 	}
 }
 
-func (c *Client) getJSONBody(ctx context.Context, path, endpoint string) ([]byte, bool, error) {
+// getJSONBody performs one GET. It returns the body, the x-eresult header value (may be empty),
+// whether the failure is retryable, and the error.
+func (c *Client) getJSONBody(ctx context.Context, path, endpoint string) ([]byte, string, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, false, err
+		return nil, "", false, err
 	}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, true, err
+		return nil, "", true, err
 	}
+	eresult := resp.Header.Get("x-eresult")
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	resp.Body.Close()
 	if readErr != nil {
-		return nil, false, readErr
+		return nil, "", false, readErr
 	}
 	if retryableSteamStatus(resp.StatusCode) {
-		return nil, true, fmt.Errorf("Steam API %s returned %s", path, resp.Status)
+		return nil, "", true, &HTTPStatusError{Path: path, Code: resp.StatusCode, Status: resp.Status}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, false, fmt.Errorf("Steam API %s returned %s: %s", path, resp.Status, strings.TrimSpace(string(body)))
+		return nil, "", false, &HTTPStatusError{Path: path, Code: resp.StatusCode, Status: resp.Status, body: strings.TrimSpace(string(body)), hasBody: true}
 	}
-	return body, false, nil
+	return body, eresult, false, nil
 }
 
 func retryableSteamStatus(status int) bool {

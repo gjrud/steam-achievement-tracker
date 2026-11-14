@@ -234,10 +234,10 @@
     error = ''
     try {
       let nextState
-      if (action === 'previously-completed') nextState = await MarkGamePreviouslyCompleted(game.appid)
-      else if (action === 'toggle-dlc') nextState = await ToggleGameMissingAchievementsInDLC(game.appid)
-      else if (action === 'disable') nextState = await DisableGame(game.appid)
-      else if (action === 'enable') nextState = await EnableGame(game.appid)
+      if (action === 'previously-completed') nextState = await MarkGamePreviouslyCompleted(game.appid, game.groupId)
+      else if (action === 'toggle-dlc') nextState = await ToggleGameMissingAchievementsInDLC(game.appid, game.groupId)
+      else if (action === 'disable') nextState = await DisableGame(game.appid, game.groupId)
+      else if (action === 'enable') nextState = await EnableGame(game.appid, game.groupId)
       if (nextState && token === stateRequestToken) {
         state = nextState
         schedulePolling()
@@ -366,9 +366,9 @@
       <button on:click={() => runGameAction('toggle-dlc')} disabled={gameActionLoading}>{contextMenu.game.missingAchievementsInDLC ? 'Clear DLC-missing flag' : 'Flag missing achievements in DLC'}</button>
     {/if}
     {#if contextMenu.game.disabled}
-      <button on:click={() => runGameAction('enable')} disabled={gameActionLoading}>Re-enable game</button>
-    {:else if !contextMenu.game.disabled}
-      <button class="danger" on:click={() => runGameAction('disable')} disabled={gameActionLoading}>Disable game</button>
+      <button on:click={() => runGameAction('enable')} disabled={gameActionLoading}>{contextMenu.game.isSet ? 'Re-enable set' : 'Re-enable game'}</button>
+    {:else}
+      <button class="danger" on:click={() => runGameAction('disable')} disabled={gameActionLoading}>{contextMenu.game.isSet ? 'Disable set' : 'Disable game'}</button>
     {/if}
   </div>
 {/if}

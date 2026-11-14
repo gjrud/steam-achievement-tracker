@@ -2,8 +2,12 @@ package syncer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
+	"net/url"
+	"sort"
 	"sync"
 	"time"
 
@@ -51,8 +55,8 @@ func (s *Service) FullSync(ctx context.Context, profile repository.Profile) (Res
 	}
 	syncable, syncableIDs := syncableGames(owned, disabledIDs)
 	run.result.GamesTotal = len(syncable)
-	coverSources := s.loadCoverSources(ctx, syncableIDs)
-	if err := run.syncGames(ctx, syncable, coverSources); err != nil {
+	coverAssets := s.loadCoverAssets(ctx, syncableIDs)
+	if err := run.syncGames(ctx, syncable, coverAssets); err != nil {
 		return run.fail(err)
 	}
 	run.finalize()
@@ -95,12 +99,12 @@ func gameRecord(g steam.OwnedGame) repository.GameRecord {
 	return repository.GameRecord{AppID: g.AppID, Name: g.Name, PlaytimeForever: g.PlaytimeForever}
 }
 
-func (r *fullSyncRun) syncGames(ctx context.Context, games []steam.OwnedGame, coverSources map[int64]string) error {
+func (r *fullSyncRun) syncGames(ctx context.Context, games []steam.OwnedGame, coverAssets map[int64]images.ItemAssets) error {
 	jobs := make(chan steam.OwnedGame)
 	var wg sync.WaitGroup
 	for i := 0; i < 4; i++ {
 		wg.Add(1)
-		go r.syncWorker(ctx, jobs, coverSources, &wg)
+		go r.syncWorker(ctx, jobs, coverAssets, &wg)
 	}
 	err := dispatchSyncJobs(ctx, jobs, games)
 	close(jobs)
@@ -108,10 +112,10 @@ func (r *fullSyncRun) syncGames(ctx context.Context, games []steam.OwnedGame, co
 	return err
 }
 
-func (r *fullSyncRun) syncWorker(ctx context.Context, jobs <-chan steam.OwnedGame, coverSources map[int64]string, wg *sync.WaitGroup) {
+func (r *fullSyncRun) syncWorker(ctx context.Context, jobs <-chan steam.OwnedGame, coverAssets map[int64]images.ItemAssets, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for game := range jobs {
-		if err := r.s.syncGame(ctx, r.profile, game, coverSources[game.AppID]); err != nil {
+		if err := r.s.syncGame(ctx, r.profile, game, coverAssets); err != nil {
 			r.recordGameFailure(game, err)
 			continue
 		}
@@ -192,18 +196,47 @@ func (r *fullSyncRun) finish() {
 	}
 }
 
-func (s *Service) syncGame(ctx context.Context, profile repository.Profile, game steam.OwnedGame, coverSourceURL string) error {
+// syncGame syncs one game for the profile: every eligible achievement set becomes one entry.
+// The new IPlayerService API is used first; only non-transient failures fall back to the legacy API.
+func (s *Service) syncGame(ctx context.Context, profile repository.Profile, game steam.OwnedGame, coverAssets map[int64]images.ItemAssets) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	schema, err := s.Steam.GetGameAchievements(ctx, game.AppID)
+	if err != nil {
+		if !shouldFallbackToLegacy(err) {
+			return fmt.Errorf("achievement schema: %w", err)
+		}
+		// Legacy writes one group-0 entry and prunes every other entry of the game, so it must not run
+		// for an app that already has set data. The failure then surfaces and existing entries are kept.
+		hasSets, checkErr := s.Repo.HasSetData(game.AppID)
+		if checkErr != nil {
+			return fmt.Errorf("achievement schema: %w (set data check: %v)", err, checkErr)
+		}
+		if hasSets {
+			return fmt.Errorf("achievement schema: %w", err)
+		}
+		log.Printf("appid %d: GetGameAchievements failed, using legacy achievement API: %v", game.AppID, err)
+		return s.syncGameLegacy(ctx, profile, game, coverAssets, now)
+	}
+	if len(schema.Achievements) == 0 {
+		return s.saveGameWithoutAchievements(ctx, profile, game, coverAssets, now)
+	}
+	user, err := s.Steam.GetUserAchievements(ctx, profile.SteamID64, game.AppID)
+	if err != nil {
+		return fmt.Errorf("user achievements: %w", err)
+	}
+	entries := buildSetEntries(game.AppID, schema, user)
+	return s.saveEntries(ctx, profile, game, entries, coverAssets, now)
+}
+
+// syncGameLegacy is the pre-IPlayerService path: one group-0 entry from the old Web API endpoints.
+// Remove together with the legacy client methods once Steam documents GetGameAchievements.
+func (s *Service) syncGameLegacy(ctx context.Context, profile repository.Profile, game steam.OwnedGame, coverAssets map[int64]images.ItemAssets, now string) error {
 	schema, err := s.Steam.GetSchemaForGame(ctx, game.AppID)
 	if err != nil {
 		return fmt.Errorf("achievement schema: %w", err)
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	prev, err := s.Repo.ProfileGame(profile.ID, game.AppID)
-	if err != nil {
-		return err
-	}
 	if len(schema) == 0 {
-		return s.saveGameWithoutAchievements(ctx, profile, game, prev, coverSourceURL, now)
+		return s.saveGameWithoutAchievements(ctx, profile, game, coverAssets, now)
 	}
 	playerAchievements, err := s.Steam.GetPlayerAchievements(ctx, profile.SteamID64, game.AppID)
 	if err != nil {
@@ -214,24 +247,174 @@ func (s *Service) syncGame(ctx context.Context, profile repository.Profile, game
 		return fmt.Errorf("global percentages: %w", err)
 	}
 	stats := buildAchievementStats(schema, playerAchievements, globalPercentages)
-	update := achievementSyncUpdate(profile, game, prev, stats, now)
+	entries := []setEntry{{GroupID: 0, ImageAppID: game.AppID, stats: stats}}
+	return s.saveEntries(ctx, profile, game, entries, coverAssets, now)
+}
+
+// saveGameWithoutAchievements stores the game as no_achievements with its group-0 entry only.
+func (s *Service) saveGameWithoutAchievements(ctx context.Context, profile repository.Profile, game steam.OwnedGame, coverAssets map[int64]images.ItemAssets, now string) error {
+	prev, err := s.Repo.ProfileGame(profile.ID, game.AppID, 0)
+	if err != nil {
+		return err
+	}
+	update := repository.GameSyncUpdate{
+		ProfileID: profile.ID, AppID: game.AppID, Name: game.Name, PlaytimeForever: game.PlaytimeForever,
+		HasAchievements: false, AchievementStatus: "no_achievements", SyncedAt: now,
+		Sets: []repository.SetSyncUpdate{{GroupID: 0, WasCompleted: wasEverCompleted(prev), NewlyIncomplete: prev.ManualWasCompleted}},
+	}
 	if err := s.Repo.SaveGameSync(update); err != nil {
 		return err
 	}
-	s.refreshCover(ctx, game.AppID, coverSourceURL)
+	s.refreshCovers(ctx, game.AppID, []int64{game.AppID}, coverAssets)
 	return nil
 }
 
-func (s *Service) saveGameWithoutAchievements(ctx context.Context, profile repository.Profile, game steam.OwnedGame, prev repository.ProfileGameState, coverSourceURL, now string) error {
+// saveEntries writes one successful game sync with the given entries, then refreshes the covers they show.
+// Entries may be empty (game has achievements but none is eligible); that prunes all entries of the game.
+func (s *Service) saveEntries(ctx context.Context, profile repository.Profile, game steam.OwnedGame, entries []setEntry, coverAssets map[int64]images.ItemAssets, now string) error {
+	sets := make([]repository.SetSyncUpdate, 0, len(entries))
+	for _, entry := range entries {
+		prev, err := s.Repo.ProfileGame(profile.ID, game.AppID, entry.GroupID)
+		if err != nil {
+			return err
+		}
+		sets = append(sets, setSyncUpdate(entry, prev))
+	}
 	update := repository.GameSyncUpdate{
 		ProfileID: profile.ID, AppID: game.AppID, Name: game.Name, PlaytimeForever: game.PlaytimeForever,
-		HasAchievements: false, AchievementStatus: "no_achievements", WasCompleted: wasEverCompleted(prev), NewlyIncomplete: prev.ManualWasCompleted, SyncedAt: now,
+		HasAchievements: true, AchievementStatus: "ok", Sets: sets, SyncedAt: now,
 	}
 	if err := s.Repo.SaveGameSync(update); err != nil {
 		return err
 	}
-	s.refreshCover(ctx, game.AppID, coverSourceURL)
+	s.refreshCovers(ctx, game.AppID, coverImageAppIDs(game.AppID, entries), coverAssets)
 	return nil
+}
+
+// setEntry is one eligible achievement set (appid + groupid) of a game for a profile.
+type setEntry struct {
+	GroupID     int64
+	Name        string
+	DLCAppID    int64
+	ImageAppID  int64 // DLC id when the set is DLC-bound, else the game id
+	Order       int
+	DLCNotOwned bool // DLC-bound set the profile does not own; shown with the dlc_not_owned tag
+	stats       achievementStats
+}
+
+// buildSetEntries applies the set eligibility rules to a game schema and a player's unlocks.
+// A set is an entry when it is present, public, not developer-only and not archived, and has at least one
+// non-archived achievement. DLC ownership does not hide a set: a DLC-bound set (groupid != 0, dlcappid != 0)
+// the player does not own is still an entry, flagged DLCNotOwned.
+// A DLC group counts as owned when it is present in the user response or the player has any unlocked
+// achievement in it. Achievements whose groupid has no set metadata get a default set (see withDefaultSets).
+// Totals count non-archived achievements only. Archived achievements are kept in the entry records.
+// The result follows the schema set order; duplicate groupids keep the first set.
+func buildSetEntries(appID int64, game steam.GameAchievements, user steam.UserAchievements) []setEntry {
+	byGroup := make(map[int64][]steam.SetAchievement)
+	for _, a := range game.Achievements {
+		byGroup[a.GroupID] = append(byGroup[a.GroupID], a)
+	}
+	sets := withDefaultSets(game.Sets, byGroup)
+	seen := make(map[int64]bool, len(sets))
+	entries := make([]setEntry, 0, len(sets))
+	for _, set := range sets {
+		if seen[set.GroupID] || !setEligible(set) {
+			continue
+		}
+		seen[set.GroupID] = true
+		entry, ok := buildSetEntry(appID, set, byGroup[set.GroupID], user)
+		if ok {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
+}
+
+// withDefaultSets appends a default set (public, no DLC, unnamed) for every groupid that has achievements
+// but no metadata in sets, including group 0 when sets is empty. Added sets follow in ascending groupid order.
+func withDefaultSets(sets []steam.AchievementSet, byGroup map[int64][]steam.SetAchievement) []steam.AchievementSet {
+	known := make(map[int64]bool, len(sets))
+	for _, set := range sets {
+		known[set.GroupID] = true
+	}
+	var missing []int64
+	for groupID := range byGroup {
+		if !known[groupID] {
+			missing = append(missing, groupID)
+		}
+	}
+	if len(missing) == 0 {
+		return sets
+	}
+	sort.Slice(missing, func(i, j int) bool { return missing[i] < missing[j] })
+	out := make([]steam.AchievementSet, 0, len(sets)+len(missing))
+	out = append(out, sets...)
+	for _, groupID := range missing {
+		out = append(out, steam.AchievementSet{GroupID: groupID, Public: true})
+	}
+	return out
+}
+
+// setEligible reports whether a set is shown at all. DLC ownership is not checked here; see dlcNotOwned.
+func setEligible(set steam.AchievementSet) bool {
+	return !(set.Archived || set.DeveloperOnly || !set.Public)
+}
+
+// dlcNotOwned reports a DLC-bound set whose DLC the player does not own: no group flag and no unlocked achievement.
+func dlcNotOwned(set steam.AchievementSet, achievements []steam.SetAchievement, user steam.UserAchievements) bool {
+	return set.GroupID != 0 && set.DLCAppID != 0 && !user.Groups[set.GroupID] && !anyUnlocked(achievements, user)
+}
+
+// anyUnlocked reports whether the player has unlocked at least one of the given achievements.
+func anyUnlocked(achievements []steam.SetAchievement, user steam.UserAchievements) bool {
+	for _, a := range achievements {
+		if _, ok := user.Unlocked[a.Key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func buildSetEntry(appID int64, set steam.AchievementSet, achievements []steam.SetAchievement, user steam.UserAchievements) (setEntry, bool) {
+	var tally statsTally
+	records := make([]repository.AchievementRecord, 0, len(achievements))
+	for _, a := range achievements {
+		unlockTime, unlocked := user.Unlocked[a.Key]
+		records = append(records, repository.AchievementRecord{
+			APIName: a.InternalName, GlobalPercent: a.GlobalPercent, Unlocked: unlocked, UnlockTime: unlockTime, Archived: a.Archived,
+		})
+		if !a.Archived {
+			tally.add(unlocked, a.GlobalPercent)
+		}
+	}
+	if tally.total == 0 {
+		return setEntry{}, false
+	}
+	imageAppID := appID
+	if set.DLCAppID != 0 {
+		imageAppID = set.DLCAppID
+	}
+	return setEntry{
+		GroupID: set.GroupID, Name: set.Name, DLCAppID: set.DLCAppID, ImageAppID: imageAppID, Order: set.Order,
+		DLCNotOwned: dlcNotOwned(set, achievements, user),
+		stats:       tally.stats(records),
+	}, true
+}
+
+// setSyncUpdate converts an entry into its repository update. Completion and the was/newly-incomplete flags
+// are evaluated against the entry's own previous state.
+func setSyncUpdate(entry setEntry, prev repository.ProfileGameState) repository.SetSyncUpdate {
+	stats := entry.stats
+	isCompleted := stats.total > 0 && stats.unlocked == stats.total
+	score := stats.score
+	return repository.SetSyncUpdate{
+		GroupID: entry.GroupID, Name: entry.Name, DLCAppID: entry.DLCAppID, DLCNotOwned: entry.DLCNotOwned, Order: entry.Order,
+		TotalAchievements: stats.total, UnlockedAchievements: stats.unlocked, CompletionPercent: stats.completion,
+		MissingAvgUnlock: stats.missingAvg, SuggestionScore: &score, IsCompleted: isCompleted,
+		WasCompleted: wasEverCompletedNow(prev, isCompleted), NewlyIncomplete: newlyIncomplete(prev, isCompleted, stats.total),
+		Achievements: stats.records,
+	}
 }
 
 type achievementStats struct {
@@ -243,20 +426,46 @@ type achievementStats struct {
 	score      float64
 }
 
+// statsTally counts countable achievements and the missing-average input.
+type statsTally struct {
+	total        int
+	unlocked     int
+	missingSum   float64
+	missingKnown int
+}
+
+func (t *statsTally) add(unlocked bool, globalPercent *float64) {
+	t.total++
+	if unlocked {
+		t.unlocked++
+		return
+	}
+	if globalPercent != nil {
+		t.missingSum += *globalPercent
+		t.missingKnown++
+	}
+}
+
+func (t statsTally) stats(records []repository.AchievementRecord) achievementStats {
+	s := achievementStats{records: records, total: t.total, unlocked: t.unlocked}
+	s.completion = completionPercent(s.unlocked, s.total)
+	s.missingAvg = averagePtr(t.missingSum, t.missingKnown)
+	s.score = suggestionScore(s.completion, s.missingAvg)
+	return s
+}
+
+// buildAchievementStats is the legacy-API variant: schema plus player and global data, one group-0 entry.
 func buildAchievementStats(schema []steam.SchemaAchievement, playerAchievements []steam.PlayerAchievement, globalPercentages map[string]float64) achievementStats {
 	playerMap := playerAchievementMap(playerAchievements)
-	stats := achievementStats{records: make([]repository.AchievementRecord, 0, len(schema)), total: len(schema)}
-	missingSum := 0.0
-	missingKnown := 0
+	var tally statsTally
+	records := make([]repository.AchievementRecord, 0, len(schema))
 	for _, a := range schema {
 		pa := playerMap[a.APIName]
 		gp := globalPercentPtr(globalPercentages, a.APIName)
-		stats.addAchievement(a, pa, gp, &missingSum, &missingKnown)
+		tally.add(pa.Achieved, gp)
+		records = append(records, repository.AchievementRecord{APIName: a.APIName, GlobalPercent: gp, Unlocked: pa.Achieved, UnlockTime: pa.UnlockTime})
 	}
-	stats.completion = completionPercent(stats.unlocked, stats.total)
-	stats.missingAvg = averagePtr(missingSum, missingKnown)
-	stats.score = suggestionScore(stats.completion, stats.missingAvg)
-	return stats
+	return tally.stats(records)
 }
 
 func playerAchievementMap(playerAchievements []steam.PlayerAchievement) map[string]steam.PlayerAchievement {
@@ -267,27 +476,12 @@ func playerAchievementMap(playerAchievements []steam.PlayerAchievement) map[stri
 	return playerMap
 }
 
-func (s *achievementStats) addAchievement(a steam.SchemaAchievement, pa steam.PlayerAchievement, gp *float64, missingSum *float64, missingKnown *int) {
-	if pa.Achieved {
-		s.unlocked++
-	}
-	if missingAchievementWithKnownGlobal(pa, gp) {
-		*missingSum += *gp
-		*missingKnown++
-	}
-	s.records = append(s.records, repository.AchievementRecord{APIName: a.APIName, GlobalPercent: gp, Unlocked: pa.Achieved, UnlockTime: pa.UnlockTime})
-}
-
 func globalPercentPtr(globalPercentages map[string]float64, apiName string) *float64 {
 	value, ok := globalPercentages[apiName]
 	if !ok {
 		return nil
 	}
 	return &value
-}
-
-func missingAchievementWithKnownGlobal(pa steam.PlayerAchievement, gp *float64) bool {
-	return !pa.Achieved && gp != nil
 }
 
 func completionPercent(unlocked, total int) float64 {
@@ -311,16 +505,6 @@ func suggestionScore(completion float64, missingAvg *float64) float64 {
 		score += *missingAvg * 0.5
 	}
 	return score
-}
-
-func achievementSyncUpdate(profile repository.Profile, game steam.OwnedGame, prev repository.ProfileGameState, stats achievementStats, now string) repository.GameSyncUpdate {
-	isCompleted := stats.total > 0 && stats.unlocked == stats.total
-	return repository.GameSyncUpdate{
-		ProfileID: profile.ID, AppID: game.AppID, Name: game.Name, PlaytimeForever: game.PlaytimeForever,
-		HasAchievements: true, AchievementStatus: "ok", TotalAchievements: stats.total, UnlockedAchievements: stats.unlocked,
-		CompletionPercent: stats.completion, MissingAvgUnlock: stats.missingAvg, SuggestionScore: &stats.score, IsCompleted: isCompleted,
-		WasCompleted: wasEverCompletedNow(prev, isCompleted), NewlyIncomplete: newlyIncomplete(prev, isCompleted, stats.total), Achievements: stats.records, SyncedAt: now,
-	}
 }
 
 func wasEverCompleted(prev repository.ProfileGameState) bool {
@@ -350,28 +534,129 @@ func wasCompletedBefore(prev repository.ProfileGameState) bool {
 	return prev.WasCompleted || prev.IsCompleted
 }
 
-func (s *Service) loadCoverSources(ctx context.Context, appIDs []int64) map[int64]string {
-	if s.Images == nil {
-		return nil
+// shouldFallbackToLegacy reports whether a GetGameAchievements failure should switch to the legacy API.
+// Endpoints are undocumented, so a non-transient HTTP status (4xx other than 429, or any other status that is
+// not transient) or an EResult error falls back. Transient statuses (429, 500, 502, 503, 504) never fall back:
+// 429/500/503 were already retried by the client, 502/504 are not retried, and all surface as a normal failure.
+// Transport, context and decode errors surface too.
+func shouldFallbackToLegacy(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
 	}
-	sources, err := s.Images.LibraryCapsuleSourceURLs(ctx, appIDs)
-	if err != nil {
-		log.Printf("load cover sources: %v", err)
-		return nil
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return false
 	}
-	return sources
+	var statusErr *steam.HTTPStatusError
+	if errors.As(err, &statusErr) {
+		return !transientSteamStatus(statusErr.Code)
+	}
+	var eresultErr *steam.EResultError
+	return errors.As(err, &eresultErr)
 }
 
-func (s *Service) refreshCover(ctx context.Context, appID int64, sourceURL string) {
+func transientSteamStatus(code int) bool {
+	switch code {
+	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway,
+		http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+// loadCoverAssets fetches store assets for the base games about to sync, in one batch.
+// DLC ids are looked up later, only when their cover is stale. Failure keeps any partial result.
+func (s *Service) loadCoverAssets(ctx context.Context, appIDs []int64) map[int64]images.ItemAssets {
+	if s.Images == nil {
+		return nil
+	}
+	assets, err := s.Images.StoreItemAssets(ctx, appIDs)
+	if err != nil {
+		log.Printf("load cover assets: %v", err)
+	}
+	return assets
+}
+
+// coverImageAppIDs lists the image app ids shown by a game's entries: the game id, then each distinct DLC id.
+func coverImageAppIDs(appID int64, entries []setEntry) []int64 {
+	ids := []int64{appID}
+	for _, entry := range entries {
+		if entry.ImageAppID != 0 && !containsAppID(ids, entry.ImageAppID) {
+			ids = append(ids, entry.ImageAppID)
+		}
+	}
+	return ids
+}
+
+func containsAppID(ids []int64, id int64) bool {
+	for _, existing := range ids {
+		if existing == id {
+			return true
+		}
+	}
+	return false
+}
+
+// refreshCovers refreshes the cover of every image app id. Failures are logged and never fail the game sync.
+func (s *Service) refreshCovers(ctx context.Context, appID int64, imageAppIDs []int64, coverAssets map[int64]images.ItemAssets) {
 	if s.Images == nil {
 		return
 	}
-	res, err := s.Images.RefreshCover(ctx, appID, sourceURL)
+	for _, imageAppID := range imageAppIDs {
+		if err := s.refreshCover(ctx, appID, imageAppID, coverAssets); err != nil {
+			log.Printf("refresh cover %d: %v", imageAppID, err)
+		}
+	}
+}
+
+// refreshCover refreshes one cover. The game's own assets come from the batch. DLC assets are looked up
+// on demand, and only when the stored cover is stale (NeedsRefresh), so a fresh DLC cover costs no request.
+func (s *Service) refreshCover(ctx context.Context, appID, imageAppID int64, coverAssets map[int64]images.ItemAssets) error {
+	prev, err := s.storedCover(imageAppID)
 	if err != nil {
-		log.Printf("refresh cover %d: %v", appID, err)
-		return
+		return err
 	}
-	if err := s.Repo.SaveCover(appID, res.Path, res.SourceURL, res.Downloaded); err != nil {
-		log.Printf("save cover %d: %v", appID, err)
+	if !s.Images.NeedsRefresh(imageAppID, prev, time.Now()) {
+		return nil
 	}
+	assets := coverAssets[imageAppID]
+	if imageAppID != appID {
+		assets, err = s.lookupItemAssets(ctx, imageAppID)
+		if err != nil {
+			return err
+		}
+	}
+	res, err := s.Images.RefreshCover(ctx, imageAppID, assets, prev)
+	if err != nil {
+		return err
+	}
+	if res.Skipped {
+		return nil
+	}
+	// SaveCover overwrites kind, file, path and source; RefreshCover returns the kept file's values when
+	// it could not download, so the stored cover stays consistent with what is on disk.
+	return s.Repo.SaveCover(repository.CoverUpdate{
+		ImageAppID: imageAppID, Kind: res.Kind, FileName: res.FileName, Path: res.Path,
+		SourceURL: res.SourceURL, Downloaded: res.Downloaded,
+	})
+}
+
+func (s *Service) storedCover(imageAppID int64) (images.Stored, error) {
+	record, ok, err := s.Repo.GetCover(imageAppID)
+	if err != nil || !ok {
+		return images.Stored{}, err
+	}
+	stored := images.Stored{Kind: record.Kind, FileName: record.FileName}
+	if record.CheckedAt != nil {
+		if checked, parseErr := time.Parse(time.RFC3339, *record.CheckedAt); parseErr == nil {
+			stored.CheckedAt = checked
+		}
+	}
+	return stored, nil
+}
+
+func (s *Service) lookupItemAssets(ctx context.Context, imageAppID int64) (images.ItemAssets, error) {
+	items, err := s.Images.StoreItemAssets(ctx, []int64{imageAppID})
+	return items[imageAppID], err
 }

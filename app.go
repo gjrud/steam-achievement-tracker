@@ -222,45 +222,49 @@ func (a *App) ClearActiveUserData() (AppState, error) {
 	return a.GetAppState()
 }
 
-func (a *App) MarkGamePreviouslyCompleted(appID int64) (AppState, error) {
+// MarkGamePreviouslyCompleted flags one achievement set (appID, groupID) of the active profile.
+func (a *App) MarkGamePreviouslyCompleted(appID, groupID int64) (AppState, error) {
 	repo, profile, err := a.activeRepoAndProfile()
 	if err != nil {
 		return AppState{}, err
 	}
-	if err := repo.MarkGamePreviouslyCompleted(profile.ID, appID); err != nil {
+	if err := repo.MarkGamePreviouslyCompleted(profile.ID, appID, groupID); err != nil {
 		return AppState{}, err
 	}
 	return a.GetAppState()
 }
 
-func (a *App) ToggleGameMissingAchievementsInDLC(appID int64) (AppState, error) {
+// ToggleGameMissingAchievementsInDLC toggles the missing-DLC flag on one achievement set.
+func (a *App) ToggleGameMissingAchievementsInDLC(appID, groupID int64) (AppState, error) {
 	repo, profile, err := a.activeRepoAndProfile()
 	if err != nil {
 		return AppState{}, err
 	}
-	if err := repo.ToggleMissingAchievementsInDLC(profile.ID, appID); err != nil {
+	if err := repo.ToggleMissingAchievementsInDLC(profile.ID, appID, groupID); err != nil {
 		return AppState{}, err
 	}
 	return a.GetAppState()
 }
 
-func (a *App) DisableGame(appID int64) (AppState, error) {
+// DisableGame disables one achievement set (appID, groupID); sibling sets are unaffected.
+func (a *App) DisableGame(appID, groupID int64) (AppState, error) {
 	repo, profile, err := a.activeRepoAndProfile()
 	if err != nil {
 		return AppState{}, err
 	}
-	if err := repo.DisableProfileGame(profile.ID, appID); err != nil {
+	if err := repo.DisableProfileGame(profile.ID, appID, groupID); err != nil {
 		return AppState{}, err
 	}
 	return a.GetAppState()
 }
 
-func (a *App) EnableGame(appID int64) (AppState, error) {
+// EnableGame re-enables one achievement set (appID, groupID).
+func (a *App) EnableGame(appID, groupID int64) (AppState, error) {
 	repo, profile, err := a.activeRepoAndProfile()
 	if err != nil {
 		return AppState{}, err
 	}
-	if err := repo.EnableProfileGame(profile.ID, appID); err != nil {
+	if err := repo.EnableProfileGame(profile.ID, appID, groupID); err != nil {
 		return AppState{}, err
 	}
 	return a.GetAppState()
@@ -469,6 +473,8 @@ func (a *App) context() context.Context {
 	return context.Background()
 }
 
+// removeCachedGameImages deletes the image directories of appIDs. Callers pass only orphaned image app ids
+// (see repository.ClearProfileData), so covers still used by other profiles are kept.
 func removeCachedGameImages(root string, appIDs []int64) error {
 	for _, appID := range appIDs {
 		if appID <= 0 {
@@ -482,6 +488,11 @@ func removeCachedGameImages(root string, appIDs []int64) error {
 	return nil
 }
 
+// servableCoverFile reports whether name is a cover file the image cache writes.
+func servableCoverFile(name string) bool {
+	return name == images.LibraryFileName || name == images.HeroFileName || name == images.MainFileName
+}
+
 func (a *App) assetHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/game-covers/") {
@@ -489,7 +500,7 @@ func (a *App) assetHandler() http.Handler {
 			return
 		}
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/game-covers/"), "/")
-		if len(parts) != 2 || parts[1] != "library_600x900.jpg" {
+		if len(parts) != 2 || !servableCoverFile(parts[1]) {
 			http.NotFound(w, r)
 			return
 		}
@@ -507,7 +518,7 @@ func (a *App) assetHandler() http.Handler {
 			}
 			paths = resolved
 		}
-		path := filepath.Join(paths.GameImages, parts[0], "library_600x900.jpg")
+		path := filepath.Join(paths.GameImages, strconv.FormatInt(appid, 10), parts[1])
 		http.ServeFile(w, r, path)
 	})
 }

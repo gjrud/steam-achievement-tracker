@@ -1,7 +1,16 @@
-export const suggestionTagOptions = ['new_achievements_added', 'almost_there', 'in_progress', 'untouched', 'no_achievements', 'missing_achievements_in_dlc', 'missing_cover_art', 'sync_warning']
+export const suggestionTagOptions = ['new_achievements_added', 'almost_there', 'in_progress', 'untouched', 'no_achievements', 'dlc', 'dlc_not_owned', 'missing_achievements_in_dlc', 'missing_cover_art', 'sync_warning']
 
+// Issue tags that describe an incomplete entry. Completed cards never show them, even if a stored tag is present.
+const incompleteOnlyTags = ['new_achievements_added', 'missing_achievements_in_dlc']
+
+// gameTags lists the tags shown on a card and used for filtering. 'dlc' is derived from dlcAppId, so DLC sets
+// are filterable like any other tag.
 export function gameTags(game) {
-  return Array.isArray(game?.tags) ? game.tags : []
+  const stored = Array.isArray(game?.tags) ? game.tags : []
+  const withDLC = game?.dlcAppId ? ['dlc', ...stored] : stored
+  const tags = [...new Set(withDLC)]
+  if (!game?.isCompleted) return tags
+  return tags.filter((tag) => !incompleteOnlyTags.includes(tag))
 }
 
 export function tagLabel(tag) {
@@ -12,6 +21,8 @@ export function tagLabel(tag) {
     case 'untouched': return 'Untouched'
     case 'no_achievements': return 'No achievements'
     case 'completed': return 'Completed'
+    case 'dlc': return 'DLC'
+    case 'dlc_not_owned': return 'Not owned'
     case 'missing_achievements_in_dlc': return 'Achievements in DLC'
     case 'missing_cover_art': return 'Missing cover art'
     case 'sync_warning': return 'Sync error'
@@ -19,12 +30,23 @@ export function tagLabel(tag) {
   }
 }
 
+export function tagDescription(tag) {
+  switch (tag) {
+    case 'dlc': return 'Achievement set from DLC'
+    case 'dlc_not_owned': return 'You do not own the DLC for this achievement set.'
+    case 'missing_achievements_in_dlc': return 'Remaining achievements belong to DLC or content you do not plan to count. Set manually from the card menu.'
+    default: return ''
+  }
+}
+
 export function tagTone(tag) {
   switch (tag) {
     case 'completed': return 'success'
     case 'in_progress': return 'info'
-    case 'almost_there': return 'accent'
+    case 'almost_there':
+    case 'dlc': return 'accent'
     case 'new_achievements_added': return 'warn'
+    case 'dlc_not_owned':
     case 'missing_achievements_in_dlc':
     case 'missing_cover_art':
     case 'sync_warning': return 'danger'

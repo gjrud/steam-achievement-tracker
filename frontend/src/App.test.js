@@ -192,14 +192,168 @@ describe('App dashboard views', () => {
     await user.click(await screen.findByRole('button', {name: 'Sync errors'}))
     await user.click(screen.getByRole('button', {name: 'Disable'}))
 
-    expect(disable).toHaveBeenCalledWith(4)
+    expect(disable).toHaveBeenCalledWith(4, 0)
     await waitFor(() => expect(screen.getByText('No sync errors.')).toBeInTheDocument())
 
     await user.click(screen.getByRole('button', {name: 'Disabled'}))
     await user.click(screen.getByRole('button', {name: 'Re-enable'}))
 
-    expect(enable).toHaveBeenCalledWith(5)
+    expect(enable).toHaveBeenCalledWith(5, 0)
     await waitFor(() => expect(screen.getByText('No disabled games.')).toBeInTheDocument())
+  })
+
+  test('keys entries by entryKey so sibling sets of one app all render', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState({
+        suggestions: [
+          game({appid: 10, groupId: 0, name: 'Team Fortress 2', totalAchievements: 40, unlockedAchievements: 20, completionPercent: 50}),
+          game({appid: 10, groupId: 3, name: 'Team Fortress 2 – Scout', setName: 'Scout', totalAchievements: 9, unlockedAchievements: 1, completionPercent: 11}),
+          game({appid: 10, groupId: 5, name: 'Team Fortress 2 – Pyro', setName: 'Pyro', totalAchievements: 9, unlockedAchievements: 0})
+        ]
+      }))
+    })
+
+    render(App)
+
+    expect(await screen.findByRole('heading', {name: 'Team Fortress 2'})).toBeInTheDocument()
+    expect(screen.getByRole('heading', {name: 'Team Fortress 2 – Scout'})).toBeInTheDocument()
+    expect(screen.getByRole('heading', {name: 'Team Fortress 2 – Pyro'})).toBeInTheDocument()
+    expect(screen.queryByText('Scout')).not.toBeInTheDocument()
+    expect(screen.queryByText('Pyro')).not.toBeInTheDocument()
+  })
+
+  test('labels DLC set cards and explains the DLC-missing tag', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState({
+        suggestions: [
+          game({appid: 4000, groupId: 1, name: 'PowerWash Simulator 2 – Pack', setName: 'PowerWash Simulator 2 – Pack', dlcAppId: 4173830, totalAchievements: 10, unlockedAchievements: 3, completionPercent: 30, tags: ['missing_achievements_in_dlc'], missingAchievementsInDLC: true})
+        ]
+      }))
+    })
+
+    render(App)
+
+    const card = (await screen.findByRole('heading', {name: 'PowerWash Simulator 2 – Pack'})).closest('article')
+    expect(within(card).getByText('DLC')).toBeInTheDocument()
+    expect(within(card).getByText('Achievements in DLC').getAttribute('title')).toContain('card menu')
+  })
+
+  test('shows an unowned DLC set with a Not owned tag explained on hover', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState({
+        suggestions: [
+          game({appid: 4000, groupId: 1, name: 'PowerWash Simulator 2 – Pack', setName: 'PowerWash Simulator 2 – Pack', dlcAppId: 4173830, totalAchievements: 10, unlockedAchievements: 0, completionPercent: 0, tags: ['dlc_not_owned'], dlcNotOwned: true})
+        ]
+      }))
+    })
+
+    render(App)
+
+    const card = (await screen.findByRole('heading', {name: 'PowerWash Simulator 2 – Pack'})).closest('article')
+    expect(within(card).getByText('Not owned').getAttribute('title')).toBe('You do not own the DLC for this achievement set.')
+  })
+
+  test('filter panel offers DLC and Not owned with counts and filters on click', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState({
+        suggestions: [
+          game({appid: 4000, groupId: 1, name: 'DLC Owned Pack', setName: 'DLC Owned Pack', dlcAppId: 4173830, totalAchievements: 10, unlockedAchievements: 3, completionPercent: 30, playtimeForever: 60, tags: ['missing_achievements_in_dlc'], missingAchievementsInDLC: true}),
+          game({appid: 4001, groupId: 1, name: 'Unowned Pack', setName: 'Unowned Pack', dlcAppId: 4173831, totalAchievements: 10, unlockedAchievements: 0, completionPercent: 0, tags: ['dlc_not_owned'], dlcNotOwned: true}),
+          game({appid: 4002, name: 'Base Game', totalAchievements: 20, unlockedAchievements: 16, completionPercent: 80, playtimeForever: 300, tags: ['almost_there']})
+        ]
+      }))
+    })
+    const user = userEvent.setup()
+
+    render(App)
+
+    const panel = await screen.findByLabelText('Filter not completed games by tag')
+    const dlcOption = within(panel).getByRole('button', {name: /^DLC\s+2$/})
+    const notOwnedOption = within(panel).getByRole('button', {name: /^Not owned\s+1$/})
+    expect(within(panel).getByRole('button', {name: /^Achievements in DLC\s+1$/})).toBeInTheDocument()
+    expect(within(panel).getByRole('button', {name: /^All\s+3$/})).toBeInTheDocument()
+
+    // Every DLC-bound set card shows the DLC chip, and the chip counts toward the filter.
+    const ownedCard = screen.getByRole('heading', {name: 'DLC Owned Pack'}).closest('article')
+    expect(within(ownedCard).getByText('DLC')).toBeInTheDocument()
+    expect(within(screen.getByRole('heading', {name: 'Base Game'}).closest('article')).queryByText('DLC')).not.toBeInTheDocument()
+
+    await user.click(dlcOption)
+    expect(screen.getByRole('heading', {name: 'DLC Owned Pack'})).toBeInTheDocument()
+    expect(screen.getByRole('heading', {name: 'Unowned Pack'})).toBeInTheDocument()
+    expect(screen.queryByRole('heading', {name: 'Base Game'})).not.toBeInTheDocument()
+
+    await user.click(notOwnedOption)
+    expect(screen.queryByRole('heading', {name: 'DLC Owned Pack'})).not.toBeInTheDocument()
+    expect(screen.getByRole('heading', {name: 'Unowned Pack'})).toBeInTheDocument()
+    expect(screen.queryByRole('heading', {name: 'Base Game'})).not.toBeInTheDocument()
+
+    await user.click(within(panel).getByRole('button', {name: 'Clear tag filter'}))
+    expect(screen.getByRole('heading', {name: 'Base Game'})).toBeInTheDocument()
+  })
+
+  test('passes groupId to game actions from a set card', async () => {
+    const toggle = vi.fn(async () => dashboardState())
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState({
+        suggestions: [game({appid: 10, groupId: 3, name: 'Team Fortress 2 – Scout', setName: 'Scout', totalAchievements: 9, unlockedAchievements: 1, completionPercent: 11})]
+      })),
+      ToggleGameMissingAchievementsInDLC: toggle
+    })
+    const user = userEvent.setup()
+
+    render(App)
+
+    const card = (await screen.findByRole('heading', {name: 'Team Fortress 2 – Scout'})).closest('article')
+    await fireEvent.contextMenu(card)
+    await user.click(await screen.findByRole('button', {name: 'Flag missing achievements in DLC'}))
+
+    expect(toggle).toHaveBeenCalledWith(10, 3)
+  })
+
+  test('labels context menu disable action as set for set cards and game otherwise', async () => {
+    const disable = vi.fn(async () => dashboardState())
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState({
+        suggestions: [
+          game({appid: 10, groupId: 0, name: 'Team Fortress 2', totalAchievements: 40, unlockedAchievements: 20, completionPercent: 50}),
+          game({appid: 10, groupId: 3, name: 'Team Fortress 2 – Scout', setName: 'Scout', totalAchievements: 9, unlockedAchievements: 1, completionPercent: 11})
+        ]
+      })),
+      DisableGame: disable
+    })
+    const user = userEvent.setup()
+
+    render(App)
+
+    const gameCard = (await screen.findByRole('heading', {name: 'Team Fortress 2'})).closest('article')
+    await fireEvent.contextMenu(gameCard)
+    expect(await screen.findByRole('button', {name: 'Disable game'})).toBeInTheDocument()
+    expect(screen.queryByRole('button', {name: 'Disable set'})).not.toBeInTheDocument()
+
+    const setCard = screen.getByRole('heading', {name: 'Team Fortress 2 – Scout'}).closest('article')
+    await fireEvent.contextMenu(setCard)
+    await user.click(await screen.findByRole('button', {name: 'Disable set'}))
+
+    expect(disable).toHaveBeenCalledWith(10, 3)
+  })
+
+  test('disables only the selected set when a game has several sets', async () => {
+    const disable = vi.fn(async () => dashboardState({warnings: []}))
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState({
+        warnings: [game({appid: 4, groupId: 2, name: 'Broken Set', setName: 'Broken Set', syncWarning: true, lastError: 'HTTP 503', lastSyncedAt: '2026-05-21T10:00:00Z'})]
+      })),
+      DisableGame: disable
+    })
+    const user = userEvent.setup()
+
+    render(App)
+
+    await user.click(await screen.findByRole('button', {name: 'Sync errors'}))
+    await user.click(screen.getByRole('button', {name: 'Disable'}))
+
+    expect(disable).toHaveBeenCalledWith(4, 2)
   })
 })
 
@@ -270,8 +424,16 @@ function dashboardState(overrides = {}) {
 }
 
 function game(overrides = {}) {
+  const appid = overrides.appid ?? 0
+  const groupId = overrides.groupId ?? 0
   return {
-    appid: 0,
+    appid,
+    groupId,
+    entryKey: `${appid}:${groupId}`,
+    isSet: groupId !== 0,
+    setName: '',
+    dlcAppId: 0,
+    coverKind: '',
     name: 'Game',
     coverUrl: '',
     totalAchievements: 10,
@@ -287,6 +449,8 @@ function game(overrides = {}) {
     disabled: false,
     manualWasCompleted: false,
     missingAchievementsInDLC: false,
+    dlcNotOwned: false,
+    isCompleted: false,
     ...overrides
   }
 }

@@ -1,0 +1,161 @@
+{
+  "response": {
+    "achievements": [
+      {
+        "internal_name": "ACH_BASE_1",
+        "localized_name": "Base One",
+        "hidden": false,
+        "player_percent_unlocked": "60.0",
+        "internal_key": 3001,
+        "groupid": 0,
+        "archived": false
+      },
+      {
+        "internal_name": "ACH_BASE_2",
+        "localized_name": "Base Two",
+        "hidden": false,
+        "player_percent_unlocked": "40.0",
+        "internal_key": 3002,
+        "groupid": 0,
+        "archived": false
+      },
+      {
+        "internal_name": "ACH_REPLAY_1",
+        "localized_name": "Replay One",
+        "hidden": false,
+        "player_percent_unlocked": "20.0",
+        "internal_key": 4001,
+        "groupid": 11,
+        "archived": false
+      },
+      {
+        "internal_name": "ACH_REPLAY_2",
+        "localized_name": "Replay Two",
+        "hidden": false,
+        "player_percent_unlocked": "19.0",
+        "internal_key": 4002,
+        "groupid": 11,
+        "archived": false
+      },
+      {
+        "internal_name": "ACH_REPLAY_3",
+        "localized_name": "Replay Three",
+        "hidden": false,
+        "player_percent_unlocked": "18.0",
+        "internal_key": 4003,
+        "groupid": 11,
+        "archived": false
+      },
+      {
+        "internal_name": "ACH_REPLAY_4",
+        "localized_name": "Replay Four",
+        "hidden": false,
+        "player_percent_unlocked": "17.0",
+        "internal_key": 4004,
+        "groupid": 11,
+        "archived": false
+      },
+      {
+        "internal_name": "ACH_REPLAY_OLD_1",
+        "localized_name": "Old Replay One",
+        "hidden": false,
+        "player_percent_unlocked": "5.0",
+        "internal_key": 4005,
+        "groupid": 11,
+        "archived": true
+      },
+      {
+        "internal_name": "ACH_REPLAY_OLD_2",
+        "localized_name": "Old Replay Two",
+        "hidden": false,
+        "player_percent_unlocked": "4.0",
+        "internal_key": 4006,
+        "groupid": 11,
+        "archived": true
+      },
+      {
+        "internal_name": "ACH_REPLAY_OLD_3",
+        "localized_name": "Old Replay Three",
+        "hidden": false,
+        "player_percent_unlocked": "3.0",
+        "internal_key": 4007,
+        "groupid": 11,
+        "archived": true
+      },
+      {
+        "internal_name": "ACH_REPLAY_OLD_4",
+        "localized_name": "Old Replay Four",
+        "hidden": false,
+        "internal_key": 4008,
+        "groupid": 11,
+        "archived": true
+      },
+      {
+        "internal_name": "ACH_MVM_1",
+        "localized_name": "Mann Up",
+        "hidden": false,
+        "player_percent_unlocked": "3.2",
+        "internal_key": 5001,
+        "groupid": 12,
+        "archived": false
+      },
+      {
+        "internal_name": "ACH_DEV_1",
+        "localized_name": "Developer Only",
+        "hidden": false,
+        "player_percent_unlocked": "0.1",
+        "internal_key": 6001,
+        "groupid": 13,
+        "archived": false
+      }
+    ],
+    "schema_version": 7,
+    "schema_hash": 7654321,
+    "groups": [
+      {
+        "groupid": 0,
+        "localized_name": "",
+        "dlcappid": 0,
+        "archived": false,
+        "developeronly": false,
+        "order": 0,
+        "ispublic": true,
+        "total_achievements": 2,
+        "completion_achievements": 2
+      },
+      {
+        "groupid": 11,
+        "localized_name": "Replay",
+        "dlcappid": 0,
+        "archived": false,
+        "developeronly": false,
+        "order": 3,
+        "ispublic": true,
+        "total_achievements": 8,
+        "completion_achievements": 4
+      },
+      {
+        "groupid": 12,
+        "localized_name": "Mann vs. Machine",
+        "dlcappid": 0,
+        "archived": false,
+        "developeronly": false,
+        "order": 4,
+        "ispublic": true,
+        "total_achievements": 1,
+        "completion_achievements": 1
+      },
+      {
+        "groupid": 13,
+        "localized_name": "",
+        "dlcappid": 0,
+        "archived": false,
+        "developeronly": true,
+        "order": 5,
+        "ispublic": false,
+        "total_achievements": 1,
+        "completion_achievements": 1
+      }
+    ]
+  }
+}
