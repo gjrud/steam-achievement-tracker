@@ -106,6 +106,11 @@ func (r *fullSyncRun) syncGames(ctx context.Context, games []steam.OwnedGame) er
 	err := dispatchSyncJobs(ctx, jobs, games)
 	close(jobs)
 	wg.Wait()
+	if err == nil {
+		// Cancel can land after every game was handed off: dispatch then has no error, but in-flight games
+		// were interrupted and skipped. The run must still end as canceled, not as success.
+		err = ctx.Err()
+	}
 	return err
 }
 
@@ -113,7 +118,11 @@ func (r *fullSyncRun) syncWorker(ctx context.Context, jobs <-chan steam.OwnedGam
 	defer wg.Done()
 	for game := range jobs {
 		if err := r.s.syncGame(ctx, r.profile, game); err != nil {
-			r.recordGameFailure(game, err)
+			// Interrupted by cancellation, not a game failure: no warning, and the game keeps its stored data.
+			// On a failed (canceled) run, games interrupted mid-sync count as neither synced nor failed.
+			if ctx.Err() == nil {
+				r.recordGameFailure(game, err)
+			}
 			continue
 		}
 		r.recordGameSuccess()

@@ -33,6 +33,9 @@
   let state = null
   let loading = true
   let error = ''
+  // pollError is true only while `error` holds a background poll failure. Polls clear only that, so an action's
+  // error survives the polls that keep running while a sync is in progress.
+  let pollError = false
   let profileInput = ''
   let preview = null
   let validating = false
@@ -64,11 +67,17 @@
   async function loadState(options = {}) {
     const token = ++stateRequestToken
     try {
-      error = ''
+      if (pollError) {
+        error = ''
+        pollError = false
+      }
       const nextState = await GetAppState()
       if (token === stateRequestToken) state = nextState
     } catch (err) {
-      if (token === stateRequestToken) error = formatMessage(err)
+      if (token === stateRequestToken) {
+        error = formatMessage(err)
+        pollError = true
+      }
     } finally {
       if (token === stateRequestToken) loading = false
       if (options.reschedule && token === stateRequestToken) schedulePolling()
@@ -87,13 +96,17 @@
     const token = ++stateRequestToken
     try {
       error = ''
+      pollError = false
       const nextState = await RetryAPIKey()
       if (token === stateRequestToken) {
         state = nextState
         schedulePolling()
       }
     } catch (err) {
-      if (token === stateRequestToken) error = formatMessage(err)
+      if (token === stateRequestToken) {
+        error = formatMessage(err)
+        schedulePolling()
+      }
     }
   }
 
@@ -103,6 +116,7 @@
     validating = true
     preview = null
     error = ''
+    pollError = false
     try {
       preview = await ValidateProfile(input)
     } catch (err) {
@@ -117,6 +131,7 @@
     const token = ++stateRequestToken
     saving = true
     error = ''
+    pollError = false
     try {
       const nextState = await SaveProfile(preview)
       if (token === stateRequestToken) {
@@ -124,7 +139,10 @@
         schedulePolling()
       }
     } catch (err) {
-      if (token === stateRequestToken) error = formatMessage(err)
+      if (token === stateRequestToken) {
+        error = formatMessage(err)
+        schedulePolling()
+      }
     } finally {
       saving = false
     }
@@ -133,6 +151,7 @@
   async function syncNow() {
     const token = ++stateRequestToken
     error = ''
+    pollError = false
     try {
       const nextState = await SyncNow()
       if (token === stateRequestToken) {
@@ -140,7 +159,10 @@
         schedulePolling()
       }
     } catch (err) {
-      if (token === stateRequestToken) error = formatMessage(err)
+      if (token === stateRequestToken) {
+        error = formatMessage(err)
+        schedulePolling()
+      }
     }
   }
 
@@ -168,6 +190,7 @@
     const token = ++stateRequestToken
     clearingData = true
     error = ''
+    pollError = false
     try {
       stopPolling()
       const nextState = await ClearActiveUserData()
@@ -182,7 +205,11 @@
         schedulePolling()
       }
     } catch (err) {
-      if (token === stateRequestToken) error = formatMessage(err)
+      if (token === stateRequestToken) {
+        error = formatMessage(err)
+        // stopPolling() ran before the call; restart it if the app is still syncing.
+        schedulePolling()
+      }
     } finally {
       clearingData = false
     }
@@ -239,6 +266,7 @@
     const token = ++stateRequestToken
     gameActionLoading = true
     error = ''
+    pollError = false
     try {
       let nextState
       if (action === 'previously-completed') nextState = await MarkGamePreviouslyCompleted(game.appid, game.groupId)
@@ -250,7 +278,10 @@
         schedulePolling()
       }
     } catch (err) {
-      if (token === stateRequestToken) error = formatMessage(err)
+      if (token === stateRequestToken) {
+        error = formatMessage(err)
+        schedulePolling()
+      }
     } finally {
       gameActionLoading = false
       contextMenu = null

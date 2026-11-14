@@ -3,6 +3,19 @@ import userEvent from '@testing-library/user-event'
 import {afterEach, describe, expect, test, vi} from 'vitest'
 import App from './App.svelte'
 import {__resetWailsMocks, __setWailsMocks} from './test/wails-app-mock.js'
+import {
+  baseState,
+  dashboardState,
+  failureMessage,
+  game,
+  hadesGame,
+  missingKeyState,
+  openClearDialog,
+  openHadesMenu,
+  profileSetupState,
+  rejecting,
+  syncingState
+} from './test/app-fixtures.js'
 
 afterEach(() => {
   cleanup()
@@ -339,6 +352,21 @@ describe('App dashboard views', () => {
     expect(chipLabels(panel)).toEqual(['All', 'New achievements added', 'Almost there', 'In progress', 'Untouched', 'Not owned', 'Achievements in DLC', 'No achievements', 'Set', 'DLC', 'Missing cover art', 'Sync error'])
   })
 
+  test('gives the derived Set and DLC card tags their hover text', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState({
+        suggestions: [game({appid: 4000, groupId: 1, dlcAppId: 4173830, name: 'DLC Hover Set', setName: 'Pack', totalAchievements: 10, unlockedAchievements: 3, completionPercent: 30, tags: ['almost_there']})]
+      }))
+    })
+
+    render(App)
+
+    const row = (await screen.findByRole('heading', {name: 'DLC Hover Set'})).closest('article')
+    expect(within(row).getByText('Set')).toHaveAttribute('title', 'Additional achievement set of this game')
+    expect(within(row).getByText('DLC')).toHaveAttribute('title', 'Achievement set from DLC')
+    expect(within(row).getByText('Almost there')).not.toHaveAttribute('title')
+  })
+
   test('filters completed games by the tags their cards carry', async () => {
     __setWailsMocks({
       GetAppState: vi.fn(async () => dashboardState({
@@ -400,24 +428,24 @@ describe('App dashboard views', () => {
     await user.click(within(notCompletedPanel).getByRole('button', {name: /^Set\s+1$/}))
     expect(screen.getByRole('heading', {name: 'Hades – Expansion'})).toBeInTheDocument()
     expect(screen.queryByRole('heading', {name: 'Vampire Survivors'})).not.toBeInTheDocument()
-    expect(within(notCompletedPanel).getByRole('button', {name: /^Set\s+1$/})).toHaveClass('active')
+    expect(within(notCompletedPanel).getByRole('button', {name: /^Set\s+1$/})).toHaveAttribute('aria-pressed', 'true')
 
     await user.click(screen.getByRole('button', {name: 'Completed'}))
     expect(await screen.findByRole('heading', {name: 'Completed DLC Pack'})).toBeInTheDocument()
     const completedPanel = screen.getByLabelText('Filter completed games by tag')
-    expect(within(completedPanel).getByRole('button', {name: /^All\s+1$/})).toHaveClass('active')
-    expect(within(completedPanel).getByRole('button', {name: /^Set\s+1$/})).not.toHaveClass('active')
+    expect(within(completedPanel).getByRole('button', {name: /^All\s+1$/})).toHaveAttribute('aria-pressed', 'true')
+    expect(within(completedPanel).getByRole('button', {name: /^Set\s+1$/})).toHaveAttribute('aria-pressed', 'false')
     expect(screen.queryByRole('button', {name: 'Clear tag filter'})).not.toBeInTheDocument()
 
     await user.click(within(completedPanel).getByRole('button', {name: /^Set\s+1$/}))
     expect(screen.getByRole('heading', {name: 'Completed DLC Pack'})).toBeInTheDocument()
-    expect(within(completedPanel).getByRole('button', {name: /^Set\s+1$/})).toHaveClass('active')
+    expect(within(completedPanel).getByRole('button', {name: /^Set\s+1$/})).toHaveAttribute('aria-pressed', 'true')
 
     await user.click(screen.getByRole('button', {name: 'Not completed'}))
     expect(await screen.findByRole('heading', {name: 'Vampire Survivors'})).toBeInTheDocument()
     notCompletedPanel = screen.getByLabelText('Filter not completed games by tag')
-    expect(within(notCompletedPanel).getByRole('button', {name: /^All\s+2$/})).toHaveClass('active')
-    expect(within(notCompletedPanel).getByRole('button', {name: /^Set\s+1$/})).not.toHaveClass('active')
+    expect(within(notCompletedPanel).getByRole('button', {name: /^All\s+2$/})).toHaveAttribute('aria-pressed', 'true')
+    expect(within(notCompletedPanel).getByRole('button', {name: /^Set\s+1$/})).toHaveAttribute('aria-pressed', 'false')
     expect(screen.queryByRole('button', {name: 'Clear tag filter'})).not.toBeInTheDocument()
   })
 
@@ -486,53 +514,34 @@ describe('App dashboard views', () => {
   })
 })
 
+// Cover assertions use what the user sees: the cover image source, or the Missing cover placeholder. The landscape
+// layout for header/main covers is drawn by app.css from the cover-landscape class on .cover. jsdom does not apply
+// that CSS, so the class is the only DOM signal and the landscape table test asserts it directly.
 describe('GameCard cover art', () => {
-  test('marks header and main covers as landscape with an inline cover url', async () => {
+  test('renders each cover kind with its own image url', async () => {
+    const covers = [
+      ['Header Cover', 'header', '/game-covers/1/header.jpg?v=1'],
+      ['Main Cover', 'main', '/game-covers/1/main.jpg?v=1'],
+      ['Library Cover', 'library', '/game-covers/1/library.jpg?v=1'],
+      ['Hero Cover', 'hero', '/game-covers/1/hero.jpg?v=1']
+    ]
     __setWailsMocks({
       GetAppState: vi.fn(async () => dashboardState({
-        suggestions: [
-          game({appid: 11, name: 'Header Cover', coverKind: 'header', coverUrl: '/game-covers/1/header.jpg?v=1'}),
-          game({appid: 12, name: 'Main Cover', coverKind: 'main', coverUrl: '/game-covers/1/main.jpg?v=1'})
-        ]
+        suggestions: covers.map(([name, coverKind, coverUrl], index) => game({appid: 11 + index, name, coverKind, coverUrl}))
       }))
     })
 
     render(App)
 
-    for (const name of ['Header Cover', 'Main Cover']) {
+    for (const [name, , coverUrl] of covers) {
       const row = (await screen.findByRole('heading', {name})).closest('article')
-      const cover = row.querySelector('.cover')
 
-      expect(cover).toHaveClass('cover-landscape')
-      expect(cover.getAttribute('style')).toContain('--cover-url')
-      expect(cover.getAttribute('style')).toContain(`/game-covers/1/${name === 'Header Cover' ? 'header' : 'main'}.jpg?v=1`)
-      expect(cover.querySelector('img').getAttribute('src')).toContain('/game-covers/1/')
+      expect(row.querySelector('img')).toHaveAttribute('src', coverUrl)
+      expect(within(row).queryByText('Missing cover')).not.toBeInTheDocument()
     }
   })
 
-  test('does not use landscape styling for library or hero covers', async () => {
-    __setWailsMocks({
-      GetAppState: vi.fn(async () => dashboardState({
-        suggestions: [
-          game({appid: 13, name: 'Library Cover', coverKind: 'library', coverUrl: '/game-covers/1/library.jpg?v=1'}),
-          game({appid: 14, name: 'Hero Cover', coverKind: 'hero', coverUrl: '/game-covers/1/hero.jpg?v=1'})
-        ]
-      }))
-    })
-
-    render(App)
-
-    for (const name of ['Library Cover', 'Hero Cover']) {
-      const row = (await screen.findByRole('heading', {name})).closest('article')
-      const cover = row.querySelector('.cover')
-
-      expect(cover).toBeInTheDocument()
-      expect(cover).not.toHaveClass('cover-landscape')
-      expect(cover.getAttribute('style')).toContain('--cover-url')
-    }
-  })
-
-  test('shows the placeholder without landscape styling when no cover url exists', async () => {
+  test('shows the Missing cover placeholder and no image when no cover url exists', async () => {
     __setWailsMocks({
       GetAppState: vi.fn(async () => dashboardState({
         suggestions: [game({appid: 15, name: 'No Cover', coverKind: 'header', coverUrl: ''})]
@@ -542,12 +551,347 @@ describe('GameCard cover art', () => {
     render(App)
 
     const row = (await screen.findByRole('heading', {name: 'No Cover'})).closest('article')
-    const cover = row.querySelector('.cover')
 
-    expect(cover).not.toHaveClass('cover-landscape')
-    expect(cover).not.toHaveAttribute('style')
-    expect(within(cover).getByText('Missing cover')).toBeInTheDocument()
-    expect(cover.querySelector('img')).toBeNull()
+    expect(within(row).getByText('Missing cover')).toBeInTheDocument()
+    expect(row.querySelector('img')).toBeNull()
+  })
+
+  test.each([
+    ['header', true],
+    ['main', true],
+    ['library', false],
+    ['hero', false]
+  ])('marks %s covers cover-landscape: %s', async (coverKind, landscape) => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState({
+        suggestions: [game({appid: 16, name: 'Landscape Check', coverKind, coverUrl: `/game-covers/16/${coverKind}.jpg?v=1`})]
+      }))
+    })
+
+    render(App)
+
+    const row = (await screen.findByRole('heading', {name: 'Landscape Check'})).closest('article')
+    expect(row.querySelector('.cover').classList.contains('cover-landscape')).toBe(landscape)
+  })
+})
+
+describe('App Wails call failures', () => {
+  // mocks is a factory so every test gets fresh vi.fn() instances; a shared object would carry call counts across tests.
+  const cases = [
+    {
+      name: 'GetAppState on startup',
+      mocks: () => ({GetAppState: rejecting()}),
+      act: async () => {}
+    },
+    {
+      name: 'RetryAPIKey',
+      mocks: () => ({GetAppState: vi.fn(async () => missingKeyState()), RetryAPIKey: rejecting()}),
+      act: async (user) => user.click(await screen.findByRole('button', {name: 'Retry key lookup'}))
+    },
+    {
+      name: 'ValidateProfile',
+      mocks: () => ({GetAppState: vi.fn(async () => profileSetupState()), ValidateProfile: rejecting()}),
+      act: async (user) => {
+        await user.type(await screen.findByPlaceholderText(/SteamID64/), 'test-player')
+        await user.click(screen.getByRole('button', {name: 'Validate'}))
+      }
+    },
+    {
+      name: 'SaveProfile',
+      mocks: () => ({
+        GetAppState: vi.fn(async () => profileSetupState()),
+        ValidateProfile: vi.fn(async () => ({steamId64: '76561198000000000', displayName: 'Test Player', avatarUrl: ''})),
+        SaveProfile: rejecting()
+      }),
+      act: async (user) => {
+        await user.type(await screen.findByPlaceholderText(/SteamID64/), 'test-player')
+        await user.click(screen.getByRole('button', {name: 'Validate'}))
+        await user.click(await screen.findByRole('button', {name: 'Save and sync'}))
+      }
+    },
+    {
+      name: 'SyncNow',
+      mocks: () => ({GetAppState: vi.fn(async () => dashboardState()), SyncNow: rejecting()}),
+      act: async (user) => user.click(await screen.findByRole('button', {name: 'Sync now'}))
+    },
+    {
+      name: 'DisableGame',
+      mocks: () => ({GetAppState: vi.fn(async () => dashboardState()), DisableGame: rejecting()}),
+      act: async (user) => {
+        await user.click(await screen.findByRole('button', {name: 'Sync errors'}))
+        await user.click(screen.getByRole('button', {name: 'Disable'}))
+      }
+    },
+    {
+      name: 'EnableGame',
+      mocks: () => ({GetAppState: vi.fn(async () => dashboardState()), EnableGame: rejecting()}),
+      act: async (user) => {
+        await user.click(await screen.findByRole('button', {name: 'Disabled'}))
+        await user.click(screen.getByRole('button', {name: 'Re-enable'}))
+      }
+    },
+    {
+      name: 'MarkGamePreviouslyCompleted',
+      mocks: () => ({GetAppState: vi.fn(async () => dashboardState()), MarkGamePreviouslyCompleted: rejecting()}),
+      act: async (user) => {
+        await openHadesMenu()
+        await user.click(screen.getByRole('button', {name: 'Mark as previously completed'}))
+      }
+    },
+    {
+      name: 'ToggleGameMissingAchievementsInDLC',
+      mocks: () => ({GetAppState: vi.fn(async () => dashboardState()), ToggleGameMissingAchievementsInDLC: rejecting()}),
+      act: async (user) => {
+        await openHadesMenu()
+        await user.click(screen.getByRole('button', {name: 'Flag missing achievements in DLC'}))
+      }
+    },
+    {
+      name: 'ClearActiveUserData',
+      mocks: () => ({GetAppState: vi.fn(async () => dashboardState()), ClearActiveUserData: rejecting()}),
+      act: async (user) => {
+        const dialog = await openClearDialog(user)
+        await user.type(within(dialog).getByLabelText(/Type this exact value/), '76561198000000000')
+        await user.click(within(dialog).getByRole('button', {name: 'Clear data'}))
+      }
+    }
+  ]
+
+  for (const {name, mocks, act} of cases) {
+    test(`shows the error when ${name} rejects`, async () => {
+      __setWailsMocks(mocks())
+      const user = userEvent.setup()
+
+      render(App)
+      await act(user)
+
+      expect(await screen.findByText(failureMessage)).toBeInTheDocument()
+    })
+  }
+
+  test('clears the error once the next action succeeds', async () => {
+    __setWailsMocks({
+      // Later polls report syncing so a stalled runner cannot flip the button back to idle.
+      GetAppState: vi.fn()
+        .mockResolvedValueOnce(dashboardState())
+        .mockResolvedValue(syncingState(0)),
+      SyncNow: vi.fn()
+        .mockRejectedValueOnce(new Error(failureMessage))
+        .mockResolvedValueOnce(syncingState(0))
+    })
+    const user = userEvent.setup()
+
+    render(App)
+    await user.click(await screen.findByRole('button', {name: 'Sync now'}))
+    expect(await screen.findByText(failureMessage)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', {name: 'Sync now'}))
+
+    expect(await screen.findByRole('button', {name: 'Syncing…'})).toBeDisabled()
+    expect(screen.queryByText(failureMessage)).not.toBeInTheDocument()
+  })
+})
+
+describe('App previously completed flag', () => {
+  test('marks a game previously completed from the card menu and then offers to clear it', async () => {
+    let manual = false
+    const mark = vi.fn(async () => {
+      manual = !manual
+      return dashboardState({suggestions: [hadesGame({manualWasCompleted: manual})]})
+    })
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState({suggestions: [hadesGame({manualWasCompleted: false})]})),
+      MarkGamePreviouslyCompleted: mark
+    })
+    const user = userEvent.setup()
+
+    render(App)
+    await openHadesMenu()
+    await user.click(await screen.findByRole('button', {name: 'Mark as previously completed'}))
+
+    expect(mark).toHaveBeenCalledWith(1, 0)
+
+    await openHadesMenu()
+    await user.click(await screen.findByRole('button', {name: 'Clear previously completed flag'}))
+
+    expect(mark).toHaveBeenCalledTimes(2)
+    expect(mark).toHaveBeenLastCalledWith(1, 0)
+  })
+
+  test('keeps the card menu open and locked while the action runs', async () => {
+    let resolveMark
+    const mark = vi.fn(() => new Promise((resolve) => {
+      resolveMark = resolve
+    }))
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState()), MarkGamePreviouslyCompleted: mark})
+    const user = userEvent.setup()
+
+    render(App)
+    await openHadesMenu()
+    await user.click(await screen.findByRole('button', {name: 'Mark as previously completed'}))
+
+    expect(screen.getByRole('button', {name: 'Mark as previously completed'})).toBeDisabled()
+    expect(screen.getByRole('button', {name: 'Flag missing achievements in DLC'})).toBeDisabled()
+
+    await user.keyboard('{Escape}')
+    expect(screen.getByRole('menu')).toBeInTheDocument()
+
+    resolveMark(dashboardState({suggestions: [hadesGame({manualWasCompleted: true})]}))
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument())
+  })
+})
+
+describe('App keyboard shortcuts', () => {
+  test('a typed letter outside a field starts the view search', async () => {
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState())})
+    const user = userEvent.setup()
+
+    render(App)
+    const search = await screen.findByPlaceholderText('Search games in this view')
+    await user.keyboard('vamp')
+
+    expect(search).toHaveFocus()
+    expect(search).toHaveValue('vamp')
+    expect(screen.getByRole('heading', {name: 'Vampire Survivors'})).toBeInTheDocument()
+    expect(screen.queryByRole('heading', {name: 'Hades'})).not.toBeInTheDocument()
+  })
+
+  test('does not start a search from modified keys or Escape', async () => {
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState())})
+    const user = userEvent.setup()
+
+    render(App)
+    const search = await screen.findByPlaceholderText('Search games in this view')
+    await user.keyboard('{Control>}k{/Control}')
+    await user.keyboard('{Escape}')
+
+    expect(search).not.toHaveFocus()
+    expect(search).toHaveValue('')
+  })
+
+  test('typing while a button has focus does not start a search', async () => {
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState())})
+    const user = userEvent.setup()
+
+    render(App)
+    await screen.findByPlaceholderText('Search games in this view')
+    await user.click(screen.getByRole('button', {name: 'Completed'}))
+    expect(screen.getByRole('button', {name: 'Completed'})).toHaveFocus()
+
+    await user.keyboard('p')
+
+    const search = screen.getByPlaceholderText('Search games in this view')
+    expect(search).not.toHaveFocus()
+    expect(search).toHaveValue('')
+    expect(screen.getByRole('heading', {name: 'Portal'})).toBeInTheDocument()
+  })
+
+  test('typing on Settings does nothing, and search rebinds after returning to a list view', async () => {
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState())})
+    const user = userEvent.setup()
+
+    render(App)
+    await user.click(await screen.findByRole('button', {name: 'Settings'}))
+    expect(await screen.findByRole('heading', {name: 'Settings'})).toBeInTheDocument()
+    // Move focus off the nav button so the key event targets document.body, the case the guard must allow.
+    document.activeElement.blur()
+
+    // Settings has no search input, so the keystroke must not start a search or throw.
+    await user.keyboard('x')
+    expect(screen.queryByPlaceholderText('Search games in this view')).not.toBeInTheDocument()
+    expect(screen.getByRole('heading', {name: 'Settings'})).toBeInTheDocument()
+
+    // Returning remounts the search input; it must be the element the handler focuses.
+    await user.click(screen.getByRole('button', {name: 'Not completed'}))
+    document.activeElement.blur()
+    await user.keyboard('vamp')
+
+    const search = screen.getByPlaceholderText('Search games in this view')
+    expect(search).toHaveFocus()
+    expect(search).toHaveValue('vamp')
+    expect(screen.getByRole('heading', {name: 'Vampire Survivors'})).toBeInTheDocument()
+    expect(screen.queryByRole('heading', {name: 'Hades'})).not.toBeInTheDocument()
+  })
+
+  test('Escape closes the card menu from inside the menu and from the page', async () => {
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState())})
+
+    render(App)
+    await openHadesMenu()
+    const menu = await screen.findByRole('menu')
+    await fireEvent.keyDown(menu, {key: 'Escape'})
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+
+    await openHadesMenu()
+    await screen.findByRole('menu')
+    await fireEvent.keyDown(document.body, {key: 'Escape'})
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+  })
+})
+
+describe('App clear-data confirmation', () => {
+  test('Cancel closes the dialog without clearing and resets the typed value', async () => {
+    const clear = vi.fn(async () => profileSetupState())
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState()), ClearActiveUserData: clear})
+    const user = userEvent.setup()
+
+    render(App)
+    const dialog = await openClearDialog(user)
+    await user.type(within(dialog).getByLabelText(/Type this exact value/), '7656')
+    await user.click(within(dialog).getByRole('button', {name: 'Cancel'}))
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(clear).not.toHaveBeenCalled()
+    expect(screen.getByRole('heading', {name: 'Dashboard'})).toBeInTheDocument()
+
+    const reopened = await openClearDialog(user)
+    expect(within(reopened).getByLabelText(/Type this exact value/)).toHaveValue('')
+  })
+
+  test('Escape closes the dialog without clearing', async () => {
+    const clear = vi.fn(async () => profileSetupState())
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState()), ClearActiveUserData: clear})
+    const user = userEvent.setup()
+
+    render(App)
+    await openClearDialog(user)
+    await user.keyboard('{Escape}')
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(clear).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ['the display name', 'Test Player'],
+    ['a value with a trailing space', '76561198000000000 '],
+    ['a truncated value', '7656119800000000']
+  ])('keeps clearing disabled and ignores Enter for %s', async (_label, typed) => {
+    const clear = vi.fn(async () => profileSetupState())
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState()), ClearActiveUserData: clear})
+    const user = userEvent.setup()
+
+    render(App)
+    const dialog = await openClearDialog(user)
+    await user.type(within(dialog).getByLabelText(/Type this exact value/), typed)
+
+    expect(within(dialog).getByRole('button', {name: 'Clear data'})).toBeDisabled()
+    await user.keyboard('{Enter}')
+
+    expect(clear).not.toHaveBeenCalled()
+    expect(screen.getByRole('dialog', {name: 'Clear active user data?'})).toBeInTheDocument()
+  })
+
+  test('Enter confirms once the exact value is typed', async () => {
+    const clear = vi.fn(async () => profileSetupState())
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState()), ClearActiveUserData: clear})
+    const user = userEvent.setup()
+
+    render(App)
+    const dialog = await openClearDialog(user)
+    await user.type(within(dialog).getByLabelText(/Type this exact value/), '76561198000000000{Enter}')
+
+    expect(clear).toHaveBeenCalledOnce()
+    await waitFor(() => expect(screen.getByRole('heading', {name: 'Connect your profile'})).toBeInTheDocument())
   })
 })
 
@@ -561,102 +905,4 @@ function chipLabels(panel) {
   return within(panel).getAllByRole('button')
     .filter((button) => button.classList.contains('tag-filter'))
     .map((button) => button.textContent.replace(/\s*\d+$/, '').trim())
-}
-
-function baseState() {
-  return {
-    appName: 'Steam Achievement Tracker',
-    apiKeyPresent: true,
-    apiKeyError: '',
-    dataDir: '/tmp/steam-achievement-tracker',
-    logFile: '/tmp/steam-achievement-tracker/logs/app.log',
-    profileExists: false,
-    profile: null,
-    dashboard: null,
-    syncInProgress: false,
-    initError: '',
-    secretSetupCommand: 'secret-tool store service steam-achievement-tracker username steam-web-api-key'
-  }
-}
-
-function missingKeyState() {
-  return {...baseState(), apiKeyPresent: false}
-}
-
-function profileSetupState() {
-  return {...baseState(), apiKeyPresent: true, profileExists: false}
-}
-
-function dashboardState(overrides = {}) {
-  const suggestions = overrides.suggestions ?? [
-    game({appid: 1, name: 'Hades', tags: ['almost_there'], completionPercent: 86, unlockedAchievements: 43, totalAchievements: 50, missingAvgUnlock: 38, playtimeForever: 620}),
-    game({appid: 2, name: 'Vampire Survivors', tags: ['new_achievements_added'], completionPercent: 96, unlockedAchievements: 120, totalAchievements: 125, playtimeForever: 900}),
-    game({appid: 3, name: 'Empty Game', tags: ['no_achievements'], totalAchievements: 0, unlockedAchievements: 0, playtimeForever: 0})
-  ]
-  const warnings = overrides.warnings ?? [
-    game({appid: 4, name: 'Broken Game', tags: ['sync_warning'], syncWarning: true, lastError: 'HTTP 503', lastErrorAt: '2026-05-22T10:00:00Z', lastSyncedAt: '2026-05-21T10:00:00Z'})
-  ]
-  const completed = overrides.completed ?? [
-    game({appid: 6, name: 'Portal', tags: ['completed'], completionPercent: 100, unlockedAchievements: 15, totalAchievements: 15, playtimeForever: 120})
-  ]
-  const disabled = overrides.disabled ?? [
-    game({appid: 5, name: 'Hidden Game', disabled: true, totalAchievements: 10, unlockedAchievements: 2, completionPercent: 20, playtimeForever: 70})
-  ]
-
-  return {
-    ...baseState(),
-    profileExists: true,
-    profile: {steamId64: '76561198000000000', displayName: 'Test Player', avatarUrl: ''},
-    dashboard: {
-      summary: {
-        ownedGamesCount: 6,
-        completedGamesCount: completed.length,
-        totalAchievementsUnlocked: 180
-      },
-      latestSyncRun: {
-        status: 'partial',
-        startedAt: '2026-05-22T10:00:00Z',
-        finishedAt: '2026-05-22T10:05:00Z',
-        gamesSynced: 5,
-        gamesTotal: 6,
-        gamesFailed: warnings.length
-      },
-      suggestions,
-      completed,
-      warnings,
-      disabled
-    }
-  }
-}
-
-function game(overrides = {}) {
-  const appid = overrides.appid ?? 0
-  const groupId = overrides.groupId ?? 0
-  return {
-    appid,
-    groupId,
-    entryKey: `${appid}:${groupId}`,
-    isSet: groupId !== 0,
-    setName: '',
-    dlcAppId: 0,
-    coverKind: '',
-    name: 'Game',
-    coverUrl: '',
-    totalAchievements: 10,
-    unlockedAchievements: 0,
-    completionPercent: 0,
-    missingAvgUnlock: null,
-    playtimeForever: 0,
-    tags: [],
-    syncWarning: false,
-    lastError: '',
-    lastErrorAt: '',
-    lastSyncedAt: '',
-    disabled: false,
-    manualWasCompleted: false,
-    missingAchievementsInDLC: false,
-    dlcNotOwned: false,
-    isCompleted: false,
-    ...overrides
-  }
 }

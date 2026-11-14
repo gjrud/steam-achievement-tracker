@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -75,23 +76,39 @@ func TestFullSyncCancellationPersistsFailedRun(t *testing.T) {
 		owned[i] = steam.OwnedGame{AppID: appID, Name: fmt.Sprintf("Game %d", appID), PlaytimeForever: 1}
 	}
 	fake := newFakeSteamServer(t, owned)
-	fake.delay = 50 * time.Millisecond
 	for _, game := range owned {
 		fake.schema[game.AppID] = []string{}
 	}
+	// The four workers take games 0-3 first, so game 0 (synced before, with data) is in flight when the sync is canceled.
+	seedGameSync(t, repo, profile.ID, owned[0].AppID)
+	hold := fake.holdGameRequests(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		cancel()
-	}()
 
-	result, err := (&Service{Repo: repo, Steam: fake.client}).FullSync(ctx, *profile)
-	if err == nil || err != context.Canceled {
-		t.Fatalf("err = %v, want context canceled", err)
+	type outcome struct {
+		result Result
+		err    error
 	}
+	finished := make(chan outcome, 1)
+	go func() {
+		result, err := (&Service{Repo: repo, Steam: fake.client}).FullSync(ctx, *profile)
+		finished <- outcome{result: result, err: err}
+	}()
+	hold.awaitStarted(t, 4) // four GetGameAchievements requests are at the server
+	cancel()
+	// The client aborts its requests on cancel without a server answer, so the server stays held until the sync returns.
+	out := <-finished
+	hold.open()
+
+	if out.err == nil || out.err != context.Canceled {
+		t.Fatalf("err = %v, want context canceled", out.err)
+	}
+	result := out.result
 	if result.Status != "failed" || result.Error == nil || result.GamesTotal != len(owned) {
 		t.Fatalf("result = %#v, want failed canceled sync with total games", result)
+	}
+	if result.GamesSynced != 0 || result.GamesFailed != 0 {
+		t.Fatalf("result = %#v, want no synced and no failed games for an interrupted sync", result)
 	}
 	run, err := repo.LatestSyncRun(profile.ID)
 	if err != nil {
@@ -100,6 +117,153 @@ func TestFullSyncCancellationPersistsFailedRun(t *testing.T) {
 	if run == nil || run.Status != "failed" || run.Error == nil || !strings.Contains(*run.Error, "context canceled") {
 		t.Fatalf("sync run = %#v, want persisted failed cancellation", run)
 	}
+	// Games interrupted in flight are not failures: no warning rows, and the stored data is kept.
+	requireNoWarningCards(t, repo, profile.ID)
+	state := requireProfileGame(t, repo, profile.ID, owned[0].AppID, 0)
+	if !state.Exists || state.SyncWarning || state.TotalAchievements != 1 || !state.IsCompleted {
+		t.Fatalf("in-flight game state = %#v, want previous completed data kept without warning", state)
+	}
+}
+
+// Cancel after every game is already handed to a worker: dispatch has no error to return, so the interrupted
+// in-flight games must still end the run as failed with the cancellation, and the profile must not be touched.
+func TestFullSyncCancelAfterAllGamesDispatchedFailsRun(t *testing.T) {
+	repo := testRepository(t)
+	profile := testProfile(t, repo)
+	owned := make([]steam.OwnedGame, 4) // at most the worker count, so every game is in flight when canceled
+	for i := range owned {
+		appID := int64(3000 + i)
+		owned[i] = steam.OwnedGame{AppID: appID, Name: fmt.Sprintf("Game %d", appID), PlaytimeForever: 1}
+	}
+	fake := newFakeSteamServer(t, owned)
+	for _, game := range owned {
+		fake.schema[game.AppID] = []string{}
+	}
+	seedGameSync(t, repo, profile.ID, owned[0].AppID)
+	lastSyncedBefore := currentProfile(t, repo).LastSyncedAt
+	hold := fake.holdGameRequests(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	type outcome struct {
+		result Result
+		err    error
+	}
+	finished := make(chan outcome, 1)
+	go func() {
+		result, err := (&Service{Repo: repo, Steam: fake.client}).FullSync(ctx, *profile)
+		finished <- outcome{result: result, err: err}
+	}()
+	hold.awaitStarted(t, 4) // all four games are at the server, so dispatch has handed off every game
+	cancel()
+	out := <-finished
+	hold.open()
+
+	if !errors.Is(out.err, context.Canceled) {
+		t.Fatalf("err = %v, want context canceled", out.err)
+	}
+	result := out.result
+	if result.Status != "failed" || result.Error == nil || result.GamesTotal != len(owned) {
+		t.Fatalf("result = %#v, want failed canceled sync with total games", result)
+	}
+	if result.GamesSynced != 0 || result.GamesFailed != 0 {
+		t.Fatalf("result = %#v, want no synced and no failed games for an interrupted sync", result)
+	}
+	run := requireLatestRun(t, repo, profile.ID)
+	if run.Status != "failed" || run.Error == nil || !strings.Contains(*run.Error, "context canceled") {
+		t.Fatalf("sync run = %#v, want persisted failed cancellation", run)
+	}
+	if run.GamesSynced != 0 || run.GamesFailed != 0 {
+		t.Fatalf("sync run counters = %#v, want no synced and no failed games", run)
+	}
+	requireNoWarningCards(t, repo, profile.ID)
+	state := requireProfileGame(t, repo, profile.ID, owned[0].AppID, 0)
+	if !state.Exists || state.SyncWarning || state.TotalAchievements != 1 || !state.IsCompleted {
+		t.Fatalf("in-flight game state = %#v, want previous completed data kept without warning", state)
+	}
+	if lastSyncedAfter := currentProfile(t, repo).LastSyncedAt; optionalString(lastSyncedAfter) != optionalString(lastSyncedBefore) {
+		t.Fatalf("profile last synced = %s, want %s unchanged after canceled run", optionalString(lastSyncedAfter), optionalString(lastSyncedBefore))
+	}
+}
+
+// optionalString renders a nullable text value for failure messages.
+func optionalString(s *string) string {
+	if s == nil {
+		return "<nil>"
+	}
+	return *s
+}
+
+func TestFullSyncGameTransportErrorWarningRedactsAPIKey(t *testing.T) {
+	repo := testRepository(t)
+	profile := testProfile(t, repo)
+	fake := newFakeSteamServer(t, []steam.OwnedGame{{AppID: 20, Name: "Dropped Game", PlaytimeForever: 5}})
+	fake.schema[20] = []string{"ACH_ONE"}
+	fake.hangupGame[20] = true
+
+	result := runFullSyncOK(t, repo, fake, profile)
+	requireSyncResult(t, result, expectedSyncResult{status: "partial", total: 1, synced: 0, failed: 1, hasError: true})
+	requireWarningCard(t, repo, profile.ID, 20, "achievement schema: Get")
+	warnings := requireGameCards(t, repo, profile.ID, "warnings")
+	if len(warnings) != 1 || warnings[0].LastError == nil {
+		t.Fatalf("warnings = %#v, want one warning with text", warnings)
+	}
+	requireRedactedAPIKeyText(t, *warnings[0].LastError)
+	// The run error is only the per-game count summary here; it must not carry the key either.
+	if run := requireLatestRun(t, repo, profile.ID); run.Error != nil {
+		requireNoAPIKeyText(t, *run.Error)
+	}
+}
+
+func TestFullSyncOwnedGamesTransportErrorRedactsAPIKeyInSyncRun(t *testing.T) {
+	repo := testRepository(t)
+	profile := testProfile(t, repo)
+	fake := newFakeSteamServer(t, nil)
+	fake.hangupPath["/IPlayerService/GetOwnedGames/v0001/"] = true
+
+	result, err := (&Service{Repo: repo, Steam: fake.client}).FullSync(context.Background(), *profile)
+	if err == nil {
+		t.Fatal("err = nil, want transport error")
+	}
+	requireRedactedAPIKeyText(t, err.Error())
+	if result.Error == nil {
+		t.Fatalf("result = %#v, want error text", result)
+	}
+	requireRedactedAPIKeyText(t, *result.Error)
+	run := requireLatestRun(t, repo, profile.ID)
+	if run.Status != "failed" || run.Error == nil {
+		t.Fatalf("sync run = %#v, want failed run with error", run)
+	}
+	requireRedactedAPIKeyText(t, *run.Error)
+}
+
+// requireNoAPIKeyText fails when text carries the test API key.
+func requireNoAPIKeyText(t *testing.T, text string) {
+	t.Helper()
+	if strings.Contains(text, "test-key") {
+		t.Fatalf("text leaks API key: %q", text)
+	}
+}
+
+// requireRedactedAPIKeyText fails when text carries the test API key or lacks the redaction marker.
+func requireRedactedAPIKeyText(t *testing.T, text string) {
+	t.Helper()
+	requireNoAPIKeyText(t, text)
+	if !strings.Contains(text, "key=REDACTED") {
+		t.Fatalf("text = %q, want key=REDACTED", text)
+	}
+}
+
+func requireLatestRun(t *testing.T, repo *repository.Repository, profileID int64) *repository.SyncRun {
+	t.Helper()
+	run, err := repo.LatestSyncRun(profileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run == nil {
+		t.Fatal("no sync run persisted")
+	}
+	return run
 }
 
 func TestFullSyncSkipsManuallyDisabledGames(t *testing.T) {
@@ -996,12 +1160,17 @@ func TestBuildSetEntriesMissingAverageUsesCountableLockedOnly(t *testing.T) {
 	if stats.total != 3 || stats.unlocked != 1 {
 		t.Fatalf("stats = %#v, want 1/3", stats)
 	}
+	// Completion is 1 of 3 countable achievements. C has no percent and D is archived, so the average is B's 10 alone.
+	// float64(1)/3*100 is one ulp away from the constant 100.0/3, so compare with a tolerance.
+	if math.Abs(stats.completion-100.0/3) > 1e-9 {
+		t.Fatalf("completion = %v, want 100/3", stats.completion)
+	}
 	if stats.missingAvg == nil || *stats.missingAvg != 10 {
 		t.Fatalf("missing average = %v, want 10", stats.missingAvg)
 	}
-	wantScore := stats.completion*0.5 + 10*0.5
-	if stats.score != wantScore {
-		t.Fatalf("score = %v, want %v", stats.score, wantScore)
+	// Weights are 0.5 completion and 0.5 missing average: 100/6 + 5 = 65/3.
+	if math.Abs(stats.score-65.0/3) > 1e-9 {
+		t.Fatalf("score = %v, want 65/3", stats.score)
 	}
 }
 
@@ -1289,35 +1458,101 @@ type fakeSteamServer struct {
 	gameFailure  map[int64]gameFailure
 	gameBody     map[int64]string // raw GetGameAchievements body override
 	userBody     map[int64]string // raw GetUserAchievements body override
+	hangupPath   map[string]bool  // closes the TCP connection without a response for this URL path
+	hangupGame   map[int64]bool   // closes the connection for GetGameAchievements of this app
+	gameStatuses map[int64][]int  // statuses answered to the next GetGameAchievements requests of a game, before gameFailure
+	ownedStatus  int              // GetOwnedGames answers this HTTP status when non-zero
+	ownedBody    string           // raw GetOwnedGames body override
 	store        map[int64]storeFixture
 	storeFailure int             // GetItems answers this HTTP status when non-zero (use a non-retried status)
 	images       map[string]bool // served store_item_assets paths relative to steam/apps/
 	delay        time.Duration
+	hold         *handshake // when set, GetGameAchievements requests block at the server until released
 	mu           sync.Mutex
 	counts       map[string]int
 	active       int
 	maxActive    int
 }
 
+// handshake lets a test see requests reach the fake server and hold them there until open is called.
+type handshake struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (h *handshake) open() {
+	h.once.Do(func() { close(h.release) })
+}
+
+// awaitStarted waits until n requests have reached the server. It fails the test instead of hanging.
+func (h *handshake) awaitStarted(t *testing.T, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		select {
+		case <-h.started:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%d of %d requests reached the server", i, n)
+		}
+	}
+}
+
+// holdGameRequests makes every GetGameAchievements request block at the server until the handshake is opened.
+// The release happens at test cleanup too, so the server can close.
+func (f *fakeSteamServer) holdGameRequests(t *testing.T) *handshake {
+	t.Helper()
+	h := &handshake{started: make(chan struct{}, 64), release: make(chan struct{})}
+	f.hold = h
+	t.Cleanup(h.open)
+	return h
+}
+
+// nextGameStatus pops the next queued status for a game, if any.
+func (f *fakeSteamServer) nextGameStatus(appID int64) (int, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	queue := f.gameStatuses[appID]
+	if len(queue) == 0 {
+		return 0, false
+	}
+	f.gameStatuses[appID] = queue[1:]
+	return queue[0], true
+}
+
 func newFakeSteamServer(t *testing.T, owned []steam.OwnedGame) *fakeSteamServer {
 	t.Helper()
 	f := &fakeSteamServer{
-		schema:      make(map[int64][]string),
-		player:      make(map[int64]map[string]bool),
-		global:      make(map[int64]map[string]float64),
-		playerError: make(map[int64]string),
-		gameFailure: make(map[int64]gameFailure),
-		gameBody:    make(map[int64]string),
-		userBody:    make(map[int64]string),
-		store:       make(map[int64]storeFixture),
-		images:      make(map[string]bool),
-		counts:      make(map[string]int),
+		schema:       make(map[int64][]string),
+		player:       make(map[int64]map[string]bool),
+		global:       make(map[int64]map[string]float64),
+		playerError:  make(map[int64]string),
+		gameFailure:  make(map[int64]gameFailure),
+		gameStatuses: make(map[int64][]int),
+		gameBody:     make(map[int64]string),
+		userBody:     make(map[int64]string),
+		hangupPath:   make(map[string]bool),
+		hangupGame:   make(map[int64]bool),
+		store:        make(map[int64]storeFixture),
+		images:       make(map[string]bool),
+		counts:       make(map[string]int),
 	}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if f.hangupPath[r.URL.Path] {
+			hangUp(t, w)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/IPlayerService/GetOwnedGames/v0001/":
 			f.increment("owned", 0)
+			if f.ownedStatus != 0 {
+				http.Error(w, "owned games unavailable", f.ownedStatus)
+				return
+			}
+			if f.ownedBody != "" {
+				fmt.Fprint(w, f.ownedBody)
+				return
+			}
 			fmt.Fprint(w, ownedGamesJSON(owned))
 		case "/IPlayerService/GetGameAchievements/v1/":
 			f.serveGameAchievements(t, w, r)
@@ -1361,14 +1596,44 @@ func newFakeSteamServer(t *testing.T, owned []steam.OwnedGame) *fakeSteamServer 
 	}))
 	t.Cleanup(f.server.Close)
 	f.client = &steam.Client{APIKey: "test-key", BaseURL: f.server.URL, HTTPClient: f.server.Client()}
+	// Retries run at once, so retryable statuses and transport errors do not sleep.
+	f.client.SetRetryBackoff(func(int) time.Duration { return 0 })
 	return f
+}
+
+// hangUp closes the TCP connection without writing a response, so the client sees a transport error.
+func hangUp(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		t.Error("response writer cannot hijack connection")
+		return
+	}
+	conn, _, err := hijacker.Hijack()
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	_ = conn.Close()
 }
 
 func (f *fakeSteamServer) serveGameAchievements(t *testing.T, w http.ResponseWriter, r *http.Request) {
 	appID := int64Query(t, r, "appid")
+	if f.hangupGame[appID] {
+		hangUp(t, w)
+		return
+	}
 	done := f.enterPerGameRequest()
 	defer done()
 	f.increment("game", appID)
+	if f.hold != nil {
+		f.hold.started <- struct{}{}
+		<-f.hold.release
+	}
+	if status, ok := f.nextGameStatus(appID); ok {
+		http.Error(w, "transient", status)
+		return
+	}
 	if fail, ok := f.gameFailure[appID]; ok {
 		if fail.eresult != "" {
 			w.Header().Set("x-eresult", fail.eresult)

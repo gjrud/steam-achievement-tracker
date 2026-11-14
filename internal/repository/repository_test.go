@@ -1114,7 +1114,9 @@ func TestSaveGameSyncPrunesStaleEntriesButKeepsFlagsAndSnapshots(t *testing.T) {
 		dashboardSeed{GroupID: 0, Total: 40, Unlocked: 40, Percent: 100, Completed: true, WasCompleted: true},
 		dashboardSeed{GroupID: 1, DLCAppID: 4173830, SetName: "PowerWash Simulator 2 DLC Pack", Total: 10, Unlocked: 3, Percent: 30, MissingDLC: true})
 
-	// DLC no longer eligible (user lost the DLC): only base entry in the update.
+	// DLC no longer eligible (user lost the DLC): only base entry in the update. Two of the update's
+	// achievement names exist already (ACH_2968420_0_0 and ACH_2968420_0_1), one is new. The DLC
+	// achievements (ACH_2968420_1_*) are not in the update and must go.
 	if err := repo.SaveGameSync(GameSyncUpdate{
 		ProfileID:         profile.ID,
 		AppID:             2968420,
@@ -1124,12 +1126,16 @@ func TestSaveGameSyncPrunesStaleEntriesButKeepsFlagsAndSnapshots(t *testing.T) {
 		AchievementStatus: "ok",
 		Sets: []SetSyncUpdate{{
 			GroupID:              0,
-			TotalAchievements:    40,
-			UnlockedAchievements: 40,
-			CompletionPercent:    100,
-			IsCompleted:          true,
+			TotalAchievements:    3,
+			UnlockedAchievements: 2,
+			CompletionPercent:    66.7,
+			IsCompleted:          false,
 			WasCompleted:         true,
-			Achievements:         []AchievementRecord{{APIName: "ACH_0_0", Unlocked: true}},
+			Achievements: []AchievementRecord{
+				{APIName: "ACH_2968420_0_0", Unlocked: false},
+				{APIName: "ACH_2968420_0_1", Unlocked: true},
+				{APIName: "ACH_NEW", Unlocked: true},
+			},
 		}},
 		SyncedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
@@ -1139,7 +1145,15 @@ func TestSaveGameSyncPrunesStaleEntriesButKeepsFlagsAndSnapshots(t *testing.T) {
 	assertCount(t, repo, `select count(*) from profile_game_tags where profile_id=? and appid=2968420 and groupid=1`, 0, profile.ID)
 	assertCount(t, repo, `select count(*) from profile_game_flags where profile_id=? and appid=2968420 and groupid=1 and missing_achievements_in_dlc=1`, 1, profile.ID)
 	assertCount(t, repo, `select count(*) from game_snapshots where profile_id=? and appid=2968420 and groupid=1`, 1, profile.ID)
-	assertCount(t, repo, `select count(*) from profile_achievements where profile_id=? and appid=2968420`, 1, profile.ID)
+	// Exactly the three update names remain for the profile; overlapping rows are upserted, not recreated.
+	assertCount(t, repo, `select count(*) from profile_achievements where profile_id=? and appid=2968420`, 3, profile.ID)
+	assertCount(t, repo, `select count(*) from profile_achievements where profile_id=? and appid=2968420 and apiname='ACH_2968420_0_0' and unlocked=0`, 1, profile.ID)
+	assertCount(t, repo, `select count(*) from profile_achievements where profile_id=? and appid=2968420 and apiname='ACH_2968420_0_1' and unlocked=1`, 1, profile.ID)
+	assertCount(t, repo, `select count(*) from profile_achievements where profile_id=? and appid=2968420 and apiname='ACH_NEW' and unlocked=1`, 1, profile.ID)
+	assertCount(t, repo, `select count(*) from profile_achievements where profile_id=? and appid=2968420 and apiname glob 'ACH_2968420_1_*'`, 0, profile.ID)
+	// Shared achievement catalogue: only the three update names remain for the app.
+	assertCount(t, repo, `select count(*) from achievements where appid=2968420`, 3)
+	assertCount(t, repo, `select count(*) from achievements where appid=2968420 and apiname glob 'ACH_2968420_1_*'`, 0)
 }
 
 func TestSaveGameSyncStoresArchivedAchievementsPerGroup(t *testing.T) {
@@ -1237,6 +1251,11 @@ func TestCoverRoundTripKeepsDownloadTimeWhenNotDownloaded(t *testing.T) {
 		t.Fatalf("cover = %#v, want library cover with timestamps", first)
 	}
 
+	// Seed an old download time so a preserved value cannot be confused with a same-second rewrite.
+	const oldDownload = "2020-01-02T03:04:05Z"
+	if _, err := repo.db.Exec(`update cover_images set downloaded_at=?, checked_at=? where image_appid=42`, oldDownload, oldDownload); err != nil {
+		t.Fatal(err)
+	}
 	if err := repo.SaveCover(CoverUpdate{ImageAppID: 42, Kind: "library", FileName: "library_600x900.jpg", Path: "/cache/42/library_600x900.jpg", SourceURL: "https://example.com/42.jpg", Downloaded: false}); err != nil {
 		t.Fatal(err)
 	}
@@ -1244,8 +1263,23 @@ func TestCoverRoundTripKeepsDownloadTimeWhenNotDownloaded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.DownloadedAt == nil || *second.DownloadedAt != *first.DownloadedAt {
-		t.Fatalf("downloaded_at = %v, want preserved %v", second.DownloadedAt, first.DownloadedAt)
+	if second.DownloadedAt == nil || *second.DownloadedAt != oldDownload {
+		t.Fatalf("downloaded_at = %v, want preserved %q", second.DownloadedAt, oldDownload)
+	}
+	if second.CheckedAt == nil || *second.CheckedAt == oldDownload {
+		t.Fatalf("checked_at = %v, want refreshed by the non-download save", second.CheckedAt)
+	}
+
+	// A real download replaces the stored time.
+	if err := repo.SaveCover(CoverUpdate{ImageAppID: 42, Kind: "library", FileName: "library_600x900.jpg", Path: "/cache/42/library_600x900.jpg", SourceURL: "https://example.com/42.jpg", Downloaded: true}); err != nil {
+		t.Fatal(err)
+	}
+	downloaded, _, err := repo.GetCover(42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if downloaded.DownloadedAt == nil || *downloaded.DownloadedAt == oldDownload {
+		t.Fatalf("downloaded_at = %v, want refreshed by a download", downloaded.DownloadedAt)
 	}
 
 	if _, ok, err := repo.GetCover(999); err != nil || ok {

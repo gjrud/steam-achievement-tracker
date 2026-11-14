@@ -1,0 +1,9 @@
+unleash:
+  # Suite runs in ~0.3 s per package; default timeouts are too tight under
+  # parallel load and produce false "timed out" results.
+  workers: 2
+  timeout-coefficient: 20
+  exclude-files:
+    - "^frontend/"
+    - "wailsjs"
+    - "^main\\.go$"
