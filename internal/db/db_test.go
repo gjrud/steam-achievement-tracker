@@ -18,10 +18,12 @@ func TestOpenAndMigrateFreshDB(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 8)
+	assertUserVersion(t, conn, 10)
 	assertTable(t, conn, "schema_migrations")
 	assertTable(t, conn, "profile_game_flags")
 	assertTable(t, conn, "profile_game_tags")
+	assertTable(t, conn, "game_sets")
+	assertTable(t, conn, "cover_images")
 	assertMigration(t, conn, 1)
 	assertMigration(t, conn, 2)
 	assertMigration(t, conn, 3)
@@ -30,6 +32,8 @@ func TestOpenAndMigrateFreshDB(t *testing.T) {
 	assertMigration(t, conn, 6)
 	assertMigration(t, conn, 7)
 	assertMigration(t, conn, 8)
+	assertMigration(t, conn, 9)
+	assertMigration(t, conn, 10)
 }
 
 func TestOpenAndMigrateLegacyV1DB(t *testing.T) {
@@ -51,7 +55,7 @@ func TestOpenAndMigrateLegacyV1DB(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 8)
+	assertUserVersion(t, conn, 10)
 	assertTable(t, conn, "schema_migrations")
 	assertTable(t, conn, "profile_game_flags")
 	assertTable(t, conn, "profile_game_tags")
@@ -63,6 +67,8 @@ func TestOpenAndMigrateLegacyV1DB(t *testing.T) {
 	assertMigration(t, conn, 6)
 	assertMigration(t, conn, 7)
 	assertMigration(t, conn, 8)
+	assertMigration(t, conn, 9)
+	assertMigration(t, conn, 10)
 	entries, err := filepath.Glob(filepath.Join(paths.Backups, "*.db"))
 	if err != nil {
 		t.Fatalf("glob backups: %v", err)
@@ -95,7 +101,7 @@ func TestOpenAndMigrateLegacyV1BackupContainsOriginalData(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 8)
+	assertUserVersion(t, conn, 10)
 	assertCount(t, conn, `select count(*) from profiles where steam_id64='11111111111111111' and display_name='Legacy User'`, 1)
 	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=42 and total_achievements=10 and unlocked_achievements=7`, 1)
 
@@ -149,7 +155,7 @@ func TestMigrationV8ScopesGlobalDisabledToLatestSyncProfile(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 8)
+	assertUserVersion(t, conn, 10)
 	assertCount(t, conn, `select count(*) from profile_game_flags where profile_id=1 and appid=50 and disabled=1 and disabled_reason='not_owned'`, 1)
 	assertCount(t, conn, `select count(*) from profile_game_flags where profile_id=2 and appid=50 and disabled=1`, 0)
 	assertCount(t, conn, `select count(*) from games where appid=50 and disabled=0 and disabled_reason is null`, 1)
@@ -176,6 +182,169 @@ func TestOpenAndMigrateSkipsNoopBackup(t *testing.T) {
 	if entries := backupFiles(t, paths); len(entries) != 0 {
 		t.Fatalf("backup count after noop migration = %d, want 0", len(entries))
 	}
+}
+
+func TestMigrationV9RebuildsPopulatedV8DB(t *testing.T) {
+	paths := testPaths(t)
+	legacy, err := sql.Open("sqlite3", paths.DB)
+	if err != nil {
+		t.Fatalf("open v8 db: %v", err)
+	}
+	// Build the exact v8 schema by running the real migrations 1..8.
+	for _, m := range migrations {
+		if m.version > 8 {
+			continue
+		}
+		if _, err := legacy.Exec(m.sql); err != nil {
+			t.Fatalf("apply migration %d: %v", m.version, err)
+		}
+	}
+	_, err = legacy.Exec(`
+		CREATE TABLE IF NOT EXISTS schema_migrations(version integer primary key, name text not null, applied_at text not null);
+		INSERT INTO schema_migrations(version, name, applied_at) VALUES
+			(1,'m1','2026-01-01T00:00:00Z'),(2,'m2','2026-01-01T00:00:00Z'),(3,'m3','2026-01-01T00:00:00Z'),(4,'m4','2026-01-01T00:00:00Z'),
+			(5,'m5','2026-01-01T00:00:00Z'),(6,'m6','2026-01-01T00:00:00Z'),(7,'m7','2026-01-01T00:00:00Z'),(8,'m8','2026-01-01T00:00:00Z');
+		PRAGMA user_version = 8;
+		INSERT INTO profiles(id, steam_id64, display_name, created_at, updated_at) VALUES(1, '11111111111111111', 'Populated User', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+		INSERT INTO settings(key, value) VALUES('active_profile_id', '1');
+		INSERT INTO games(appid, name, playtime_forever, has_achievements, achievement_status, cover_path, cover_source_url, cover_checked_at, cover_downloaded_at, created_at, updated_at) VALUES
+			(42, 'Populated Game', 90, 1, 'ok', '/cache/images/games/42/library_600x900.jpg', 'https://example.com/42.jpg', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+			(43, 'Uncovered Game', 0, 1, 'ok', NULL, NULL, NULL, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+		INSERT INTO profile_games(profile_id, appid, total_achievements, unlocked_achievements, completion_percent, missing_avg_unlock, suggestion_score, is_completed, was_completed, newly_incomplete, sync_warning, last_synced_at) VALUES
+			(1, 42, 10, 7, 70, 40.5, 61.2, 0, 1, 0, 0, '2026-01-02T00:00:00Z'),
+			(1, 43, 4, 4, 100, NULL, NULL, 1, 1, 0, 0, '2026-01-02T00:00:00Z');
+		INSERT INTO profile_game_flags(profile_id, appid, manual_was_completed, missing_achievements_in_dlc, disabled, disabled_reason, created_at, updated_at) VALUES
+			(1, 42, 1, 1, 0, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+		INSERT INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at) VALUES
+			(1, 42, 'almost_there', 61.2, 'reason', '2026-01-02T00:00:00Z'),
+			(1, 42, 'missing_achievements_in_dlc', NULL, 'manual DLC-missing flag', '2026-01-02T00:00:00Z');
+		INSERT INTO game_snapshots(profile_id, appid, total_achievements, unlocked_achievements, completion_percent, missing_avg_unlock, is_completed, synced_at) VALUES
+			(1, 42, 10, 7, 70, 40.5, 0, '2026-01-02T00:00:00Z');
+		INSERT INTO achievements(appid, apiname, global_percent, updated_at) VALUES(42, 'ACH_A', 12.5, '2026-01-02T00:00:00Z');
+		INSERT INTO profile_achievements(profile_id, appid, apiname, unlocked, unlock_time, updated_at) VALUES(1, 42, 'ACH_A', 1, 1700000000, '2026-01-02T00:00:00Z');
+	`)
+	if err != nil {
+		t.Fatalf("seed v8 db: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close v8 db: %v", err)
+	}
+
+	conn, err := OpenAndMigrate(paths)
+	if err != nil {
+		t.Fatalf("OpenAndMigrate() error = %v", err)
+	}
+	defer conn.Close()
+
+	assertUserVersion(t, conn, 10)
+	assertMigration(t, conn, 9)
+	assertMigration(t, conn, 10)
+	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=42 and groupid=0 and total_achievements=10 and unlocked_achievements=7 and suggestion_score=61.2`, 1)
+	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=43 and groupid=0 and is_completed=1`, 1)
+	assertCount(t, conn, `select count(*) from profile_game_flags where profile_id=1 and appid=42 and groupid=0 and manual_was_completed=1 and missing_achievements_in_dlc=1`, 1)
+	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=42 and groupid=0 and tag='almost_there'`, 1)
+	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=42 and groupid=0 and tag='missing_achievements_in_dlc'`, 1)
+	assertCount(t, conn, `select count(*) from game_snapshots where profile_id=1 and appid=42 and groupid=0 and total_achievements=10`, 1)
+	assertCount(t, conn, `select count(*) from achievements where appid=42 and apiname='ACH_A' and groupid=0 and archived=0`, 1)
+	assertCount(t, conn, `select count(*) from profile_achievements where profile_id=1 and appid=42 and apiname='ACH_A' and unlocked=1`, 1)
+	assertCount(t, conn, `select count(*) from cover_images where image_appid=42 and kind='library' and file_name='library_600x900.jpg' and path='/cache/images/games/42/library_600x900.jpg' and source_url='https://example.com/42.jpg' and checked_at='2026-01-02T00:00:00Z' and downloaded_at='2026-01-02T00:00:00Z'`, 1)
+	assertCount(t, conn, `select count(*) from cover_images`, 1)
+	assertCount(t, conn, `select count(*) from game_sets`, 0)
+	assertCount(t, conn, `select count(*) from sqlite_master where type='index' and name='idx_profile_game_flags_profile_disabled'`, 1)
+	assertCount(t, conn, `select count(*) from sqlite_master where type='index' and name='idx_profile_game_tags_profile_tag'`, 1)
+
+	// Composite PK: a second entry for the same app with another groupid must be accepted.
+	if _, err := conn.Exec(`insert into game_sets(appid, groupid, name, dlcappid, updated_at) values(42, 1, 'Populated Game DLC', 4173830, '2026-01-03T00:00:00Z')`); err != nil {
+		t.Fatalf("insert game_sets: %v", err)
+	}
+	if _, err := conn.Exec(`insert into profile_games(profile_id, appid, groupid, total_achievements) values(1, 42, 1, 3)`); err != nil {
+		t.Fatalf("insert sibling entry: %v", err)
+	}
+	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=42`, 2)
+	if _, err := conn.Exec(`insert into profile_games(profile_id, appid, groupid) values(1, 42, 0)`); err == nil {
+		t.Fatal("duplicate profile entry accepted, want primary key violation")
+	}
+
+	entries := backupFiles(t, paths)
+	if len(entries) != 1 {
+		t.Fatalf("backup count = %d, want 1", len(entries))
+	}
+	backup, err := sql.Open("sqlite3", entries[0])
+	if err != nil {
+		t.Fatalf("open backup: %v", err)
+	}
+	defer backup.Close()
+	assertUserVersion(t, backup, 8)
+	assertCount(t, backup, `select count(*) from profile_games where profile_id=1 and appid=42 and total_achievements=10`, 1)
+	if tableExists(backup, "cover_images") {
+		t.Fatal("backup has cover_images, want pre-migration snapshot")
+	}
+}
+
+func TestMigrationV10AddsDLCNotOwnedAndPrunesCompletedIssueTags(t *testing.T) {
+	paths := testPaths(t)
+	legacy, err := sql.Open("sqlite3", paths.DB)
+	if err != nil {
+		t.Fatalf("open v9 db: %v", err)
+	}
+	// Build the exact v9 schema by running the real migrations 1..9.
+	for _, m := range migrations {
+		if m.version > 9 {
+			continue
+		}
+		if _, err := legacy.Exec(m.sql); err != nil {
+			t.Fatalf("apply migration %d: %v", m.version, err)
+		}
+	}
+	_, err = legacy.Exec(`
+		CREATE TABLE IF NOT EXISTS schema_migrations(version integer primary key, name text not null, applied_at text not null);
+		INSERT INTO schema_migrations(version, name, applied_at) VALUES
+			(1,'m1','2026-01-01T00:00:00Z'),(2,'m2','2026-01-01T00:00:00Z'),(3,'m3','2026-01-01T00:00:00Z'),(4,'m4','2026-01-01T00:00:00Z'),
+			(5,'m5','2026-01-01T00:00:00Z'),(6,'m6','2026-01-01T00:00:00Z'),(7,'m7','2026-01-01T00:00:00Z'),(8,'m8','2026-01-01T00:00:00Z'),
+			(9,'m9','2026-01-01T00:00:00Z');
+		PRAGMA user_version = 9;
+		INSERT INTO profiles(id, steam_id64, display_name, created_at, updated_at) VALUES(1, '11111111111111111', 'V9 User', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+		INSERT INTO settings(key, value) VALUES('active_profile_id', '1');
+		INSERT INTO games(appid, name, playtime_forever, has_achievements, achievement_status, created_at, updated_at) VALUES
+			(42, 'Open Game', 90, 1, 'ok', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+			(43, 'Done Game', 30, 1, 'ok', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+		INSERT INTO profile_games(profile_id, appid, groupid, total_achievements, unlocked_achievements, completion_percent, is_completed, was_completed, newly_incomplete, last_synced_at) VALUES
+			(1, 42, 0, 10, 7, 70, 0, 1, 0, '2026-01-02T00:00:00Z'),
+			(1, 42, 1, 4, 0, 0, 0, 0, 0, '2026-01-02T00:00:00Z'),
+			(1, 43, 0, 4, 4, 100, 1, 1, 1, '2026-01-02T00:00:00Z');
+		INSERT INTO profile_game_tags(profile_id, appid, groupid, tag, score, reason, computed_at) VALUES
+			(1, 42, 0, 'new_achievements_added', NULL, 'previously completed, now incomplete', '2026-01-02T00:00:00Z'),
+			(1, 42, 1, 'in_progress', 12.0, 'reason', '2026-01-02T00:00:00Z'),
+			(1, 43, 0, 'completed', NULL, 'completed', '2026-01-02T00:00:00Z'),
+			(1, 43, 0, 'new_achievements_added', NULL, 'previously completed, now incomplete', '2026-01-02T00:00:00Z'),
+			(1, 43, 0, 'missing_achievements_in_dlc', NULL, 'manual DLC-missing flag', '2026-01-02T00:00:00Z'),
+			(1, 43, 0, 'missing_cover_art', NULL, 'no cached cover image', '2026-01-02T00:00:00Z');
+	`)
+	if err != nil {
+		t.Fatalf("seed v9 db: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close v9 db: %v", err)
+	}
+
+	conn, err := OpenAndMigrate(paths)
+	if err != nil {
+		t.Fatalf("OpenAndMigrate() error = %v", err)
+	}
+	defer conn.Close()
+
+	assertUserVersion(t, conn, 10)
+	assertMigration(t, conn, 10)
+	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=42 and groupid=0 and total_achievements=10 and unlocked_achievements=7 and is_completed=0 and was_completed=1`, 1)
+	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=42 and groupid=1 and total_achievements=4`, 1)
+	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=43 and groupid=0 and is_completed=1 and newly_incomplete=1`, 1)
+	assertCount(t, conn, `select count(*) from profile_games where dlc_not_owned=0`, 3)
+	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=42 and groupid=0 and tag='new_achievements_added'`, 1)
+	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=42 and groupid=1 and tag='in_progress'`, 1)
+	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=43 and groupid=0 and tag='completed'`, 1)
+	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=43 and groupid=0 and tag='missing_cover_art'`, 1)
+	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=43 and tag='new_achievements_added'`, 0)
+	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=43 and tag='missing_achievements_in_dlc'`, 0)
 }
 
 func testPaths(t *testing.T) appdata.Paths {

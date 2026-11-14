@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-func (r *Repository) profileGameTags(profileID int64) (map[int64][]string, error) {
-	rows, err := r.db.Query(`select appid, tag from profile_game_tags where profile_id=? order by appid,
+func (r *Repository) profileGameTags(profileID int64) (map[entryRef][]string, error) {
+	rows, err := r.db.Query(`select appid, groupid, tag from profile_game_tags where profile_id=? order by appid, groupid,
 		case tag
 			when 'new_achievements_added' then 0
 			when 'completed' then 1
@@ -17,50 +17,51 @@ func (r *Repository) profileGameTags(profileID int64) (map[int64][]string, error
 			when 'untouched' then 4
 			when 'no_achievements' then 5
 			when 'missing_achievements_in_dlc' then 6
-			when 'missing_cover_art' then 7
-			when 'sync_warning' then 8
+			when 'dlc_not_owned' then 7
+			when 'missing_cover_art' then 8
+			when 'sync_warning' then 9
 			else 99
 		end, tag`, profileID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	tags := make(map[int64][]string)
+	tags := make(map[entryRef][]string)
 	for rows.Next() {
-		var appID int64
+		var ref entryRef
 		var tag string
-		if err := rows.Scan(&appID, &tag); err != nil {
+		if err := rows.Scan(&ref.AppID, &ref.GroupID, &tag); err != nil {
 			return nil, err
 		}
-		tags[appID] = append(tags[appID], tag)
+		tags[ref] = append(tags[ref], tag)
 	}
 	return tags, rows.Err()
 }
 
-func (r *Repository) RecomputeGameTags(profileID, appID int64) error {
+func (r *Repository) RecomputeGameTags(profileID, appID, groupID int64) error {
 	tx, err := r.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if err := r.recomputeGameTagsTx(tx, profileID, appID); err != nil {
+	if err := r.recomputeGameTagsTx(tx, profileID, appID, groupID); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func (r *Repository) recomputeGameTagsTx(tx *sql.Tx, profileID, appID int64) error {
-	if _, err := tx.Exec(`delete from profile_game_tags where profile_id=? and appid=?`, profileID, appID); err != nil {
+func (r *Repository) recomputeGameTagsTx(tx *sql.Tx, profileID, appID, groupID int64) error {
+	if _, err := tx.Exec(`delete from profile_game_tags where profile_id=? and appid=? and groupid=?`, profileID, appID, groupID); err != nil {
 		return err
 	}
-	facts, ok, err := loadTagFacts(tx, profileID, appID)
+	facts, ok, err := loadTagFacts(tx, profileID, appID, groupID)
 	if err != nil {
 		return err
 	}
 	if !ok || facts.disabled() {
 		return nil
 	}
-	insert := tagInserter{tx: tx, profileID: profileID, appID: appID, now: time.Now().UTC().Format(time.RFC3339)}
+	insert := tagInserter{tx: tx, profileID: profileID, appID: appID, groupID: groupID, now: time.Now().UTC().Format(time.RFC3339)}
 	if err := insert.statTags(facts); err != nil {
 		return err
 	}
@@ -81,16 +82,20 @@ type gameTagFacts struct {
 	isCompleted     int
 	newlyIncomplete int
 	syncWarning     int
+	dlcNotOwned     int
 	lastSyncedAt    sql.NullString
 }
 
-func loadTagFacts(tx *sql.Tx, profileID, appID int64) (gameTagFacts, bool, error) {
-	row := tx.QueryRow(`select g.has_achievements, g.playtime_forever, coalesce(g.cover_path,''), coalesce(f.disabled,0), coalesce(f.missing_achievements_in_dlc,0),
-		pg.total_achievements, pg.unlocked_achievements, pg.completion_percent, pg.missing_avg_unlock, pg.suggestion_score, pg.is_completed, pg.newly_incomplete, pg.sync_warning, pg.last_synced_at
-		from profile_games pg join games g on g.appid=pg.appid left join profile_game_flags f on f.profile_id=pg.profile_id and f.appid=pg.appid
-		where pg.profile_id=? and pg.appid=?`, profileID, appID)
+func loadTagFacts(tx *sql.Tx, profileID, appID, groupID int64) (gameTagFacts, bool, error) {
+	row := tx.QueryRow(`select g.has_achievements, g.playtime_forever, coalesce(ci.path,''), coalesce(f.disabled,0), coalesce(f.missing_achievements_in_dlc,0),
+		pg.total_achievements, pg.unlocked_achievements, pg.completion_percent, pg.missing_avg_unlock, pg.suggestion_score, pg.is_completed, pg.newly_incomplete, pg.sync_warning, pg.last_synced_at, pg.dlc_not_owned
+		from profile_games pg join games g on g.appid=pg.appid
+		left join game_sets gs on gs.appid=pg.appid and gs.groupid=pg.groupid
+		left join cover_images ci on ci.image_appid=`+imageAppIDSQL+`
+		left join profile_game_flags f on f.profile_id=pg.profile_id and f.appid=pg.appid and f.groupid=pg.groupid
+		where pg.profile_id=? and pg.appid=? and pg.groupid=?`, profileID, appID, groupID)
 	var facts gameTagFacts
-	err := row.Scan(&facts.hasAchievements, &facts.playtimeForever, &facts.coverPath, &facts.flagDisabled, &facts.missingDLC, &facts.total, &facts.unlocked, &facts.completion, &facts.missingAvg, &facts.suggestionScore, &facts.isCompleted, &facts.newlyIncomplete, &facts.syncWarning, &facts.lastSyncedAt)
+	err := row.Scan(&facts.hasAchievements, &facts.playtimeForever, &facts.coverPath, &facts.flagDisabled, &facts.missingDLC, &facts.total, &facts.unlocked, &facts.completion, &facts.missingAvg, &facts.suggestionScore, &facts.isCompleted, &facts.newlyIncomplete, &facts.syncWarning, &facts.lastSyncedAt, &facts.dlcNotOwned)
 	if err == sql.ErrNoRows {
 		return gameTagFacts{}, false, nil
 	}
@@ -120,15 +125,21 @@ func (f gameTagFacts) inProgressCandidate() bool {
 	return f.isCompleted == 0 && !f.noAchievements() && !f.untouched()
 }
 
+// notOwned reports a DLC set the profile does not own. Its progress cannot change, so no progress tags apply.
+func (f gameTagFacts) notOwned() bool {
+	return f.dlcNotOwned == 1
+}
+
 type tagInserter struct {
 	tx        *sql.Tx
 	profileID int64
 	appID     int64
+	groupID   int64
 	now       string
 }
 
 func (i tagInserter) add(tag string, score *float64, reason string) error {
-	_, err := i.tx.Exec(`insert into profile_game_tags(profile_id, appid, tag, score, reason, computed_at) values(?,?,?,?,?,?)`, i.profileID, i.appID, tag, score, nullString(reason), i.now)
+	_, err := i.tx.Exec(`insert into profile_game_tags(profile_id, appid, groupid, tag, score, reason, computed_at) values(?,?,?,?,?,?,?)`, i.profileID, i.appID, i.groupID, tag, score, nullString(reason), i.now)
 	return err
 }
 
@@ -158,6 +169,9 @@ func statTagCandidates(f gameTagFacts) []tagCandidate {
 	if f.noAchievements() {
 		tags = append(tags, tagCandidate{name: "no_achievements", reason: "no achievements"})
 	}
+	if f.notOwned() {
+		return tags
+	}
 	if f.untouched() {
 		tags = append(tags, tagCandidate{name: "untouched", reason: "0 playtime"})
 	}
@@ -186,13 +200,18 @@ func (i tagInserter) issueTags(f gameTagFacts) error {
 	return nil
 }
 
+// issueTagCandidates lists the issue tags of an entry. Completed entries get no new-achievements or DLC-missing
+// tags: the stored flags stay, but they only describe entries that are still incomplete.
 func issueTagCandidates(f gameTagFacts) []tagCandidate {
-	tags := make([]tagCandidate, 0, 4)
-	if f.newlyIncomplete == 1 {
+	tags := make([]tagCandidate, 0, 5)
+	if f.isCompleted == 0 && f.newlyIncomplete == 1 {
 		tags = append(tags, tagCandidate{name: "new_achievements_added", reason: "previously completed, now incomplete"})
 	}
-	if f.missingDLC == 1 {
+	if f.isCompleted == 0 && f.missingDLC == 1 {
 		tags = append(tags, tagCandidate{name: "missing_achievements_in_dlc", reason: "manual DLC-missing flag"})
+	}
+	if f.notOwned() {
+		tags = append(tags, tagCandidate{name: "dlc_not_owned", reason: "DLC for this set is not owned"})
 	}
 	if strings.TrimSpace(f.coverPath) == "" {
 		tags = append(tags, tagCandidate{name: "missing_cover_art", reason: "no cached cover image"})

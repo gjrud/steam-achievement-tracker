@@ -3,6 +3,7 @@ package repository
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -51,8 +52,15 @@ func (r *Repository) SaveProfile(steamID64, displayName, avatarURL string) (*Pro
 	return r.ActiveProfile()
 }
 
+// ClearProfileData deletes a profile and returns the image app ids whose cover_images rows were removed,
+// i.e. no remaining profile still displays them. Their cached image directories are safe to delete.
+// Image app ids still used by other profiles are not returned, so their covers stay on disk.
 func (r *Repository) ClearProfileData(profileID int64) ([]int64, error) {
 	appIDs, err := r.profileAppIDs(profileID)
+	if err != nil {
+		return nil, err
+	}
+	imageAppIDs, err := r.profileDLCImageAppIDs(profileID)
 	if err != nil {
 		return nil, err
 	}
@@ -82,10 +90,46 @@ func (r *Repository) ClearProfileData(profileID int64) ([]int64, error) {
 	if err := deleteOrphanRowsForAppIDs(tx, appIDs); err != nil {
 		return nil, err
 	}
+	removed, err := deleteOrphanCoverRows(tx, mergeAppIDs(appIDs, imageAppIDs))
+	if err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return appIDs, nil
+	return removed, nil
+}
+
+func (r *Repository) profileDLCImageAppIDs(profileID int64) ([]int64, error) {
+	rows, err := r.db.Query(`select distinct gs.dlcappid from profile_games pg
+		join game_sets gs on gs.appid=pg.appid and gs.groupid=pg.groupid
+		where pg.profile_id=? and gs.dlcappid<>0 order by gs.dlcappid`, profileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func mergeAppIDs(a, b []int64) []int64 {
+	seen := make(map[int64]bool, len(a)+len(b))
+	merged := make([]int64, 0, len(a)+len(b))
+	for _, id := range append(append([]int64{}, a...), b...) {
+		if !seen[id] {
+			seen[id] = true
+			merged = append(merged, id)
+		}
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i] < merged[j] })
+	return merged
 }
 
 func (r *Repository) profileAppIDs(profileID int64) ([]int64, error) {

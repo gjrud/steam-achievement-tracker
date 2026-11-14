@@ -232,7 +232,125 @@ var migrations = []migration{
 	{version: 6, name: "profile_game_tags_suggestion_score_fix", sql: profileGameTagsV6SQL},
 	{version: 7, name: "profile_game_tags_threshold_40", sql: profileGameTagsV7SQL},
 	{version: 8, name: "profile_scoped_not_owned_flags", sql: profileScopedNotOwnedFlagsSQL},
+	{version: 9, name: "achievement_sets", sql: achievementSetsSQL},
+	{version: 10, name: "dlc_not_owned_sets", sql: dlcNotOwnedSetsSQL},
 }
+
+// dlcNotOwnedSetsSQL adds the per-entry DLC ownership fact (sets of DLC the profile does not own are now
+// entries too). Completed entries no longer carry the derived new-achievements and DLC-missing issue tags,
+// so those stale rows are removed here; later syncs and flag changes recompute tags on their own.
+const dlcNotOwnedSetsSQL = `
+ALTER TABLE profile_games ADD COLUMN dlc_not_owned integer not null default 0;
+
+DELETE FROM profile_game_tags
+WHERE tag IN ('new_achievements_added', 'missing_achievements_in_dlc')
+  AND EXISTS (
+    SELECT 1 FROM profile_games pg
+    WHERE pg.profile_id=profile_game_tags.profile_id
+      AND pg.appid=profile_game_tags.appid
+      AND pg.groupid=profile_game_tags.groupid
+      AND pg.is_completed=1
+  );
+`
+
+// achievementSetsSQL rebuilds per-entry tables with groupid in the PK (SQLite cannot alter a PK).
+// Existing rows become group 0 so single-set semantics are preserved.
+const achievementSetsSQL = `
+CREATE TABLE IF NOT EXISTS game_sets(
+  appid integer not null,
+  groupid integer not null,
+  name text not null default '',
+  dlcappid integer not null default 0,
+  sort_order integer not null default 0,
+  updated_at text not null,
+  primary key(appid, groupid),
+  foreign key(appid) references games(appid)
+);
+
+ALTER TABLE achievements ADD COLUMN groupid integer not null default 0;
+ALTER TABLE achievements ADD COLUMN archived integer not null default 0;
+
+ALTER TABLE game_snapshots ADD COLUMN groupid integer not null default 0;
+
+CREATE TABLE profile_games_v9(
+  profile_id integer not null,
+  appid integer not null,
+  groupid integer not null default 0,
+  total_achievements integer not null default 0,
+  unlocked_achievements integer not null default 0,
+  completion_percent real not null default 0,
+  missing_avg_unlock real,
+  suggestion_score real,
+  is_completed integer not null default 0,
+  was_completed integer not null default 0,
+  newly_incomplete integer not null default 0,
+  sync_warning integer not null default 0,
+  last_error text,
+  last_error_at text,
+  last_synced_at text,
+  primary key(profile_id, appid, groupid),
+  foreign key(profile_id) references profiles(id),
+  foreign key(appid) references games(appid)
+);
+INSERT INTO profile_games_v9(profile_id, appid, groupid, total_achievements, unlocked_achievements, completion_percent, missing_avg_unlock, suggestion_score, is_completed, was_completed, newly_incomplete, sync_warning, last_error, last_error_at, last_synced_at)
+SELECT profile_id, appid, 0, total_achievements, unlocked_achievements, completion_percent, missing_avg_unlock, suggestion_score, is_completed, was_completed, newly_incomplete, sync_warning, last_error, last_error_at, last_synced_at
+FROM profile_games;
+DROP TABLE profile_games;
+ALTER TABLE profile_games_v9 RENAME TO profile_games;
+
+CREATE TABLE profile_game_flags_v9(
+  profile_id integer not null,
+  appid integer not null,
+  groupid integer not null default 0,
+  manual_was_completed integer not null default 0,
+  missing_achievements_in_dlc integer not null default 0,
+  disabled integer not null default 0,
+  disabled_reason text,
+  created_at text not null,
+  updated_at text not null,
+  primary key(profile_id, appid, groupid),
+  foreign key(profile_id) references profiles(id),
+  foreign key(appid) references games(appid)
+);
+INSERT INTO profile_game_flags_v9(profile_id, appid, groupid, manual_was_completed, missing_achievements_in_dlc, disabled, disabled_reason, created_at, updated_at)
+SELECT profile_id, appid, 0, manual_was_completed, missing_achievements_in_dlc, disabled, disabled_reason, created_at, updated_at
+FROM profile_game_flags;
+DROP TABLE profile_game_flags;
+ALTER TABLE profile_game_flags_v9 RENAME TO profile_game_flags;
+CREATE INDEX IF NOT EXISTS idx_profile_game_flags_profile_disabled on profile_game_flags(profile_id, disabled);
+
+CREATE TABLE profile_game_tags_v9(
+  profile_id integer not null,
+  appid integer not null,
+  groupid integer not null default 0,
+  tag text not null,
+  score real,
+  reason text,
+  computed_at text not null,
+  primary key(profile_id, appid, groupid, tag),
+  foreign key(profile_id) references profiles(id),
+  foreign key(appid) references games(appid)
+);
+INSERT INTO profile_game_tags_v9(profile_id, appid, groupid, tag, score, reason, computed_at)
+SELECT profile_id, appid, 0, tag, score, reason, computed_at
+FROM profile_game_tags;
+DROP TABLE profile_game_tags;
+ALTER TABLE profile_game_tags_v9 RENAME TO profile_game_tags;
+CREATE INDEX IF NOT EXISTS idx_profile_game_tags_profile_tag on profile_game_tags(profile_id, tag);
+
+CREATE TABLE IF NOT EXISTS cover_images(
+  image_appid integer primary key,
+  kind text not null,
+  file_name text not null,
+  path text,
+  source_url text,
+  checked_at text,
+  downloaded_at text
+);
+INSERT OR IGNORE INTO cover_images(image_appid, kind, file_name, path, source_url, checked_at, downloaded_at)
+SELECT appid, 'library', 'library_600x900.jpg', cover_path, cover_source_url, cover_checked_at, cover_downloaded_at
+FROM games WHERE coalesce(cover_path,'') <> '';
+`
 
 const initialSchemaSQL = `
 CREATE TABLE IF NOT EXISTS settings(

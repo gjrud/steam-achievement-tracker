@@ -1,4 +1,6 @@
 <script>
+  import {tagDescription} from '../tag.js'
+
   export let game
   export let onContextMenu = () => {}
   export let gameTags = (g) => g.tags || []
@@ -20,7 +22,7 @@
   <div class="cover">{#if game.coverUrl}<img src={game.coverUrl} alt="" loading="lazy" decoding="async" />{:else}<div class="cover-placeholder"><span>{gameTitle(game).slice(0, 1).toUpperCase()}</span><small>Missing cover</small></div>{/if}</div>
   <div class="game-body">
     <h3>{gameTitle(game)}</h3>
-    <div class="tag-list">{#each gameTags(game) as tag}<span class={`tag ${toneClass(tagTone(tag))}`}>{tagLabel(tag)}</span>{/each}</div>
+    <div class="tag-list">{#each gameTags(game) as tag}<span class={`tag ${toneClass(tagTone(tag))}`} title={tagDescription(tag) || undefined}>{tagLabel(tag)}</span>{/each}</div>
     {#if hasAchievements(game)}
       <div class="progress" aria-label={completionLabel(game)}><div class="bar" style={`width: ${cardProgress(game)}%`}></div><span>{pct(game.completionPercent)}</span></div>
       <div class="meta"><span>{completionLabel(game)}</span><span>{game.playtimeForever != null ? formatPlaytime(game.playtimeForever) : ''}</span></div>

@@ -18,8 +18,9 @@ This app was born for personal use and was entirely vibecoded. I have entry-leve
 - **Completed games view** for games with full achievement completion.
 - **Sync errors view** for games that failed refresh while preserving prior local data.
 - **Disabled games view** for manually disabled games or games no longer owned by the active profile.
-- **Per-game actions** to mark a game as previously completed, flag missing achievements as DLC-related, disable a game, or re-enable it.
-- **Local cover cache** using Steam library capsule images.
+- **Achievement sets**: each achievement set of a game (base game, named sets, DLC sets) is its own card, completed and disabled independently.
+- **Per-set actions** to mark a set as previously completed, flag missing achievements as DLC-related, disable a set, or re-enable it.
+- **Local cover cache** using Steam library capsule images, with hero and main capsule fallbacks for DLC sets.
 - **Profile-scoped data clear** that removes the active profile, tracked games, achievements, sync history, manual flags, and cached covers while keeping the Secret Service key and logs.
 - **Local SQLite storage** with migration backups, WAL mode, and app-local log rotation.
 
@@ -191,6 +192,8 @@ Sync behavior:
 - Owned games, names, playtime, achievements, and cover images are loaded from Steam.
 - Games no longer returned by Steam for the active profile are disabled for that profile.
 - Disabled games are skipped, including manually disabled games and games disabled because Steam no longer reports them as owned.
+- Each achievement set of a game becomes its own dashboard entry, and archived achievements are excluded from completion counts.
+- DLC sets are kept even when the profile does not own the DLC. They show with the **Not owned** tag (see Achievement sets).
 - Per-game sync runs with concurrency limit `4`.
 - Steam API requests retry transient `429`, `500`, and `503` responses.
 - Failed per-game refreshes keep prior local data when available and appear in **Sync errors**.
@@ -207,32 +210,61 @@ The top summary shows:
 
 The main tabs are **Not completed**, **Completed**, **Sync errors**, **Disabled**, and **Settings**.
 
+### Achievement sets
+
+Steam groups achievements into sets. A game with several sets (for example Team Fortress 2 classes, or a game with DLC) shows **one card per set** instead of one card for the whole game:
+
+- A set is completed on its own. A completed set moves to **Completed** while its unfinished siblings stay in **Not completed**.
+- Sets are named after the game when Steam does not name them, for example `Team Fortress 2 – Scout`. The card title shows the set name, and a **DLC** tag marks sets that belong to a DLC.
+- **DLC** sets (sets tied to a DLC app) are shown whether or not you own the DLC. A set for DLC you do not own is tagged **Not owned**, sits in **Not completed** with no progress tags, and is left out of the overall achievement totals, so it does not lower your overall completion percentage. Once you own the DLC, the next sync removes the tag and counts the set normally.
+- Achievements marked **archived** by Steam are not counted toward a set's total or completion. Locked archived achievements never block completion.
+- Set cards show the same playtime as their game, because Steam reports playtime per game.
+- Sets without achievements are skipped. A game whose base set is empty (all achievements live in named sets) shows only its named sets.
+
+Search matches the game name, so searching for a game lists all of its set cards.
+
+Cover art for a DLC set uses this order:
+
+1. the DLC's Steam library capsule
+2. the DLC's Steam hero capsule (cropped to the 2:3 card shape)
+3. the DLC's Steam main capsule (last resort, used only when the library and hero capsules are missing)
+4. a placeholder with the first letter and **Missing cover art** when none of these images exists
+
+Custom (non-DLC) named sets use the base game's cover. DLC sets never fall back to the base game cover.
+
+Disable, re-enable, and the manual flags apply to one set card at a time. Disabling one set of a game leaves its sibling sets active.
+
 ### Use the Not completed view
 
 This view lists non-disabled games that are not currently complete. Cards show cover art when cached, completion progress, playtime, tags, and the average unlock rate of missing achievements when Steam provides it.
 
 ![Not completed view](docs/not-completed.gif)
 
-Suggestion tags include **New achievements added**, **Almost there**, **In progress**, **Untouched**, **No achievements**, **Achievements in DLC**, **Missing cover art**, and **Sync error**. Use the search box to filter by title and the tag chips to filter the **Not completed** list.
+Suggestion tags include **New achievements added**, **Almost there**, **In progress**, **Untouched**, **No achievements**, **DLC**, **Not owned**, **Achievements in DLC**, **Missing cover art**, and **Sync error**. Use the search box to filter by title and the tag chips to filter the **Not completed** list. Each chip shows how many cards match it.
 
 #### Tags and sorting
 
 The **Not completed** list is sorted to surface likely finishable games first:
 
 1. games with achievements that are not flagged as DLC-related, with **New achievements added** games first
-2. games flagged **Achievements in DLC**
-3. games with no Steam achievements, sorted by title
+2. DLC sets you do not own (**Not owned**), sorted by title; these never outrank a real candidate
+3. games flagged **Achievements in DLC**, sorted by suggestion score
+4. games with no Steam achievements, sorted by title
+
+A set that is both **Not owned** and flagged **Achievements in DLC** is listed in group 2.
 
 Within active achievement games, the app sorts by suggestion score, highest first. Suggestion score is based on completion percentage and, when Steam global achievement percentages are available, the average unlock rate of the achievements you are missing. Games with a score of `40` or higher get the **Almost there** tag; other started games get **In progress**.
 
 Tag meanings:
 
-- **New achievements added**: the game was previously completed, but now has locked achievements.
+- **New achievements added**: the game was previously completed, but now has locked achievements. Completed entries never show this tag.
 - **Almost there**: the suggestion score is at least `40`.
 - **In progress**: the game has progress, but its suggestion score is below the **Almost there** threshold.
 - **Untouched**: the game has no recorded playtime.
 - **No achievements**: Steam reports no achievements for the game.
-- **Achievements in DLC**: remaining achievements are manually flagged as DLC-related.
+- **DLC**: the set belongs to a DLC app. Shown on every DLC set card and filterable.
+- **Not owned**: the set belongs to a DLC you do not own. It shows no progress tags, since it cannot be progressed.
+- **Achievements in DLC**: remaining achievements are manually flagged as DLC-related. Completed entries never show this tag.
 - **Missing cover art**: no cover image is cached locally.
 - **Sync error**: the latest per-game refresh failed.
 
@@ -250,7 +282,9 @@ The **Sync errors** tab lists non-disabled games with current per-game sync warn
 
 ### Disable or re-enable games
 
-Right-click a game card in **Not completed** or **Completed**, or a row in **Sync errors**, to open the game action menu. **Disable game** hides it from active game views and summary totals, and skips it in later syncs. Use the **Disabled** tab to review disabled games and click **Re-enable**.
+Right-click a game card in **Not completed** or **Completed**, or a row in **Sync errors**, to open the game action menu. **Disable game** hides it from active game views and summary totals, and skips it in later syncs. On a set card the action reads **Disable set** and affects only that set. Use the **Disabled** tab to review disabled games and click **Re-enable**.
+
+A game whose sets are all disabled is skipped during sync. Because of that, new DLC sets of such a game are only discovered after you re-enable at least one of its sets.
 
 ![Disable and re-enable games](docs/disable-renable.gif)
 
@@ -287,7 +321,9 @@ All app-owned files live under `~/.steam-achievement-tracker` unless noted. Dire
 | `~/.steam-achievement-tracker/backups/steam-achievement-tracker-<unix-ns>.db` | DB migration before schema changes | Point-in-time SQLite DB backup created before migrating an existing user DB. |
 | `~/.steam-achievement-tracker/cache/` | Startup initialization | Cache root. |
 | `~/.steam-achievement-tracker/cache/images/games/` | Startup initialization / cover cache | Game cover cache root. |
-| `~/.steam-achievement-tracker/cache/images/games/<appid>/library_600x900.jpg` | Cover sync | Cached Steam library capsule image for one app. |
+| `~/.steam-achievement-tracker/cache/images/games/<appid>/library_600x900.jpg` | Cover sync | Cached Steam library capsule image for one app (or DLC app id for DLC sets). |
+| `~/.steam-achievement-tracker/cache/images/games/<appid>/hero_capsule.jpg` | Cover sync | Cached Steam hero capsule image, used when a DLC has no library capsule. |
+| `~/.steam-achievement-tracker/cache/images/games/<appid>/main_capsule.jpg` | Cover sync | Cached Steam main capsule image, the last fallback when neither the library nor the hero capsule is available. |
 | `~/.steam-achievement-tracker/logs/` | Logging initialization | Log directory. |
 | `~/.steam-achievement-tracker/logs/app.log` | Logging initialization | Current application log. |
 | `~/.steam-achievement-tracker/logs/app.log*` | Log rotation | Rotated logs; max size is 5 MB with up to 5 backups. |
@@ -298,10 +334,12 @@ All app-owned files live under `~/.steam-achievement-tracker` unless noted. Dire
 | Table | Columns | Notes |
 | --- | --- | --- |
 | `settings` | `key` PK, `value` | App settings. Currently stores `active_profile_id`. |
-| `schema_migrations` | `version` PK, `name`, `applied_at` | Applied DB migrations. Current schema version is `8`. |
+| `schema_migrations` | `version` PK, `name`, `applied_at` | Applied DB migrations. Current schema version is `10`. |
+| `game_sets` | `appid`, `groupid`, `name`, `dlcappid`, `sort_order`, `updated_at`; PK (`appid`, `groupid`) | Achievement set catalog per game. Group `0` is the base set; `dlcappid` ties a set to a DLC app. |
+| `cover_images` | `image_appid` PK, `kind`, `file_name`, `path`, `source_url`, `checked_at`, `downloaded_at` | Cover image per image app id (the game, or the DLC for DLC sets). `kind` is `library`, `hero` or `main`. |
 | `profiles` | `id` PK, `steam_id64` unique, `display_name`, `avatar_url`, `created_at`, `updated_at`, `last_synced_at` | Steam profiles known to the app. |
 | `games` | `appid` PK, `name`, `playtime_forever`, `has_achievements`, `achievement_status`, `disabled`, `disabled_reason`, `cover_path`, `cover_source_url`, `cover_checked_at`, `cover_downloaded_at`, `created_at`, `updated_at` | Shared Steam app metadata and cover cache metadata. `disabled`/`disabled_reason` are legacy/global fields; current manual disables are profile-scoped. |
-| `profile_games` | `profile_id`, `appid`, `total_achievements`, `unlocked_achievements`, `completion_percent`, `missing_avg_unlock`, `suggestion_score`, `is_completed`, `was_completed`, `newly_incomplete`, `sync_warning`, `last_error`, `last_error_at`, `last_synced_at`; PK (`profile_id`, `appid`) | Per-profile game progress and latest warning state. |
+| `profile_games` | `profile_id`, `appid`, `groupid`, `total_achievements`, `unlocked_achievements`, `completion_percent`, `missing_avg_unlock`, `suggestion_score`, `is_completed`, `was_completed`, `newly_incomplete`, `sync_warning`, `last_error`, `last_error_at`, `last_synced_at`, `dlc_not_owned`; PK (`profile_id`, `appid`, `groupid`) | Per-profile entry progress and latest warning state. `dlc_not_owned` is `1` for a DLC-bound set the profile does not own. |
 | `achievements` | `appid`, `apiname`, `global_percent`, `updated_at`; PK (`appid`, `apiname`) | Per-game achievement catalog with global unlock percentage. |
 | `profile_achievements` | `profile_id`, `appid`, `apiname`, `unlocked`, `unlock_time`, `updated_at`; PK (`profile_id`, `appid`, `apiname`) | Per-profile achievement unlock state. |
 | `game_snapshots` | `id` PK, `profile_id`, `appid`, `total_achievements`, `unlocked_achievements`, `completion_percent`, `missing_avg_unlock`, `is_completed`, `synced_at` | Historical per-sync progress snapshots. |
@@ -359,6 +397,7 @@ erDiagram
     text last_error
     text last_error_at
     text last_synced_at
+    integer dlc_not_owned
   }
   ACHIEVEMENTS {
     integer appid PK,FK
@@ -439,7 +478,7 @@ erDiagram
 | `https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/` | Loads each game's achievement schema. Requires the API key. |
 | `https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v1/` | Loads per-profile unlocked achievements and unlock times for a game. Requires the API key and accessible profile/game stats. |
 | `https://api.steampowered.com/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v0002/` | Loads global achievement unlock percentages used for rarity/missing-average calculations. |
-| `https://api.steampowered.com/IStoreBrowseService/GetItems/v1/` | Loads Steam store item assets, including library capsule source paths for cover art. |
+| `https://api.steampowered.com/IStoreBrowseService/GetItems/v1/` | Loads Steam store item assets, including library, hero and main capsule source paths for cover art (base games and DLC). |
 | `https://shared.akamai.steamstatic.com/store_item_assets/...` | Primary Steam static asset host for cached game cover downloads. |
 | `https://shared.steamstatic.com/store_item_assets/...` | Fallback Steam static asset host for cached game cover downloads. |
 | Steam avatar URLs returned by `GetPlayerSummaries` | Displayed in the app for the active profile; URL is stored in `profiles.avatar_url`. |

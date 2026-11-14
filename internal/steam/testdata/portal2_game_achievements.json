@@ -1,0 +1,79 @@
+{
+  "response": {
+    "achievements": [
+      {
+        "internal_name": "ACH_COOP_1",
+        "localized_name": "Coop One",
+        "hidden": false,
+        "player_percent_unlocked": "50.0",
+        "internal_key": 1001,
+        "groupid": 1,
+        "archived": false
+      },
+      {
+        "internal_name": "ACH_COOP_2",
+        "localized_name": "Coop Two",
+        "hidden": true,
+        "player_percent_unlocked": "12.5",
+        "internal_key": 1002,
+        "groupid": 1,
+        "archived": false
+      },
+      {
+        "internal_name": "ACH_SP_1",
+        "localized_name": "Single One",
+        "hidden": false,
+        "player_percent_unlocked": "77.7",
+        "internal_key": 2001,
+        "groupid": 2,
+        "archived": false
+      },
+      {
+        "internal_name": "ACH_SP_2",
+        "localized_name": "Single Two",
+        "hidden": false,
+        "player_percent_unlocked": "30.1",
+        "internal_key": 2002,
+        "groupid": 2,
+        "archived": false
+      }
+    ],
+    "schema_version": 4,
+    "schema_hash": 1234567,
+    "groups": [
+      {
+        "groupid": 0,
+        "localized_name": "",
+        "dlcappid": 0,
+        "archived": false,
+        "developeronly": false,
+        "order": 0,
+        "ispublic": true,
+        "total_achievements": 0,
+        "completion_achievements": 0
+      },
+      {
+        "groupid": 1,
+        "localized_name": "Cooperative",
+        "dlcappid": 0,
+        "archived": false,
+        "developeronly": false,
+        "order": 1,
+        "ispublic": true,
+        "total_achievements": 2,
+        "completion_achievements": 2
+      },
+      {
+        "groupid": 2,
+        "localized_name": "Single Player",
+        "dlcappid": 0,
+        "archived": false,
+        "developeronly": false,
+        "order": 2,
+        "ispublic": true,
+        "total_achievements": 2,
+        "completion_achievements": 2
+      }
+    ]
+  }
+}

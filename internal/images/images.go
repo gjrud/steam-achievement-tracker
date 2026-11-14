@@ -16,7 +16,23 @@ import (
 )
 
 const (
-	coverFileName        = "library_600x900.jpg"
+	// KindLibrary, KindHero and KindMain are the values stored in cover_images.kind.
+	KindLibrary = "library"
+	KindHero    = "hero"
+	KindMain    = "main"
+
+	// LibraryFileName, HeroFileName and MainFileName are the only file names written under
+	// GameImages/<imageAppID>/. Serving must whitelist exactly these.
+	LibraryFileName = "library_600x900.jpg"
+	HeroFileName    = "hero_capsule.jpg"
+	MainFileName    = "main_capsule.jpg"
+
+	// CoverRefreshInterval is how long a checked cover (found or not) is trusted.
+	CoverRefreshInterval = 30 * 24 * time.Hour
+
+	// MissingCoverRecheckInterval is how long a check that found no cover (Kind "") is trusted.
+	MissingCoverRecheckInterval = 7 * 24 * time.Hour
+
 	primaryCoverURLBase  = "https://shared.akamai.steamstatic.com/store_item_assets/"
 	fallbackCoverURLBase = "https://shared.steamstatic.com/store_item_assets/"
 	storeItemsEndpoint   = "https://api.steampowered.com/IStoreBrowseService/GetItems/v1/"
@@ -29,10 +45,41 @@ type Cache struct {
 	HTTPClient *http.Client
 }
 
+// Stored is the cover state the caller persisted from an earlier check
+// (a cover_images row). The zero value means "never checked".
+type Stored struct {
+	Kind      string
+	FileName  string
+	CheckedAt time.Time
+}
+
+// Result is the outcome of RefreshCover.
+//
+// Persist Kind, FileName, SourceURL and CheckedAt for every returned result.
+// Set downloaded_at only when Downloaded is true. Path is "" when no image
+// exists (Kind == ""). Skipped means the stored state was still fresh and no
+// network I/O happened. Changed means Kind/FileName differ from the Stored
+// input; the previous file (if any) has been deleted in that case.
 type Result struct {
+	Kind       string
+	FileName   string
 	Path       string
 	SourceURL  string
+	CheckedAt  time.Time
 	Downloaded bool
+	Changed    bool
+	Skipped    bool
+}
+
+// ItemAssets is the subset of a Steam store item used for cover lookup.
+// Empty capsule fields mean Steam did not report that asset.
+type ItemAssets struct {
+	AppID          int64
+	Type           int
+	ParentAppID    int64
+	LibraryCapsule string
+	HeroCapsule    string
+	MainCapsule    string
 }
 
 type storeItemID struct {
@@ -55,9 +102,15 @@ type storeItemsResponse struct {
 			ID      int64 `json:"id"`
 			AppID   int64 `json:"appid"`
 			Success int   `json:"success"`
+			Type    int   `json:"type"`
 			Assets  struct {
 				LibraryCapsule string `json:"library_capsule"`
+				HeroCapsule    string `json:"hero_capsule"`
+				MainCapsule    string `json:"main_capsule"`
 			} `json:"assets"`
+			Related struct {
+				ParentAppID int64 `json:"parent_appid"`
+			} `json:"related"`
 		} `json:"store_items"`
 	} `json:"response"`
 }
@@ -66,90 +119,285 @@ func New(paths appdata.Paths) *Cache {
 	return &Cache{Paths: paths, HTTPClient: &http.Client{Timeout: 30 * time.Second}}
 }
 
-func (c *Cache) LibraryCapsuleSourceURLs(ctx context.Context, appIDs []int64) (map[int64]string, error) {
+// StoreItemAssets looks up store assets for app ids (base games and DLC) in
+// batches. Items Steam reports as unsuccessful are omitted. On error the
+// partial map collected so far is returned.
+func (c *Cache) StoreItemAssets(ctx context.Context, appIDs []int64) (map[int64]ItemAssets, error) {
 	unique := uniqueAppIDs(appIDs)
-	urls := make(map[int64]string, len(unique))
+	out := make(map[int64]ItemAssets, len(unique))
 	for start := 0; start < len(unique); start += storeItemsBatchSize {
 		end := start + storeItemsBatchSize
 		if end > len(unique) {
 			end = len(unique)
 		}
-		batch, err := c.fetchLibraryCapsuleSourceURLs(ctx, unique[start:end])
-		if err != nil {
-			return urls, err
+		batch, err := c.fetchStoreItemAssets(ctx, unique[start:end])
+		for appID, assets := range batch {
+			out[appID] = assets
 		}
-		for appID, sourceURL := range batch {
-			urls[appID] = sourceURL
+		if err != nil {
+			return out, err
 		}
 	}
-	return urls, nil
+	return out, nil
 }
 
-func (c *Cache) RefreshCover(ctx context.Context, appID int64, source string) (Result, error) {
-	source = strings.TrimSpace(source)
-	if source == "" {
-		source = defaultCoverSourceURL(appID)
+// LibraryCapsuleSourceURLs returns the primary library capsule URL per app id
+// (default library_600x900.jpg when Steam reports no capsule). Kept for
+// callers that only need the URL; RefreshCover does its own fallback chain.
+func (c *Cache) LibraryCapsuleSourceURLs(ctx context.Context, appIDs []int64) (map[int64]string, error) {
+	assets, err := c.StoreItemAssets(ctx, appIDs)
+	urls := make(map[int64]string, len(assets))
+	for appID, item := range assets {
+		urls[appID] = coverSourceURL(appID, item.LibraryCapsule)
 	}
-	dir := filepath.Join(c.Paths.GameImages, fmt.Sprintf("%d", appID))
-	path := filepath.Join(dir, coverFileName)
-	info, statErr := os.Stat(path)
-	hasExistingCover := statErr == nil
-	if hasExistingCover && time.Since(info.ModTime()) < 30*24*time.Hour {
-		return Result{Path: path, SourceURL: source, Downloaded: false}, nil
+	return urls, err
+}
+
+// NeedsRefresh reports whether RefreshCover should contact Steam for this app.
+// It is true when the app was never checked, when there is no stored kind and the
+// last check is older than MissingCoverRecheckInterval, when a stored kind's check
+// is older than CoverRefreshInterval, when the stored file name does not match the
+// stored kind, or when the file is missing on disk. A check that found no cover is
+// therefore trusted for MissingCoverRecheckInterval; a found cover for CoverRefreshInterval.
+func (c *Cache) NeedsRefresh(imageAppID int64, prev Stored, now time.Time) bool {
+	if prev.CheckedAt.IsZero() {
+		return true
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return Result{}, err
+	age := now.Sub(prev.CheckedAt)
+	if prev.Kind == "" {
+		return age >= MissingCoverRecheckInterval
 	}
-	resp, source, err := c.getCover(ctx, appID, source)
-	if err != nil {
-		if hasExistingCover {
-			return c.keepExistingCover(path, source)
-		}
-		return Result{Path: path, SourceURL: source}, err
+	if age >= CoverRefreshInterval {
+		return true
 	}
+	if kind, ok := kindForFileName(prev.FileName); !ok || kind != prev.Kind {
+		return true
+	}
+	info, err := os.Stat(c.coverPath(imageAppID, prev.FileName))
+	return err != nil || !info.Mode().IsRegular()
+}
+
+// RefreshCover resolves and caches the cover for imageAppID.
+//
+// Chain: library capsule (assets.LibraryCapsule, then the default
+// library_600x900.jpg) -> hero capsule (assets.HeroCapsule) -> main capsule
+// (assets.MainCapsule) -> none. The first valid image wins. The header image and
+// base-game covers are never used.
+//
+// If prev is still fresh (see NeedsRefresh) nothing is fetched and the stored
+// state is returned with Skipped=true. If nothing is found and a previous file
+// exists, that file is kept and returned. If nothing is found and no file
+// exists, an empty Result with nil error is returned. A transport or content
+// error with no file to keep is returned as an error.
+//
+// Callers that need assets for a DLC should first check NeedsRefresh and only
+// then call StoreItemAssets for that id.
+func (c *Cache) RefreshCover(ctx context.Context, imageAppID int64, assets ItemAssets, prev Stored) (Result, error) {
+	if imageAppID <= 0 {
+		return Result{}, fmt.Errorf("invalid image app id %d", imageAppID)
+	}
+	now := time.Now()
+	if !c.NeedsRefresh(imageAppID, prev, now) {
+		return Result{
+			Kind:      prev.Kind,
+			FileName:  prev.FileName,
+			Path:      c.coverPath(imageAppID, prev.FileName),
+			CheckedAt: prev.CheckedAt,
+			Skipped:   true,
+		}, nil
+	}
+
+	resp, cand, source, fetchErr := c.fetchFirstCover(ctx, imageAppID, assets)
 	if resp == nil {
-		if hasExistingCover {
-			return c.keepExistingCover(path, source)
+		if name, path, ok := c.existingCover(imageAppID, prev); ok {
+			kind, _ := kindForFileName(name)
+			return Result{Kind: kind, FileName: name, Path: path, SourceURL: source, CheckedAt: now}, nil
 		}
-		return Result{Path: "", SourceURL: source, Downloaded: false}, nil
+		if fetchErr != nil {
+			return Result{SourceURL: source}, fetchErr
+		}
+		return Result{SourceURL: source, CheckedAt: now}, nil
 	}
 	defer resp.Body.Close()
+
+	path, err := c.writeCover(imageAppID, cand.fileName, resp.Body)
+	if err != nil {
+		return Result{}, err
+	}
+	c.removeOtherCovers(imageAppID, cand.fileName)
+	return Result{
+		Kind:       cand.kind,
+		FileName:   cand.fileName,
+		Path:       path,
+		SourceURL:  source,
+		CheckedAt:  now,
+		Downloaded: true,
+		Changed:    prev.Kind != cand.kind || prev.FileName != cand.fileName,
+	}, nil
+}
+
+type coverCandidate struct {
+	kind     string
+	fileName string
+	urls     []string
+}
+
+// coverCandidates lists the chain in priority order. Only the library entry has
+// a default URL; the hero and main capsules are used only when Steam reports them.
+func coverCandidates(imageAppID int64, assets ItemAssets) []coverCandidate {
+	return []coverCandidate{
+		{kind: KindLibrary, fileName: LibraryFileName, urls: libraryCandidateURLs(imageAppID, assets.LibraryCapsule)},
+		{kind: KindHero, fileName: HeroFileName, urls: capsuleCandidateURLs(imageAppID, assets.HeroCapsule)},
+		{kind: KindMain, fileName: MainFileName, urls: capsuleCandidateURLs(imageAppID, assets.MainCapsule)},
+	}
+}
+
+// fetchFirstCover walks the chain and returns the first valid image response.
+// The returned source is the last URL tried when nothing matched.
+func (c *Cache) fetchFirstCover(ctx context.Context, imageAppID int64, assets ItemAssets) (*http.Response, coverCandidate, string, error) {
+	var lastSource string
+	var lastErr error
+	for _, cand := range coverCandidates(imageAppID, assets) {
+		for _, source := range cand.urls {
+			lastSource = source
+			resp, err := c.fetchCover(ctx, source)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if resp != nil {
+				return resp, cand, source, nil
+			}
+		}
+	}
+	return nil, coverCandidate{}, lastSource, lastErr
+}
+
+// fetchCover returns a validated 2xx image response, (nil, nil) for 404, or an error.
+func (c *Cache) fetchCover(ctx context.Context, source string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		resp.Body.Close()
+		return nil, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		resp.Body.Close()
+		return nil, fmt.Errorf("cover download returned %s", resp.Status)
+	}
+	if !validCoverContentType(resp.Header.Get("Content-Type")) {
+		resp.Body.Close()
+		return nil, fmt.Errorf("cover download returned unsupported content type %q", resp.Header.Get("Content-Type"))
+	}
+	if resp.ContentLength > maxCoverBytes {
+		resp.Body.Close()
+		return nil, fmt.Errorf("cover download content length %d exceeds %d bytes", resp.ContentLength, maxCoverBytes)
+	}
+	return resp, nil
+}
+
+func (c *Cache) writeCover(imageAppID int64, fileName string, body io.Reader) (string, error) {
+	dir := c.imageDir(imageAppID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, fileName)
 	tmp := path + ".tmp"
 	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
-		return Result{}, err
+		return "", err
 	}
-	written, copyErr := io.Copy(out, io.LimitReader(resp.Body, maxCoverBytes+1))
+	written, copyErr := io.Copy(out, io.LimitReader(body, maxCoverBytes+1))
 	closeErr := out.Close()
 	if copyErr != nil {
 		os.Remove(tmp)
-		return Result{}, copyErr
+		return "", copyErr
 	}
 	if written > maxCoverBytes {
 		os.Remove(tmp)
-		return Result{}, fmt.Errorf("cover download exceeded %d bytes", maxCoverBytes)
+		return "", fmt.Errorf("cover download exceeded %d bytes", maxCoverBytes)
 	}
 	if closeErr != nil {
 		os.Remove(tmp)
-		return Result{}, closeErr
+		return "", closeErr
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
-		return Result{}, err
+		return "", err
 	}
 	_ = os.Chmod(path, 0o600)
-	return Result{Path: path, SourceURL: source, Downloaded: true}, nil
+	return path, nil
 }
 
-func (c *Cache) keepExistingCover(path, source string) (Result, error) {
-	now := time.Now()
-	if err := os.Chtimes(path, now, now); err != nil {
-		return Result{Path: path, SourceURL: source, Downloaded: false}, err
+// removeOtherCovers deletes known cover files other than keep (e.g. a stale
+// hero_capsule.jpg once a library capsule is stored). Errors are ignored.
+func (c *Cache) removeOtherCovers(imageAppID int64, keep string) {
+	for _, known := range knownCoverFiles {
+		if known.fileName != keep {
+			os.Remove(c.coverPath(imageAppID, known.fileName))
+		}
 	}
-	return Result{Path: path, SourceURL: source, Downloaded: false}, nil
 }
 
-func (c *Cache) fetchLibraryCapsuleSourceURLs(ctx context.Context, appIDs []int64) (map[int64]string, error) {
+// existingCover returns the first known cover file present on disk, preferring
+// the stored file name.
+func (c *Cache) existingCover(imageAppID int64, prev Stored) (string, string, bool) {
+	names := make([]string, 0, len(knownCoverFiles)+1)
+	if prev.FileName != "" {
+		names = append(names, prev.FileName)
+	}
+	for _, known := range knownCoverFiles {
+		names = append(names, known.fileName)
+	}
+	for _, name := range names {
+		if _, ok := kindForFileName(name); !ok {
+			continue
+		}
+		path := c.coverPath(imageAppID, name)
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			return name, path, true
+		}
+	}
+	return "", "", false
+}
+
+func (c *Cache) imageDir(imageAppID int64) string {
+	return filepath.Join(c.Paths.GameImages, fmt.Sprintf("%d", imageAppID))
+}
+
+func (c *Cache) coverPath(imageAppID int64, fileName string) string {
+	if fileName == "" {
+		return ""
+	}
+	return filepath.Join(c.imageDir(imageAppID), fileName)
+}
+
+// knownCoverFiles maps every cover file the cache writes to its kind.
+var knownCoverFiles = []struct {
+	kind     string
+	fileName string
+}{
+	{KindLibrary, LibraryFileName},
+	{KindHero, HeroFileName},
+	{KindMain, MainFileName},
+}
+
+func kindForFileName(fileName string) (string, bool) {
+	for _, known := range knownCoverFiles {
+		if known.fileName == fileName {
+			return known.kind, true
+		}
+	}
+	return "", false
+}
+
+func (c *Cache) fetchStoreItemAssets(ctx context.Context, appIDs []int64) (map[int64]ItemAssets, error) {
 	endpoint, encodedForm, err := storeItemsRequestEndpoint(appIDs)
 	if err != nil {
 		return nil, err
@@ -173,7 +421,7 @@ func (c *Cache) fetchLibraryCapsuleSourceURLs(ctx context.Context, appIDs []int6
 		if err := json.Unmarshal(body, &payload); err != nil {
 			return nil, fmt.Errorf("decode Steam store items: %w", err)
 		}
-		return storeItemsSourceURLs(payload), nil
+		return storeItemsAssets(payload), nil
 	}
 	return nil, lastErr
 }
@@ -242,8 +490,8 @@ func storeItemsRetryStatus(status int) bool {
 	}
 }
 
-func storeItemsSourceURLs(payload storeItemsResponse) map[int64]string {
-	urls := make(map[int64]string, len(payload.Response.StoreItems))
+func storeItemsAssets(payload storeItemsResponse) map[int64]ItemAssets {
+	out := make(map[int64]ItemAssets, len(payload.Response.StoreItems))
 	for _, item := range payload.Response.StoreItems {
 		if item.Success != 1 {
 			continue
@@ -252,12 +500,23 @@ func storeItemsSourceURLs(payload storeItemsResponse) map[int64]string {
 		if appID == 0 {
 			appID = item.ID
 		}
-		sourceURL := coverSourceURL(appID, item.Assets.LibraryCapsule)
-		if appID > 0 && sourceURL != "" {
-			urls[appID] = sourceURL
+		if appID <= 0 {
+			continue
+		}
+		out[appID] = ItemAssets{
+			AppID:          appID,
+			Type:           item.Type,
+			ParentAppID:    item.Related.ParentAppID,
+			LibraryCapsule: strings.TrimSpace(item.Assets.LibraryCapsule),
+			HeroCapsule:    strings.TrimSpace(item.Assets.HeroCapsule),
+			MainCapsule:    strings.TrimSpace(item.Assets.MainCapsule),
 		}
 	}
-	return urls
+	return out
+}
+
+func appAssetURL(appID int64, file string) string {
+	return primaryCoverURLBase + fmt.Sprintf("steam/apps/%d/%s", appID, strings.TrimLeft(strings.TrimSpace(file), "/"))
 }
 
 func coverSourceURL(appID int64, libraryCapsule string) string {
@@ -265,52 +524,49 @@ func coverSourceURL(appID int64, libraryCapsule string) string {
 	if libraryCapsule == "" {
 		return defaultCoverSourceURL(appID)
 	}
-	return primaryCoverURLBase + fmt.Sprintf("steam/apps/%d/%s", appID, strings.TrimLeft(libraryCapsule, "/"))
+	return appAssetURL(appID, libraryCapsule)
 }
 
 func defaultCoverSourceURL(appID int64) string {
-	return primaryCoverURLBase + fmt.Sprintf("steam/apps/%d/%s", appID, coverFileName)
+	return appAssetURL(appID, LibraryFileName)
 }
 
-func (c *Cache) getCover(ctx context.Context, appID int64, primarySource string) (*http.Response, string, error) {
-	sources := coverSourceURLs(appID, primarySource)
-	var lastErr error
-	lastSource := primarySource
-	for _, source := range sources {
-		lastSource = source
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		resp, err := c.HTTPClient.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if resp.StatusCode == http.StatusNotFound {
-			resp.Body.Close()
-			lastErr = nil
-			continue
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			lastErr = fmt.Errorf("cover download returned %s", resp.Status)
-			resp.Body.Close()
-			continue
-		}
-		if !validCoverContentType(resp.Header.Get("Content-Type")) {
-			lastErr = fmt.Errorf("cover download returned unsupported content type %q", resp.Header.Get("Content-Type"))
-			resp.Body.Close()
-			continue
-		}
-		if resp.ContentLength > maxCoverBytes {
-			lastErr = fmt.Errorf("cover download content length %d exceeds %d bytes", resp.ContentLength, maxCoverBytes)
-			resp.Body.Close()
-			continue
-		}
-		return resp, source, nil
+// libraryCandidateURLs: Steam's library capsule (with mirror), then the default
+// library_600x900.jpg (with mirror). Duplicates removed, order preserved.
+func libraryCandidateURLs(appID int64, librarySource string) []string {
+	urls := make([]string, 0, 4)
+	if strings.TrimSpace(librarySource) != "" {
+		urls = append(urls, mirrorSourceURLs(appAssetURL(appID, librarySource))...)
 	}
-	return nil, lastSource, lastErr
+	urls = append(urls, mirrorSourceURLs(defaultCoverSourceURL(appID))...)
+	return uniqueStrings(urls)
+}
+
+// capsuleCandidateURLs: Steam's hero or main capsule (with mirror). Nothing is
+// guessed when Steam reports no capsule.
+func capsuleCandidateURLs(appID int64, capsule string) []string {
+	capsule = strings.TrimSpace(capsule)
+	if capsule == "" {
+		return nil
+	}
+	return uniqueStrings(mirrorSourceURLs(appAssetURL(appID, capsule)))
+}
+
+// mirrorSourceURLs returns [primary, mirror] with the akamai/steamstatic swap.
+func mirrorSourceURLs(primary string) []string {
+	primary = strings.TrimSpace(primary)
+	primary = strings.Replace(primary, "https://cdn.cloudflare.steamstatic.com/", primaryCoverURLBase, 1)
+	primary = strings.Replace(primary, "http://cdn.cloudflare.steamstatic.com/", primaryCoverURLBase, 1)
+	fallback := strings.Replace(primary, primaryCoverURLBase, fallbackCoverURLBase, 1)
+	if fallback == primary {
+		path := strings.TrimPrefix(primary, "https://")
+		path = strings.TrimPrefix(path, "http://")
+		parts := strings.SplitN(path, "/", 2)
+		if len(parts) == 2 {
+			fallback = fallbackCoverURLBase + parts[1]
+		}
+	}
+	return uniqueStrings([]string{primary, fallback})
 }
 
 func validCoverContentType(contentType string) bool {
@@ -323,42 +579,24 @@ func validCoverContentType(contentType string) bool {
 	}
 }
 
-func coverSourceURLs(appID int64, primarySource string) []string {
-	primarySource = strings.TrimSpace(primarySource)
-	if primarySource == "" {
-		primarySource = defaultCoverSourceURL(appID)
-	}
-	primarySource = strings.Replace(primarySource, "https://cdn.cloudflare.steamstatic.com/", primaryCoverURLBase, 1)
-	primarySource = strings.Replace(primarySource, "http://cdn.cloudflare.steamstatic.com/", primaryCoverURLBase, 1)
-	fallbackSource := strings.Replace(primarySource, primaryCoverURLBase, fallbackCoverURLBase, 1)
-	if fallbackSource == primarySource {
-		path := strings.TrimPrefix(primarySource, "https://")
-		path = strings.TrimPrefix(path, "http://")
-		parts := strings.SplitN(path, "/", 2)
-		if len(parts) == 2 {
-			fallbackSource = fallbackCoverURLBase + parts[1]
-		}
-	}
-	defaultPrimarySource := defaultCoverSourceURL(appID)
-	defaultFallbackSource := strings.Replace(defaultPrimarySource, primaryCoverURLBase, fallbackCoverURLBase, 1)
-
-	sources := make([]string, 0, 4)
-	for _, source := range []string{primarySource, fallbackSource, defaultPrimarySource, defaultFallbackSource} {
-		if source == "" {
+func uniqueStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
 			continue
 		}
 		duplicate := false
-		for _, existing := range sources {
-			if existing == source {
+		for _, existing := range out {
+			if existing == value {
 				duplicate = true
 				break
 			}
 		}
 		if !duplicate {
-			sources = append(sources, source)
+			out = append(out, value)
 		}
 	}
-	return sources
+	return out
 }
 
 func uniqueAppIDs(appIDs []int64) []int64 {

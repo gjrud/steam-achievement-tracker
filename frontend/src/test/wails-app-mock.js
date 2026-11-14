@@ -26,12 +26,13 @@ export function __resetWailsMocks() {
 }
 
 export const ClearActiveUserData = (...args) => handlers.ClearActiveUserData(...args)
-export const DisableGame = (...args) => handlers.DisableGame(...args)
-export const EnableGame = (...args) => handlers.EnableGame(...args)
+// Game actions take (appID, groupID): groupID selects one achievement set of the game.
+export const DisableGame = (appID, groupID) => handlers.DisableGame(appID, groupID)
+export const EnableGame = (appID, groupID) => handlers.EnableGame(appID, groupID)
 export const GetAppState = (...args) => handlers.GetAppState(...args)
-export const MarkGamePreviouslyCompleted = (...args) => handlers.MarkGamePreviouslyCompleted(...args)
+export const MarkGamePreviouslyCompleted = (appID, groupID) => handlers.MarkGamePreviouslyCompleted(appID, groupID)
 export const RetryAPIKey = (...args) => handlers.RetryAPIKey(...args)
 export const SaveProfile = (...args) => handlers.SaveProfile(...args)
 export const SyncNow = (...args) => handlers.SyncNow(...args)
-export const ToggleGameMissingAchievementsInDLC = (...args) => handlers.ToggleGameMissingAchievementsInDLC(...args)
+export const ToggleGameMissingAchievementsInDLC = (appID, groupID) => handlers.ToggleGameMissingAchievementsInDLC(appID, groupID)
 export const ValidateProfile = (...args) => handlers.ValidateProfile(...args)

@@ -21,7 +21,7 @@
   <div class="section-head"><div><h2>Sync errors</h2><p class="section-copy">Games with current sync warnings. Previous data is kept when available.</p></div><span class="pill">{games.length} results</span></div>
   {#if games.length}
     <div class="sync-error-list">
-      {#each games as game (game.appid)}
+      {#each games as game (game.entryKey)}
         <article class="sync-error-row" title={gameWarning(game) || gameTitle(game)} on:contextmenu|preventDefault={(event) => onOpenGameMenu(event, game)}>
           <div class="sync-error-main">
             <div class="sync-error-title"><span class="warning small" title={gameWarning(game)} aria-label={gameWarning(game)}>⚠</span><h3>{gameTitle(game)}</h3></div>

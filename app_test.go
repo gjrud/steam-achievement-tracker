@@ -77,6 +77,52 @@ func TestAssetHandlerServesCachedGameCover(t *testing.T) {
 	}
 }
 
+func TestAssetHandlerServesHeroCoverForDLCImageApp(t *testing.T) {
+	imagesDir := t.TempDir()
+	heroPath := filepath.Join(imagesDir, "4173830", "hero_capsule.jpg")
+	if err := os.MkdirAll(filepath.Dir(heroPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(heroPath, []byte("hero-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{paths: appdata.Paths{GameImages: imagesDir}}
+
+	req := httptest.NewRequest(http.MethodGet, "/game-covers/4173830/hero_capsule.jpg", nil)
+	rec := httptest.NewRecorder()
+	app.assetHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if got := rec.Body.String(); got != "hero-bytes" {
+		t.Fatalf("body = %q, want hero bytes", got)
+	}
+}
+
+func TestAssetHandlerServesMainCoverFallback(t *testing.T) {
+	imagesDir := t.TempDir()
+	mainPath := filepath.Join(imagesDir, "4173830", "main_capsule.jpg")
+	if err := os.MkdirAll(filepath.Dir(mainPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mainPath, []byte("main-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{paths: appdata.Paths{GameImages: imagesDir}}
+
+	req := httptest.NewRequest(http.MethodGet, "/game-covers/4173830/main_capsule.jpg", nil)
+	rec := httptest.NewRecorder()
+	app.assetHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if got := rec.Body.String(); got != "main-bytes" {
+		t.Fatalf("body = %q, want main bytes", got)
+	}
+}
+
 func TestAssetHandlerRejectsInvalidCoverRoutes(t *testing.T) {
 	app := &App{paths: appdata.Paths{GameImages: t.TempDir()}}
 	tests := []struct {
@@ -86,8 +132,14 @@ func TestAssetHandlerRejectsInvalidCoverRoutes(t *testing.T) {
 		{http.MethodPost, "/game-covers/123/library_600x900.jpg"},
 		{http.MethodGet, "/game-covers/not-an-id/library_600x900.jpg"},
 		{http.MethodGet, "/game-covers/0/library_600x900.jpg"},
+		{http.MethodGet, "/game-covers/-5/library_600x900.jpg"},
 		{http.MethodGet, "/game-covers/123/other.jpg"},
+		{http.MethodGet, "/game-covers/123/header.jpg"},
+		{http.MethodGet, "/game-covers/123/../library_600x900.jpg"},
 		{http.MethodGet, "/game-covers/123/nested/library_600x900.jpg"},
+		{http.MethodGet, "/game-covers/123/hero_capsule.png"},
+		{http.MethodGet, "/game-covers/123/main_capsule.png"},
+		{http.MethodGet, "/game-covers/123/main_capsule.jpg.tmp"},
 		{http.MethodGet, "/other/123/library_600x900.jpg"},
 	}
 	for _, tt := range tests {
