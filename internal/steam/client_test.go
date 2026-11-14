@@ -3,11 +3,14 @@ package steam
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -187,10 +190,20 @@ func (l *requestLog) query(path string) url.Values {
 	return l.queries[path]
 }
 
+// newTestServer serves handler over httptest and returns a Client pointed at it with zero retry
+// backoff, plus the server's close func. The API key is "test-key".
+func newTestServer(t *testing.T, handler http.HandlerFunc) (*Client, func()) {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	client := &Client{APIKey: "test-key", BaseURL: server.URL, HTTPClient: server.Client()}
+	client.SetRetryBackoff(func(int) time.Duration { return 0 })
+	return client, server.Close
+}
+
 func testSetClient(t *testing.T, responses map[string]fixtureResponse) (*Client, *requestLog, func()) {
 	t.Helper()
 	log := &requestLog{attempts: map[string]int{}, queries: map[string]url.Values{}}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client, closeServer := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		log.record(r)
 		resp, ok := responses[r.URL.Path]
 		if !ok {
@@ -202,10 +215,8 @@ func testSetClient(t *testing.T, responses map[string]fixtureResponse) (*Client,
 			w.Header().Set("x-eresult", resp.eresult)
 		}
 		_, _ = w.Write([]byte(resp.body))
-	}))
-	client := &Client{APIKey: "test-key", BaseURL: server.URL, HTTPClient: server.Client()}
-	client.retryBackoff = func(int) time.Duration { return 0 }
-	return client, log, server.Close
+	})
+	return client, log, closeServer
 }
 
 // testStatusSequenceClient answers the first len(statuses) requests with those HTTP statuses,
@@ -213,7 +224,7 @@ func testSetClient(t *testing.T, responses map[string]fixtureResponse) (*Client,
 func testStatusSequenceClient(t *testing.T, path string, statuses []int, eresult, body string) (*Client, *atomic.Int32, func()) {
 	t.Helper()
 	var attempts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client, closeServer := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != path {
 			http.NotFound(w, r)
 			return
@@ -228,10 +239,8 @@ func testStatusSequenceClient(t *testing.T, path string, statuses []int, eresult
 			w.Header().Set("x-eresult", eresult)
 		}
 		_, _ = w.Write([]byte(body))
-	}))
-	client := &Client{APIKey: "test-key", BaseURL: server.URL, HTTPClient: server.Client()}
-	client.retryBackoff = func(int) time.Duration { return 0 }
-	return client, &attempts, server.Close
+	})
+	return client, &attempts, closeServer
 }
 
 func readFixture(t *testing.T, name string) string {
@@ -666,7 +675,7 @@ func TestGetGameAchievementsTypedEResultError(t *testing.T) {
 
 func testClient(t *testing.T, responses map[string]string) (*Client, func()) {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		body, ok := responses[r.URL.Path]
 		if !ok {
 			http.NotFound(w, r)
@@ -674,7 +683,727 @@ func testClient(t *testing.T, responses map[string]string) (*Client, func()) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(body))
+	})
+}
+
+// roundTripFunc adapts a function to http.RoundTripper for deterministic transport failures.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestTransportErrorDoesNotLeakAPIKey(t *testing.T) {
+	httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("boom: connection refused")
+	})}
+	client := &Client{APIKey: "test-key", BaseURL: "http://steam.invalid", HTTPClient: httpClient}
+	client.retryBackoff = func(int) time.Duration { return 0 }
+
+	_, err := client.GetOwnedGames(context.Background(), testSteamID)
+	if err == nil {
+		t.Fatal("err = nil, want transport error")
+	}
+	text := err.Error()
+	if strings.Contains(text, "test-key") {
+		t.Fatalf("error leaks API key: %q", text)
+	}
+	if !strings.Contains(text, "key=REDACTED") || !strings.Contains(text, "/IPlayerService/GetOwnedGames/v0001/") {
+		t.Fatalf("error = %q, want redacted key and request path kept", text)
+	}
+}
+
+func TestHTTPStatusErrorBodyRedactsAPIKey(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden: https://api.steampowered.com/x?key=test-key&steamid=1 and &amp;key=test-key", http.StatusForbidden)
 	}))
+	defer server.Close()
 	client := &Client{APIKey: "test-key", BaseURL: server.URL, HTTPClient: server.Client()}
-	return client, server.Close
+	client.retryBackoff = func(int) time.Duration { return 0 }
+
+	_, err := client.GetOwnedGames(context.Background(), testSteamID)
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.Code != http.StatusForbidden {
+		t.Fatalf("err = %#v, want 403 *HTTPStatusError", err)
+	}
+	text := err.Error()
+	if strings.Contains(text, "test-key") {
+		t.Fatalf("error leaks API key: %q", text)
+	}
+	if !strings.Contains(text, "key=REDACTED") {
+		t.Fatalf("error = %q, want redacted key in body", text)
+	}
+}
+
+func TestRedactURLError(t *testing.T) {
+	sentinel := errors.New("dial tcp 127.0.0.1:1: connection refused")
+	tests := []struct {
+		name   string
+		rawURL string
+		want   string
+	}{
+		{name: "key first", rawURL: "https://api.steampowered.com/x/?key=test-key&steamid=1", want: "https://api.steampowered.com/x/?key=REDACTED&steamid=1"},
+		{name: "key middle", rawURL: "https://h/x?steamid=1&key=test-key&format=json", want: "https://h/x?steamid=1&key=REDACTED&format=json"},
+		{name: "key last", rawURL: "https://h/x?steamid=1&key=test-key", want: "https://h/x?steamid=1&key=REDACTED"},
+		{name: "key only param", rawURL: "https://h/x?key=test-key", want: "https://h/x?key=REDACTED"},
+		{name: "empty key value", rawURL: "https://h/x?key=&a=1", want: "https://h/x?key=REDACTED&a=1"},
+		{name: "url-encoded key value", rawURL: "https://h/x?key=a%2Bb%3Dc&x=1", want: "https://h/x?key=REDACTED&x=1"},
+		{name: "no key param", rawURL: "https://h/x?steamid=1", want: "https://h/x?steamid=1"},
+		{name: "similar param name kept", rawURL: "https://h/x?monkey=banana&steamid=1", want: "https://h/x?monkey=banana&steamid=1"},
+		{name: "unparsable URL text", rawURL: "://bad host?key=test-key", want: "://bad host?key=REDACTED"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := &url.Error{Op: "Get", URL: tc.rawURL, Err: sentinel}
+			got := redactURLError(orig)
+			var ue *url.Error
+			if !errors.As(got, &ue) {
+				t.Fatalf("got %#v, want *url.Error", got)
+			}
+			if ue.URL != tc.want {
+				t.Fatalf("URL = %q, want %q", ue.URL, tc.want)
+			}
+			if ue.Op != "Get" || !errors.Is(got, sentinel) {
+				t.Fatalf("Op/Err not preserved: %#v", ue)
+			}
+			if orig.URL != tc.rawURL {
+				t.Fatalf("original error mutated: URL = %q, want %q", orig.URL, tc.rawURL)
+			}
+		})
+	}
+}
+
+func TestRedactURLErrorPassThroughAndPlainErrors(t *testing.T) {
+	if got := redactURLError(nil); got != nil {
+		t.Fatalf("nil error became %v", got)
+	}
+	plain := errors.New("connection reset")
+	if got := redactURLError(plain); got != plain {
+		t.Fatalf("non-url.Error changed: %v", got)
+	}
+}
+
+func TestRequestBuildErrorDoesNotLeakAPIKey(t *testing.T) {
+	client := &Client{APIKey: "test-key", BaseURL: "://bad base", HTTPClient: &http.Client{}}
+	client.retryBackoff = func(int) time.Duration { return 0 }
+
+	_, err := client.GetOwnedGames(context.Background(), testSteamID)
+	if err == nil {
+		t.Fatal("err = nil, want URL parse error")
+	}
+	if strings.Contains(err.Error(), "test-key") || !strings.Contains(err.Error(), "key=REDACTED") {
+		t.Fatalf("error = %q, want redacted key", err.Error())
+	}
+}
+
+func TestTransportErrorKeepsCancellationChain(t *testing.T) {
+	started := make(chan struct{}, 16)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		server.Close()
+	})
+	client := &Client{APIKey: "test-key", BaseURL: server.URL, HTTPClient: server.Client()}
+	client.retryBackoff = func(int) time.Duration { return 0 }
+
+	checkURLError := func(t *testing.T, err error) {
+		t.Helper()
+		var ue *url.Error
+		if !errors.As(err, &ue) {
+			t.Fatalf("err = %#v, want *url.Error in chain", err)
+		}
+		if ue.Op != "Get" || ue.Err == nil {
+			t.Fatalf("url.Error Op/Err not preserved: %#v", ue)
+		}
+		if strings.Contains(err.Error(), "test-key") || !strings.Contains(ue.URL, "key=REDACTED") {
+			t.Fatalf("url.Error URL = %q, want redacted key", ue.URL)
+		}
+	}
+
+	t.Run("canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			<-started
+			cancel()
+		}()
+		_, err := client.GetOwnedGames(ctx, testSteamID)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want errors.Is context.Canceled", err)
+		}
+		checkURLError(t, err)
+	})
+
+	t.Run("deadline", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		_, err := client.GetOwnedGames(ctx, testSteamID)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v, want errors.Is context.DeadlineExceeded", err)
+		}
+		checkURLError(t, err)
+		var ue *url.Error
+		if errors.As(err, &ue) && !ue.Timeout() {
+			t.Fatalf("url.Error.Timeout() = false, want true for deadline")
+		}
+	})
+}
+
+// testHangUpClient closes the TCP connection without a response for the first hangUps requests,
+// then serves a one-game owned-games response.
+func testHangUpClient(t *testing.T, hangUps int32) (*Client, *atomic.Int32, func()) {
+	t.Helper()
+	var hits atomic.Int32
+	client, closeServer := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) <= hangUps {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Errorf("hijack: %v", err)
+				return
+			}
+			_ = conn.Close()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"response":{"game_count":1,"games":[{"appid":10,"name":"Back","playtime_forever":1}]}}`))
+	})
+	return client, &hits, closeServer
+}
+
+func TestRetryableStatusesRetriedUntilSuccess(t *testing.T) {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			client, attempts, closeServer := testStatusSequenceClient(t, gameAchievementsPath, []int{status, status}, "1", readFixture(t, "portal2_game_achievements.json"))
+			defer closeServer()
+
+			game, err := client.GetGameAchievements(context.Background(), 620)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if attempts.Load() != 3 || len(game.Achievements) != 4 {
+				t.Fatalf("attempts=%d achievements=%d, want 3 and 4", attempts.Load(), len(game.Achievements))
+			}
+		})
+	}
+}
+
+func TestRetryableStatusesGiveUpAfterFourAttempts(t *testing.T) {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			client, attempts, closeServer := testStatusSequenceClient(t, gameAchievementsPath, []int{status, status, status, status}, "1", readFixture(t, "portal2_game_achievements.json"))
+			defer closeServer()
+
+			_, err := client.GetGameAchievements(context.Background(), 620)
+			var statusErr *HTTPStatusError
+			if !errors.As(err, &statusErr) || statusErr.Code != status {
+				t.Fatalf("err = %#v, want *HTTPStatusError with code %d", err, status)
+			}
+			if attempts.Load() != 4 {
+				t.Fatalf("attempts = %d, want 4", attempts.Load())
+			}
+		})
+	}
+}
+
+func TestTransportErrorsAreRetried(t *testing.T) {
+	t.Run("hang up once then succeeds", func(t *testing.T) {
+		client, hits, closeServer := testHangUpClient(t, 1)
+		defer closeServer()
+
+		games, err := client.GetOwnedGames(context.Background(), testSteamID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hits.Load() != 2 || len(games) != 1 || games[0].Name != "Back" {
+			t.Fatalf("hits=%d games=%#v, want 2 attempts and game Back", hits.Load(), games)
+		}
+	})
+	t.Run("hang up on every attempt gives up after four", func(t *testing.T) {
+		client, hits, closeServer := testHangUpClient(t, 100)
+		defer closeServer()
+
+		_, err := client.GetOwnedGames(context.Background(), testSteamID)
+		var ue *url.Error
+		if !errors.As(err, &ue) {
+			t.Fatalf("err = %#v, want *url.Error from transport", err)
+		}
+		if hits.Load() != 4 {
+			t.Fatalf("hits = %d, want 4", hits.Load())
+		}
+		if !strings.Contains(err.Error(), "key=REDACTED") {
+			t.Fatalf("err = %q, want redacted key", err.Error())
+		}
+	})
+}
+
+func TestRetryBackoffCalledWithRetryAttemptNumbers(t *testing.T) {
+	client, attempts, closeServer := testStatusSequenceClient(t, gameAchievementsPath, []int{503, 500, 429}, "1", readFixture(t, "portal2_game_achievements.json"))
+	defer closeServer()
+
+	var got []int
+	client.SetRetryBackoff(func(attempt int) time.Duration {
+		got = append(got, attempt)
+		return 0
+	})
+	if _, err := client.GetGameAchievements(context.Background(), 620); err != nil {
+		t.Fatal(err)
+	}
+	if attempts.Load() != 4 || fmt.Sprint(got) != "[1 2 3]" {
+		t.Fatalf("attempts=%d backoff attempts=%v, want 4 and [1 2 3]", attempts.Load(), got)
+	}
+}
+
+func TestDefaultRetryDelayBoundsPerAttempt(t *testing.T) {
+	// Default backoff: 300ms doubling per retry, plus jitter in [0, 250ms).
+	want := map[int]time.Duration{
+		1: 300 * time.Millisecond,
+		2: 600 * time.Millisecond,
+		3: 1200 * time.Millisecond,
+		4: 2400 * time.Millisecond,
+	}
+	c := New("test-key")
+	for attempt := 1; attempt <= 4; attempt++ {
+		base := want[attempt]
+		seen := map[time.Duration]bool{}
+		for i := 0; i < 5000; i++ {
+			d := c.retryDelay(attempt)
+			if d < base || d >= base+250*time.Millisecond {
+				t.Fatalf("attempt %d delay = %v, want in [%v, %v)", attempt, d, base, base+250*time.Millisecond)
+			}
+			seen[d] = true
+		}
+		if len(seen) < 2 {
+			t.Fatalf("attempt %d: jitter produced one value, want variation", attempt)
+		}
+	}
+
+	c.SetRetryBackoff(func(int) time.Duration { return 0 })
+	c.SetRetryBackoff(nil)
+	if d := c.retryDelay(1); d < 300*time.Millisecond || d >= 550*time.Millisecond {
+		t.Fatalf("after SetRetryBackoff(nil) delay = %v, want default 300ms plus jitter", d)
+	}
+}
+
+func TestSetRetryBackoffReplacesDelay(t *testing.T) {
+	c := New("test-key")
+	c.SetRetryBackoff(func(attempt int) time.Duration { return time.Duration(attempt) * time.Second })
+	for attempt := 1; attempt <= 3; attempt++ {
+		if d := c.retryDelay(attempt); d != time.Duration(attempt)*time.Second {
+			t.Fatalf("attempt %d delay = %v, want %v", attempt, d, time.Duration(attempt)*time.Second)
+		}
+	}
+}
+
+func TestRetryBackoffWaitsAndHonorsCancellation(t *testing.T) {
+	t.Run("waits the injected delay before retrying", func(t *testing.T) {
+		client, attempts, closeServer := testStatusSequenceClient(t, gameAchievementsPath, []int{503}, "1", readFixture(t, "portal2_game_achievements.json"))
+		defer closeServer()
+		client.SetRetryBackoff(func(int) time.Duration { return 80 * time.Millisecond })
+
+		start := time.Now()
+		if _, err := client.GetGameAchievements(context.Background(), 620); err != nil {
+			t.Fatal(err)
+		}
+		if elapsed := time.Since(start); elapsed < 80*time.Millisecond {
+			t.Fatalf("elapsed = %v, want at least the 80ms backoff", elapsed)
+		}
+		if attempts.Load() != 2 {
+			t.Fatalf("attempts = %d, want 2", attempts.Load())
+		}
+	})
+	t.Run("cancel during backoff returns context error promptly", func(t *testing.T) {
+		client, attempts, closeServer := testStatusSequenceClient(t, gameAchievementsPath, []int{503, 503, 503, 503}, "1", readFixture(t, "portal2_game_achievements.json"))
+		defer closeServer()
+		client.SetRetryBackoff(func(int) time.Duration { return 10 * time.Second })
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		time.AfterFunc(20*time.Millisecond, cancel)
+
+		start := time.Now()
+		_, err := client.GetGameAchievements(ctx, 620)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Fatalf("elapsed = %v, want prompt return instead of waiting out the 10s backoff", elapsed)
+		}
+		if attempts.Load() > 1 {
+			t.Fatalf("attempts = %d, want no retry after cancel", attempts.Load())
+		}
+	})
+}
+
+func TestSuccessStatusRangeIs2xx(t *testing.T) {
+	const body = `{"response":{"game_count":0,"games":[]}}`
+	tests := []struct {
+		code    int
+		wantErr bool
+	}{
+		{199, true},
+		{200, false},
+		{299, false},
+		{300, true},
+	}
+	for _, tc := range tests {
+		t.Run(strconv.Itoa(tc.code), func(t *testing.T) {
+			var hits atomic.Int32
+			httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				hits.Add(1)
+				return &http.Response{
+					StatusCode: tc.code,
+					Status:     strconv.Itoa(tc.code),
+					Header:     http.Header{},
+					Body:       io.NopCloser(strings.NewReader(body)),
+				}, nil
+			})}
+			client := &Client{APIKey: "test-key", BaseURL: "http://steam.invalid", HTTPClient: httpClient}
+			client.SetRetryBackoff(func(int) time.Duration { return 0 })
+
+			_, err := client.GetOwnedGames(context.Background(), testSteamID)
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			var statusErr *HTTPStatusError
+			if !errors.As(err, &statusErr) || statusErr.Code != tc.code {
+				t.Fatalf("err = %#v, want *HTTPStatusError with code %d", err, tc.code)
+			}
+			if hits.Load() != 1 {
+				t.Fatalf("hits = %d, want 1 (non-retryable)", hits.Load())
+			}
+		})
+	}
+}
+
+func TestMalformedSteamResponses(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string // exact text, or prefix when wantPrefix is set
+		prefix  bool
+	}{
+		{name: "invalid JSON with 200", body: `{"response":`, wantErr: "decode Steam API /IPlayerService/GetOwnedGames/v0001/", prefix: true},
+		{name: "empty body with 200", body: "", wantErr: "owned games unavailable; profile game details may be private"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client, closeServer := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			})
+			defer closeServer()
+
+			_, err := client.GetOwnedGames(context.Background(), testSteamID)
+			if err == nil {
+				t.Fatal("err = nil, want error")
+			}
+			if tc.prefix && !strings.HasPrefix(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %q, want prefix %q", err.Error(), tc.wantErr)
+			}
+			if !tc.prefix && err.Error() != tc.wantErr {
+				t.Fatalf("err = %q, want %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestGetOwnedGamesIncompleteResponse(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		wantCount int
+		wantErr   string
+	}{
+		{name: "count zero and empty list is an empty library", body: `{"response":{"game_count":0,"games":[]}}`, wantCount: 0},
+		{name: "count zero without games key", body: `{"response":{"game_count":0}}`, wantCount: 0},
+		{name: "count positive and empty list is incomplete", body: `{"response":{"game_count":2,"games":[]}}`, wantErr: "owned games response was incomplete"},
+		{name: "count positive without games key is incomplete", body: `{"response":{"game_count":1}}`, wantErr: "owned games response was incomplete"},
+		{name: "count positive with games is complete", body: `{"response":{"game_count":1,"games":[{"appid":10,"name":"A","playtime_forever":0}]}}`, wantCount: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client, closeServer := testClient(t, map[string]string{"/IPlayerService/GetOwnedGames/v0001/": tc.body})
+			defer closeServer()
+
+			games, err := client.GetOwnedGames(context.Background(), testSteamID)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(games) != tc.wantCount {
+				t.Fatalf("games = %d, want %d", len(games), tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestPlayerAchievementsBoolFlexibility(t *testing.T) {
+	tests := []struct {
+		raw     string
+		want    bool
+		wantErr bool
+	}{
+		{raw: `1`, want: true},
+		{raw: `"1"`, want: true},
+		{raw: `true`, want: true},
+		{raw: `"true"`, want: true},
+		{raw: `"TRUE"`, want: true},
+		{raw: `2`, want: true},
+		{raw: `-1`, want: true},
+		{raw: `0`, want: false},
+		{raw: `"0"`, want: false},
+		{raw: `false`, want: false},
+		{raw: `"false"`, want: false},
+		{raw: `""`, want: false},
+		{raw: `null`, want: false},
+		{raw: `"abc"`, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.raw, func(t *testing.T) {
+			body := `{"playerstats":{"success":true,"achievements":[{"apiname":"A","achieved":` + tc.raw + `}]}}`
+			client, closeServer := testClient(t, map[string]string{"/ISteamUserStats/GetPlayerAchievements/v1/": body})
+			defer closeServer()
+
+			achievements, err := client.GetPlayerAchievements(context.Background(), testSteamID, 10)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("err = nil, want decode error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(achievements) != 1 || achievements[0].Achieved != tc.want {
+				t.Fatalf("achieved = %#v, want %v", achievements, tc.want)
+			}
+		})
+	}
+}
+
+func TestPlayerAchievementsSuccessFlag(t *testing.T) {
+	tests := []struct {
+		raw    string
+		wantOK bool
+	}{
+		{raw: `true`, wantOK: true},
+		{raw: `1`, wantOK: true},
+		{raw: `"1"`, wantOK: true},
+		{raw: `"true"`, wantOK: true},
+		{raw: `"TRUE"`, wantOK: true},
+		{raw: `null`, wantOK: true},
+		{raw: `false`, wantOK: false},
+		{raw: `0`, wantOK: false},
+		{raw: `2`, wantOK: false},
+		{raw: `"0"`, wantOK: false},
+		{raw: `"yes"`, wantOK: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.raw, func(t *testing.T) {
+			client, closeServer := testClient(t, map[string]string{
+				"/ISteamUserStats/GetPlayerAchievements/v1/": `{"playerstats":{"success":` + tc.raw + `}}`,
+			})
+			defer closeServer()
+
+			achievements, err := client.GetPlayerAchievements(context.Background(), testSteamID, 10)
+			if tc.wantOK {
+				if err != nil || len(achievements) != 0 {
+					t.Fatalf("achievements=%v err=%v, want empty and no error", achievements, err)
+				}
+				return
+			}
+			if err == nil || err.Error() != "player achievements unavailable" {
+				t.Fatalf("err = %v, want %q", err, "player achievements unavailable")
+			}
+		})
+	}
+}
+
+// vanityTestClient answers ResolveVanityURL: "gabelogan" resolves, any other name is no match.
+func vanityTestClient(t *testing.T, hits *atomic.Int32) (*Client, func()) {
+	t.Helper()
+	return newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ISteamUser/ResolveVanityURL/v1/" {
+			http.NotFound(w, r)
+			return
+		}
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("vanityurl") == "gabelogan" {
+			_, _ = w.Write([]byte(`{"response":{"success":1,"steamid":"76561197960287930"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"response":{"success":42,"message":"No match"}}`))
+	})
+}
+
+func TestResolveProfileInput(t *testing.T) {
+	const (
+		profileID  = "76561198000000001"
+		vanityID   = "76561197960287930"
+		profileErr = "Steam profile URL must contain /profiles/{steamid64} or /id/{vanity}"
+	)
+	tests := []struct {
+		name       string
+		input      string
+		want       string
+		wantErr    string
+		wantVanity int32
+	}{
+		{name: "bare SteamID64", input: profileID, want: profileID},
+		{name: "SteamID64 trimmed", input: "  " + profileID + "\n", want: profileID},
+		{name: "profile URL", input: "https://steamcommunity.com/profiles/" + profileID, want: profileID},
+		{name: "profile URL trailing slash", input: "https://steamcommunity.com/profiles/" + profileID + "/", want: profileID},
+		{name: "profile URL with query", input: "https://steamcommunity.com/profiles/" + profileID + "/?tab=games", want: profileID},
+		{name: "vanity URL", input: "https://steamcommunity.com/id/gabelogan", want: vanityID, wantVanity: 1},
+		{name: "vanity URL trailing slash", input: "https://steamcommunity.com/id/gabelogan/", want: vanityID, wantVanity: 1},
+		{name: "vanity URL with query", input: "https://steamcommunity.com/id/gabelogan?l=english", want: vanityID, wantVanity: 1},
+		{name: "bare vanity name", input: "gabelogan", want: vanityID, wantVanity: 1},
+		{name: "empty input", input: "", wantErr: "profile input is required"},
+		{name: "whitespace input", input: "   ", wantErr: "profile input is required"},
+		{name: "URL without profile or id", input: "https://steamcommunity.com/", wantErr: profileErr},
+		{name: "URL with groups path", input: "https://steamcommunity.com/groups/foo", wantErr: profileErr},
+		{name: "profiles without id", input: "https://steamcommunity.com/profiles", wantErr: profileErr},
+		{name: "profiles with 3-digit id", input: "https://steamcommunity.com/profiles/123", wantErr: profileErr},
+		{name: "id without vanity", input: "https://steamcommunity.com/id", wantErr: profileErr},
+		{name: "16 digits is not SteamID64", input: "7656119800000000", wantErr: "No match", wantVanity: 1},
+		{name: "18 digits is not SteamID64", input: "765611980000000001", wantErr: "No match", wantVanity: 1},
+		{name: "unknown bare vanity", input: "not a profile!", wantErr: "No match", wantVanity: 1},
+		{name: "unparsable URL falls back to vanity", input: "https://[::1", wantErr: "No match", wantVanity: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var hits atomic.Int32
+			client, closeServer := vanityTestClient(t, &hits)
+			defer closeServer()
+
+			got, err := client.ResolveProfileInput(context.Background(), tc.input)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			} else if got != tc.want {
+				t.Fatalf("id = %q, want %q", got, tc.want)
+			}
+			if hits.Load() != tc.wantVanity {
+				t.Fatalf("vanity lookups = %d, want %d", hits.Load(), tc.wantVanity)
+			}
+		})
+	}
+}
+
+func TestResolveVanityURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		want    string
+		wantErr string
+	}{
+		{name: "success", body: `{"response":{"success":1,"steamid":"76561197960287930"}}`, want: "76561197960287930"},
+		{name: "no match with message", body: `{"response":{"success":42,"message":"No match"}}`, wantErr: "No match"},
+		{name: "no match without message", body: `{"response":{"success":42}}`, wantErr: `could not resolve Steam vanity name "nobody"`},
+		{name: "success without steamid", body: `{"response":{"success":1}}`, wantErr: `could not resolve Steam vanity name "nobody"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client, closeServer := testClient(t, map[string]string{"/ISteamUser/ResolveVanityURL/v1/": tc.body})
+			defer closeServer()
+
+			got, err := client.ResolveVanityURL(context.Background(), "nobody")
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("id = %q err = %v, want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestGetPlayerSummaryFieldsAndNotFound(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		want    PlayerSummary
+		wantErr string
+	}{
+		{
+			name: "full avatar preferred",
+			body: `{"response":{"players":[{"steamid":"76561198000000001","personaname":"Gabe","avatarfull":"https://img/full.jpg","avatarmedium":"https://img/med.jpg"}]}}`,
+			want: PlayerSummary{SteamID64: "76561198000000001", DisplayName: "Gabe", AvatarURL: "https://img/full.jpg"},
+		},
+		{
+			name: "medium avatar when full is empty",
+			body: `{"response":{"players":[{"steamid":"76561198000000001","personaname":"Gabe","avatarfull":"","avatarmedium":"https://img/med.jpg"}]}}`,
+			want: PlayerSummary{SteamID64: "76561198000000001", DisplayName: "Gabe", AvatarURL: "https://img/med.jpg"},
+		},
+		{name: "empty players list", body: `{"response":{"players":[]}}`, wantErr: "Steam profile not found"},
+		{name: "players key missing", body: `{"response":{}}`, wantErr: "Steam profile not found"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var query url.Values
+			client, closeServer := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/ISteamUser/GetPlayerSummaries/v2/" {
+					http.NotFound(w, r)
+					return
+				}
+				query = r.URL.Query()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			})
+			defer closeServer()
+
+			got, err := client.GetPlayerSummary(context.Background(), testSteamID)
+			if query.Get("steamids") != testSteamID || query.Get("key") != "test-key" {
+				t.Fatalf("query = %v, want steamids and key", query)
+			}
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("summary = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewDefaults(t *testing.T) {
+	c := New("abc")
+	if c.APIKey != "abc" || c.BaseURL != "https://api.steampowered.com" {
+		t.Fatalf("client = %#v, want key abc and default base URL", c)
+	}
+	if c.HTTPClient == nil || c.HTTPClient.Timeout != 30*time.Second {
+		t.Fatalf("HTTPClient = %#v, want 30s timeout", c.HTTPClient)
+	}
+	if c.retryBackoff != nil {
+		t.Fatal("New must leave the default retry backoff in place")
+	}
 }

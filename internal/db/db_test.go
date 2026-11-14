@@ -124,30 +124,8 @@ func TestOpenAndMigrateLegacyV1BackupContainsOriginalData(t *testing.T) {
 
 func TestMigrationV8ScopesGlobalDisabledToLatestSyncProfile(t *testing.T) {
 	paths := testPaths(t)
-	legacy, err := sql.Open("sqlite3", paths.DB)
-	if err != nil {
-		t.Fatalf("open v7 db: %v", err)
-	}
-	_, err = legacy.Exec(initialSchemaSQL + manualGameFlagsSQL + profileGameTagsSQL + `
-		CREATE TABLE IF NOT EXISTS schema_migrations(version integer primary key, name text not null, applied_at text not null);
-		INSERT INTO schema_migrations(version, name, applied_at) VALUES
-			(1,'m1','2026-01-01T00:00:00Z'),(2,'m2','2026-01-01T00:00:00Z'),(3,'m3','2026-01-01T00:00:00Z'),(4,'m4','2026-01-01T00:00:00Z'),
-			(5,'m5','2026-01-01T00:00:00Z'),(6,'m6','2026-01-01T00:00:00Z'),(7,'m7','2026-01-01T00:00:00Z');
-		PRAGMA user_version = 7;
-		INSERT INTO profiles(id, steam_id64, display_name, created_at, updated_at) VALUES
-			(1, '11111111111111111', 'User One', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
-			(2, '22222222222222222', 'User Two', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
-		INSERT INTO settings(key, value) VALUES('active_profile_id', '2');
-		INSERT INTO sync_runs(id, profile_id, started_at, status) VALUES(1, 1, '2026-01-01T00:00:00Z', 'success');
-		INSERT INTO games(appid, name, playtime_forever, disabled, disabled_reason, created_at, updated_at) VALUES(50, 'Shared Game', 10, 1, 'not_owned', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
-		INSERT INTO profile_games(profile_id, appid) VALUES(1, 50), (2, 50);
-	`)
-	if err != nil {
-		t.Fatalf("seed v7 db: %v", err)
-	}
-	if err := legacy.Close(); err != nil {
-		t.Fatalf("close v7 db: %v", err)
-	}
+	seedV7Database(t, paths.DB, `INSERT INTO settings(key, value) VALUES('active_profile_id', '2');
+		INSERT INTO sync_runs(id, profile_id, started_at, status) VALUES(1, 1, '2026-01-01T00:00:00Z', 'success');`)
 
 	conn, err := OpenAndMigrate(paths)
 	if err != nil {
@@ -191,14 +169,7 @@ func TestMigrationV9RebuildsPopulatedV8DB(t *testing.T) {
 		t.Fatalf("open v8 db: %v", err)
 	}
 	// Build the exact v8 schema by running the real migrations 1..8.
-	for _, m := range migrations {
-		if m.version > 8 {
-			continue
-		}
-		if _, err := legacy.Exec(m.sql); err != nil {
-			t.Fatalf("apply migration %d: %v", m.version, err)
-		}
-	}
+	applyMigrationsUpTo(t, legacy, 8)
 	_, err = legacy.Exec(`
 		CREATE TABLE IF NOT EXISTS schema_migrations(version integer primary key, name text not null, applied_at text not null);
 		INSERT INTO schema_migrations(version, name, applied_at) VALUES
@@ -283,20 +254,35 @@ func TestMigrationV9RebuildsPopulatedV8DB(t *testing.T) {
 
 func TestMigrationV10AddsDLCNotOwnedAndPrunesCompletedIssueTags(t *testing.T) {
 	paths := testPaths(t)
-	legacy, err := sql.Open("sqlite3", paths.DB)
+	seedV9Database(t, paths.DB)
+
+	conn, err := OpenAndMigrate(paths)
 	if err != nil {
-		t.Fatalf("open v9 db: %v", err)
+		t.Fatalf("OpenAndMigrate() error = %v", err)
 	}
-	// Build the exact v9 schema by running the real migrations 1..9.
-	for _, m := range migrations {
-		if m.version > 9 {
-			continue
-		}
-		if _, err := legacy.Exec(m.sql); err != nil {
-			t.Fatalf("apply migration %d: %v", m.version, err)
-		}
-	}
-	_, err = legacy.Exec(`
+	defer conn.Close()
+
+	assertUserVersion(t, conn, 10)
+	assertMigration(t, conn, 10)
+	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=42 and groupid=0 and total_achievements=10 and unlocked_achievements=7 and is_completed=0 and was_completed=1`, 1)
+	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=42 and groupid=1 and total_achievements=4`, 1)
+	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=43 and groupid=0 and is_completed=1 and newly_incomplete=1`, 1)
+	assertCount(t, conn, `select count(*) from profile_games where dlc_not_owned=0`, 3)
+	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=42 and groupid=0 and tag='new_achievements_added'`, 1)
+	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=42 and groupid=1 and tag='in_progress'`, 1)
+	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=43 and groupid=0 and tag='completed'`, 1)
+	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=43 and groupid=0 and tag='missing_cover_art'`, 1)
+	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=43 and tag='new_achievements_added'`, 0)
+	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=43 and tag='missing_achievements_in_dlc'`, 0)
+}
+
+// seedV9Database writes a populated schema at version 9 (real migrations 1..9) with an
+// unmigrated profile, games, entries, flags and tags, so later migrations have data to rewrite.
+func seedV9Database(t *testing.T, path string) {
+	t.Helper()
+	legacy := openRawDB(t, path)
+	applyMigrationsUpTo(t, legacy, 9)
+	_, err := legacy.Exec(`
 		CREATE TABLE IF NOT EXISTS schema_migrations(version integer primary key, name text not null, applied_at text not null);
 		INSERT INTO schema_migrations(version, name, applied_at) VALUES
 			(1,'m1','2026-01-01T00:00:00Z'),(2,'m2','2026-01-01T00:00:00Z'),(3,'m3','2026-01-01T00:00:00Z'),(4,'m4','2026-01-01T00:00:00Z'),
@@ -326,25 +312,44 @@ func TestMigrationV10AddsDLCNotOwnedAndPrunesCompletedIssueTags(t *testing.T) {
 	if err := legacy.Close(); err != nil {
 		t.Fatalf("close v9 db: %v", err)
 	}
+}
 
-	conn, err := OpenAndMigrate(paths)
+// seedV7Database writes a v7 schema with profiles 1 and 2 sharing game 50, which is globally disabled as
+// not_owned. extraSQL adds the settings and sync_runs rows that decide which profile the v8 migration scopes to.
+func seedV7Database(t *testing.T, path, extraSQL string) {
+	t.Helper()
+	legacy := openRawDB(t, path)
+	_, err := legacy.Exec(initialSchemaSQL + manualGameFlagsSQL + profileGameTagsSQL + `
+		CREATE TABLE IF NOT EXISTS schema_migrations(version integer primary key, name text not null, applied_at text not null);
+		INSERT INTO schema_migrations(version, name, applied_at) VALUES
+			(1,'m1','2026-01-01T00:00:00Z'),(2,'m2','2026-01-01T00:00:00Z'),(3,'m3','2026-01-01T00:00:00Z'),(4,'m4','2026-01-01T00:00:00Z'),
+			(5,'m5','2026-01-01T00:00:00Z'),(6,'m6','2026-01-01T00:00:00Z'),(7,'m7','2026-01-01T00:00:00Z');
+		PRAGMA user_version = 7;
+		INSERT INTO profiles(id, steam_id64, display_name, created_at, updated_at) VALUES
+			(1, '11111111111111111', 'User One', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+			(2, '22222222222222222', 'User Two', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+		INSERT INTO games(appid, name, playtime_forever, disabled, disabled_reason, created_at, updated_at) VALUES(50, 'Shared Game', 10, 1, 'not_owned', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+		INSERT INTO profile_games(profile_id, appid) VALUES(1, 50), (2, 50);
+	` + extraSQL)
 	if err != nil {
-		t.Fatalf("OpenAndMigrate() error = %v", err)
+		t.Fatalf("seed v7 db: %v", err)
 	}
-	defer conn.Close()
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close v7 db: %v", err)
+	}
+}
 
-	assertUserVersion(t, conn, 10)
-	assertMigration(t, conn, 10)
-	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=42 and groupid=0 and total_achievements=10 and unlocked_achievements=7 and is_completed=0 and was_completed=1`, 1)
-	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=42 and groupid=1 and total_achievements=4`, 1)
-	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=43 and groupid=0 and is_completed=1 and newly_incomplete=1`, 1)
-	assertCount(t, conn, `select count(*) from profile_games where dlc_not_owned=0`, 3)
-	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=42 and groupid=0 and tag='new_achievements_added'`, 1)
-	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=42 and groupid=1 and tag='in_progress'`, 1)
-	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=43 and groupid=0 and tag='completed'`, 1)
-	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=43 and groupid=0 and tag='missing_cover_art'`, 1)
-	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=43 and tag='new_achievements_added'`, 0)
-	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=43 and tag='missing_achievements_in_dlc'`, 0)
+// applyMigrationsUpTo runs the real migration SQL for every version up to and including version.
+func applyMigrationsUpTo(t *testing.T, conn *sql.DB, version int) {
+	t.Helper()
+	for _, m := range migrations {
+		if m.version > version {
+			continue
+		}
+		if _, err := conn.Exec(m.sql); err != nil {
+			t.Fatalf("apply migration %d: %v", m.version, err)
+		}
+	}
 }
 
 func testPaths(t *testing.T) appdata.Paths {
@@ -386,10 +391,10 @@ func assertMigration(t *testing.T, conn *sql.DB, version int) {
 	}
 }
 
-func assertCount(t *testing.T, conn *sql.DB, query string, want int) {
+func assertCount(t *testing.T, conn *sql.DB, query string, want int, args ...any) {
 	t.Helper()
 	var got int
-	if err := conn.QueryRow(query).Scan(&got); err != nil {
+	if err := conn.QueryRow(query, args...).Scan(&got); err != nil {
 		t.Fatalf("query count: %v", err)
 	}
 	if got != want {

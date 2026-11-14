@@ -222,7 +222,7 @@ func (a *App) ClearActiveUserData() (AppState, error) {
 	return a.GetAppState()
 }
 
-// MarkGamePreviouslyCompleted flags one achievement set (appID, groupID) of the active profile.
+// MarkGamePreviouslyCompleted toggles the manual previously-completed flag on one achievement set (appID, groupID) of the active profile.
 func (a *App) MarkGamePreviouslyCompleted(appID, groupID int64) (AppState, error) {
 	repo, profile, err := a.activeRepoAndProfile()
 	if err != nil {
@@ -354,9 +354,6 @@ func (a *App) refreshAPIKey() error {
 			a.apiKeyError = ""
 		} else {
 			a.apiKeyError = err.Error()
-		}
-		if errors.Is(err, keyring.ErrMissing) {
-			return err
 		}
 		return err
 	}
@@ -509,7 +506,9 @@ func (a *App) assetHandler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+		a.mu.Lock()
 		paths := a.paths
+		a.mu.Unlock()
 		if paths.GameImages == "" {
 			resolved, err := appdata.Resolve()
 			if err != nil {

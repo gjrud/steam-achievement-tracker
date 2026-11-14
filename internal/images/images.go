@@ -448,11 +448,17 @@ func storeItemsRequestEndpoint(appIDs []int64) (string, string, error) {
 	return storeItemsEndpoint + "?" + encodedForm, encodedForm, nil
 }
 
+// storeItemsRetryDelay returns the wait before retry attempt (1-based).
+// Unexported var so tests can inject a zero or fixed delay.
+var storeItemsRetryDelay = func(attempt int) time.Duration {
+	return time.Duration(300*(1<<uint(attempt-1))) * time.Millisecond
+}
+
 func waitStoreItemsRetry(ctx context.Context, attempt int) error {
 	if attempt == 0 {
 		return nil
 	}
-	d := time.Duration(300*(1<<uint(attempt-1))) * time.Millisecond
+	d := storeItemsRetryDelay(attempt)
 	select {
 	case <-time.After(d):
 		return nil

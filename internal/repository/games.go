@@ -219,6 +219,10 @@ func (r *Repository) ToggleMissingAchievementsInDLC(profileID, appID, groupID in
 	return r.RecomputeGameTags(profileID, appID, groupID)
 }
 
+// notOwnedReasonSQL is the disabled_reason written by the not-owned sweep on conflict. An entry already
+// disabled manually keeps its manual reason, so a later re-own does not re-enable it.
+const notOwnedReasonSQL = `case when profile_game_flags.disabled=1 and profile_game_flags.disabled_reason='manual' then 'manual' else excluded.disabled_reason end`
+
 // DisableMissingOwnedGames flags every entry of each game the profile no longer owns as not_owned,
 // and re-enables not_owned flags for games that are owned again.
 func (r *Repository) DisableMissingOwnedGames(profileID int64, owned []int64) error {
@@ -231,7 +235,7 @@ func (r *Repository) DisableMissingOwnedGames(profileID int64, owned []int64) er
 	if len(owned) == 0 {
 		if _, err := tx.Exec(`insert into profile_game_flags(profile_id, appid, groupid, disabled, disabled_reason, created_at, updated_at)
 			select profile_id, appid, groupid, 1, 'not_owned', ?, ? from profile_games where profile_id=?
-			on conflict(profile_id, appid, groupid) do update set disabled=1, disabled_reason=excluded.disabled_reason, updated_at=excluded.updated_at`, now, now, profileID); err != nil {
+			on conflict(profile_id, appid, groupid) do update set disabled=1, disabled_reason=`+notOwnedReasonSQL+`, updated_at=excluded.updated_at`, now, now, profileID); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`delete from profile_game_tags where profile_id=?`, profileID); err != nil {
@@ -257,7 +261,7 @@ func (r *Repository) DisableMissingOwnedGames(profileID int64, owned []int64) er
 	}
 	if _, err := tx.Exec(`insert into profile_game_flags(profile_id, appid, groupid, disabled, disabled_reason, created_at, updated_at)
 		select profile_id, appid, groupid, 1, 'not_owned', ?, ? from profile_games where profile_id=? and appid not in (`+inClause+`)
-		on conflict(profile_id, appid, groupid) do update set disabled=1, disabled_reason=excluded.disabled_reason, updated_at=excluded.updated_at`, missingArgs...); err != nil {
+		on conflict(profile_id, appid, groupid) do update set disabled=1, disabled_reason=`+notOwnedReasonSQL+`, updated_at=excluded.updated_at`, missingArgs...); err != nil {
 		return err
 	}
 	deleteArgs := make([]any, 0, len(owned)+1)

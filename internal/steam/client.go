@@ -93,6 +93,13 @@ func New(apiKey string) *Client {
 	return &Client{APIKey: apiKey, BaseURL: defaultBaseURL, HTTPClient: &http.Client{Timeout: 30 * time.Second}}
 }
 
+// SetRetryBackoff replaces the delay before each retry attempt (attempt is 1-based). A nil fn restores
+// the default exponential backoff with jitter. Callers in tests use it to exercise retryable statuses
+// without sleeping; production code does not call it.
+func (c *Client) SetRetryBackoff(fn func(attempt int) time.Duration) {
+	c.retryBackoff = fn
+}
+
 func (c *Client) ResolveProfileInput(ctx context.Context, input string) (string, error) {
 	value := strings.TrimSpace(input)
 	if value == "" {
@@ -517,11 +524,11 @@ func (c *Client) waitRetry(ctx context.Context, attempt int) error {
 func (c *Client) getJSONBody(ctx context.Context, path, endpoint string) ([]byte, string, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, "", false, err
+		return nil, "", false, redactURLError(err)
 	}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, "", true, err
+		return nil, "", true, redactURLError(err)
 	}
 	eresult := resp.Header.Get("x-eresult")
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -533,9 +540,34 @@ func (c *Client) getJSONBody(ctx context.Context, path, endpoint string) ([]byte
 		return nil, "", true, &HTTPStatusError{Path: path, Code: resp.StatusCode, Status: resp.Status}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, "", false, &HTTPStatusError{Path: path, Code: resp.StatusCode, Status: resp.Status, body: strings.TrimSpace(string(body)), hasBody: true}
+		return nil, "", false, &HTTPStatusError{Path: path, Code: resp.StatusCode, Status: resp.Status, body: c.redactBody(strings.TrimSpace(string(body))), hasBody: true}
 	}
 	return body, eresult, false, nil
+}
+
+// apiKeyParam matches the key query parameter of a Steam request URL, up to the next '&'.
+// The whole (possibly percent-encoded) value is matched, so only the key value is replaced.
+var apiKeyParam = regexp.MustCompile(`([?&]key=)[^&]*`)
+
+// redactURLError removes the API key from a *url.Error (as returned by Client.Do and
+// NewRequestWithContext) by replacing the key value in a copy of its URL. Op and Err are kept so
+// errors.Is/As and Timeout() still see the original cause. Other errors, including nil, are returned unchanged.
+func redactURLError(err error) error {
+	urlErr, ok := err.(*url.Error)
+	if !ok {
+		return err
+	}
+	redacted := *urlErr
+	redacted.URL = apiKeyParam.ReplaceAllString(urlErr.URL, "${1}REDACTED")
+	return &redacted
+}
+
+// redactBody removes the API key from a non-2xx response body, which Steam may echo back.
+func (c *Client) redactBody(body string) string {
+	if c.APIKey != "" {
+		body = strings.ReplaceAll(body, c.APIKey, "REDACTED")
+	}
+	return apiKeyParam.ReplaceAllString(body, "${1}REDACTED")
 }
 
 func retryableSteamStatus(status int) bool {
