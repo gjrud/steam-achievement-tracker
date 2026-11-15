@@ -404,35 +404,105 @@ func TestGetAppStateReportsKeyringReadErrorAtInit(t *testing.T) {
 	}
 }
 
-// TestGetAppStateStaleSyncFlag guards defensive code in GetAppState: it clears syncInProgress when no sync
-// goroutine is live (syncCancel == nil) and the latest run is no longer "running". Production writes
-// syncInProgress and syncCancel together under mu, so this state is only reachable by setting it by hand here.
-func TestGetAppStateStaleSyncFlag(t *testing.T) {
+// TestGetAppStateNormalizesStaleRunningRun checks the read-side fix for a run left 'running' when its final write
+// failed. With no live sync, GetAppState reports the run as failed and the row stays 'running' until the next
+// startup. A live sync keeps its run as running, and a finished run is returned unchanged.
+func TestGetAppStateNormalizesStaleRunningRun(t *testing.T) {
+	tests := []struct {
+		name           string
+		liveSync       bool
+		runStatus      string
+		wantStatus     string
+		wantErr        bool
+		wantInProgress bool
+	}{
+		{name: "stale running run, no live sync", runStatus: "running", wantStatus: "failed", wantErr: true},
+		{name: "running run with live sync", liveSync: true, runStatus: "running", wantStatus: "running", wantInProgress: true},
+		{name: "finished run, no live sync", runStatus: "success", wantStatus: "success"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := newTestApp(t)
+			profile := saveTestProfile(t, app)
+			recordSyncRun(t, app, profile.ID, tt.runStatus)
+			if tt.liveSync {
+				setLiveSync(app, profile.ID, true, 0)
+			}
+
+			state, err := app.GetAppState()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.SyncInProgress != tt.wantInProgress {
+				t.Fatalf("state.SyncInProgress = %v, want %v", state.SyncInProgress, tt.wantInProgress)
+			}
+			run := state.Dashboard.LatestSyncRun
+			if run == nil || run.Status != tt.wantStatus {
+				t.Fatalf("dashboard latest run = %+v, want status %q", run, tt.wantStatus)
+			}
+			if tt.wantErr {
+				if run.Error == nil || !strings.Contains(*run.Error, "final status could not be saved") {
+					t.Fatalf("dashboard latest run error = %v, want the unsaved-final-status error", run.Error)
+				}
+				if run.FinishedAt != nil {
+					t.Fatalf("dashboard latest run finishedAt = %q, want unset", *run.FinishedAt)
+				}
+			} else if run.Error != nil {
+				t.Fatalf("dashboard latest run error = %q, want none", *run.Error)
+			}
+			stored, err := app.repo.LatestSyncRun(profile.ID)
+			if err != nil || stored == nil {
+				t.Fatalf("LatestSyncRun = %+v, %v", stored, err)
+			}
+			if stored.Status != tt.runStatus {
+				t.Fatalf("stored status = %q, want %q: the read side must not write the row", stored.Status, tt.runStatus)
+			}
+		})
+	}
+}
+
+// TestGetAppStateRunStuckAfterFailedFinish runs a real sync whose final status write is blocked by a trigger. The
+// row stays 'running' after the sync ends; GetAppState must report it as failed and no sync in progress.
+func TestGetAppStateRunStuckAfterFailedFinish(t *testing.T) {
 	app := newTestApp(t)
 	profile := saveTestProfile(t, app)
-	id, err := app.repo.StartSyncRun(profile.ID)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	t.Cleanup(server.Close)
+	app.mu.Lock()
+	app.steamAPIKey = "fixture-steam-key"
+	app.steamBaseURL = server.URL
+	app.mu.Unlock()
+
+	db, err := sql.Open("sqlite3", "file:"+app.paths.DB+"?_busy_timeout=5000")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := app.repo.FinishSyncRun(id, "completed", 1, 1, 0, nil); err != nil {
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(`create trigger block_run_finish before update of status on sync_runs begin select raise(abort, 'finish blocked'); end`); err != nil {
 		t.Fatal(err)
 	}
-	app.mu.Lock()
-	app.syncInProgress = true
-	app.mu.Unlock()
 
+	if err := app.startSync(true); err != nil {
+		t.Fatalf("startSync: %v", err)
+	}
+	waitForSyncWG(t, app)
+
+	stored, err := app.repo.LatestSyncRun(profile.ID)
+	if err != nil || stored == nil || stored.Status != "running" {
+		t.Fatalf("stored run = %+v, %v; want the row left running", stored, err)
+	}
 	state, err := app.GetAppState()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if state.SyncInProgress {
-		t.Fatal("state.SyncInProgress = true after a finished run, want stale flag cleared")
+		t.Fatal("SyncInProgress = true after the sync ended, want false")
 	}
-	app.mu.Lock()
-	got := app.syncInProgress
-	app.mu.Unlock()
-	if got {
-		t.Fatal("app.syncInProgress = true after a finished run, want stale flag cleared")
+	if run := state.Dashboard.LatestSyncRun; run == nil || run.Status != "failed" || run.Error == nil {
+		t.Fatalf("dashboard latest run = %+v, want failed with error", run)
 	}
 }
 

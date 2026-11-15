@@ -117,9 +117,8 @@ func TestFullSyncSaveGameWarningFailureIsLoggedAndRunStaysPartial(t *testing.T) 
 }
 
 // A failing FinishSyncRun is logged. FullSync still returns the result, and sync_runs keeps the last progress
-// write: the run stays running with its counters, and no finish time.
-// This documents current behavior, not an endorsed contract: a stuck 'running' row is a known gap, which
-// CancelRunningSyncRuns resolves at the next startup.
+// write: the run stays running with its counters, and no finish time. The syncer leaves the row 'running'.
+// GetAppState reports it as failed while no sync is live, and the next startup's CancelRunningSyncRuns repairs the row.
 func TestFullSyncFinishSyncRunFailureIsLoggedAndRunStaysRunning(t *testing.T) {
 	repo, paths, profile := faultyRepository(t)
 	addTriggers(t, paths,

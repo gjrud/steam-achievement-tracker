@@ -84,7 +84,3 @@ export function toneClass(tone) {
 export function tagCountFromGames(games, tag) {
   return (games || []).filter((game) => gameTags(game).includes(tag)).length
 }
-
-export function suggestionTagCount(games, tag) {
-  return tagCountFromGames(games, tag)
-}

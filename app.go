@@ -117,7 +117,6 @@ func (a *App) GetAppState() (AppState, error) {
 	apiKeyPresent := a.apiKeyPresent
 	apiKeyError := a.apiKeyError
 	syncInProgress := a.syncInProgress
-	activeSync := a.syncCancel != nil
 	initError := a.initError
 	a.mu.Unlock()
 
@@ -141,12 +140,7 @@ func (a *App) GetAppState() (AppState, error) {
 				return AppState{}, err
 			}
 			dashboard = &d
-			if d.LatestSyncRun != nil && d.LatestSyncRun.Status != "running" && syncInProgress && !activeSync {
-				a.mu.Lock()
-				a.syncInProgress = false
-				syncInProgress = false
-				a.mu.Unlock()
-			}
+			a.normalizeStaleRun(repo, p.ID, dashboard)
 			// A live sync writes its run's final status before its goroutine clears the flag, so the run can already
 			// be final here. The sync state is re-read under the lock by syncStillRunning, after the reads above.
 			syncInProgress = a.syncStillRunning(syncInProgress, p.ID, d.LatestSyncRun)
@@ -516,6 +510,39 @@ func (a *App) syncStillRunning(snapshot bool, profileID int64, latest *repositor
 		return false
 	}
 	return true
+}
+
+// staleRunErrorText is the error shown for a run whose sync ended but whose final status could not be saved.
+const staleRunErrorText = "sync ended but its final status could not be saved"
+
+// normalizeStaleRun corrects the latest run of profileID in d when it reads 'running' but no sync is live. The sync
+// goroutine tries to save the run's final status before it ends, so a run still 'running' here means that write
+// failed. The row is not changed. d.LatestSyncRun takes the fresh row when it is no longer running; otherwise it takes
+// a failed copy with staleRunErrorText and no finish time. The fresh read runs under a.mu, so no sync can start in
+// between. The repository never takes a.mu, so holding it here cannot deadlock.
+func (a *App) normalizeStaleRun(repo *repository.Repository, profileID int64, d *repository.Dashboard) {
+	if d.LatestSyncRun == nil || d.LatestSyncRun.Status != "running" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.syncCancel != nil {
+		return
+	}
+	fresh, err := repo.LatestSyncRun(profileID)
+	if err != nil {
+		log.Printf("read latest sync run: %v", err)
+		return
+	}
+	if fresh == nil || fresh.Status != "running" {
+		d.LatestSyncRun = fresh
+		return
+	}
+	failed := *fresh
+	failed.Status = "failed"
+	msg := staleRunErrorText
+	failed.Error = &msg
+	d.LatestSyncRun = &failed
 }
 
 // logStartSyncError logs a startSync error for a caller that does not return it. A missing API key and a sync that is

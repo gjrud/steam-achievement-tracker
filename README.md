@@ -208,7 +208,7 @@ Click **Validate**. The app resolves the profile and shows the Steam display nam
 
 ### Sync achievements
 
-Sync starts after saving a profile and again on app startup when a profile and API key exist. Use **Sync now** to start a manual refresh; the button changes to **Syncing…** while a sync is running. A sync counts as running until its run's final status is recorded, so on the next refresh the button returns to **Sync now** and the band shows the result.
+Sync starts after saving a profile and again on app startup when a profile and API key exist. Use **Sync now** to start a manual refresh; the button changes to **Syncing…** while a sync is running. A sync counts as running until its run's final status is recorded, so on the next refresh the button returns to **Sync now** and the band shows the result. If a sync ends but saving its final status fails, the stored run stays `running`; the app then reports that run as **Sync failed** instead of showing a spinner, without changing the stored row. The next app start marks the stored run `canceled`.
 
 Sync behavior:
 
@@ -398,7 +398,7 @@ All app-owned files live under `~/.steam-achievement-tracker` unless noted. Dire
 | `achievements` | `appid`, `apiname`, `global_percent`, `updated_at`; PK (`appid`, `apiname`) | Per-game achievement catalog with global unlock percentage. |
 | `profile_achievements` | `profile_id`, `appid`, `apiname`, `unlocked`, `unlock_time`, `updated_at`; PK (`profile_id`, `appid`, `apiname`) | Per-profile achievement unlock state. |
 | `game_snapshots` | `id` PK, `profile_id`, `appid`, `total_achievements`, `unlocked_achievements`, `completion_percent`, `missing_avg_unlock`, `is_completed`, `synced_at` | Historical per-sync progress snapshots. |
-| `sync_runs` | `id` PK, `profile_id`, `started_at`, `finished_at`, `status`, `games_total`, `games_synced`, `games_failed`, `error` | Sync run history and progress. Status values are `running`, `success`, `partial`, `failed`, and `canceled`; `canceled` marks a run that was still `running` when the app restarted. |
+| `sync_runs` | `id` PK, `profile_id`, `started_at`, `finished_at`, `status`, `games_total`, `games_synced`, `games_failed`, `error` | Sync run history and progress. Status values are `running`, `success`, `partial`, `failed`, and `canceled`; `canceled` marks a run that was still `running` when the app restarted. A `running` row with no live sync (its final status could not be saved) is shown as `failed` when read, and is set to `canceled` on the next start. |
 | `profile_game_flags` | `profile_id`, `appid`, `manual_was_completed`, `missing_achievements_in_dlc`, `disabled`, `disabled_reason`, `created_at`, `updated_at`; PK (`profile_id`, `appid`) | Manual, profile-scoped game flags. Indexed by (`profile_id`, `disabled`). |
 | `profile_game_tags` | `profile_id`, `appid`, `tag`, `score`, `reason`, `computed_at`; PK (`profile_id`, `appid`, `tag`) | Computed profile-scoped tags used by suggestion filters. Indexed by (`profile_id`, `tag`). |
 
