@@ -185,16 +185,6 @@ wails3 generate bindings
 
 This writes `frontend/bindings/` (git-ignored). The frontend imports `frontend/bindings/github.com/gjrud/steam-achievement-tracker/app.js`. Do not edit those files by hand. `wails3 dev` and `wails3 build` regenerate them automatically.
 
-### LLM / MCP access (development only)
-
-Wails can expose a Model Context Protocol server for coding agents while you run the app:
-
-```sh
-WAILS_MCP=1 wails3 dev
-```
-
-This adds the `mcp` build tag. The server listens on `http://127.0.0.1:9099/mcp`; set `WAILS_MCP_PORT` to change the port. Do not set `WAILS_MCP` for release builds. The project's `opencode.json` already defines a `wails3-cli` MCP server and a disabled `wails-app` server that points at that URL.
-
 ## Testing
 
 Run frontend tests:
