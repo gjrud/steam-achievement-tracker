@@ -2,16 +2,17 @@ import {existsSync, readFileSync} from 'node:fs'
 import {join} from 'node:path'
 import {describe, expect, test} from 'vitest'
 
-// The test alias swaps wailsjs/go/main/App.js for wails-app-mock.js. These checks keep the hand-written
+// The test alias swaps the generated app.js binding for wails-app-mock.js. These checks keep the hand-written
 // mock and App.svelte's imports in step with the bindings Wails generates.
-// frontend/wailsjs is gitignored, so the whole block is skipped when that file is absent.
-// To run it, regenerate with `wails generate module`.
+// frontend/bindings is gitignored, so the whole block is skipped when that file is absent.
+// To run it, regenerate with `wails3 generate bindings` from the repository root.
+const bindingsImportPath = '../bindings/github.com/gjrud/steam-achievement-tracker/app.js'
 const mockSource = readFileSync(join(__dirname, 'wails-app-mock.js'), 'utf8')
 const appSource = readFileSync(join(__dirname, '..', 'App.svelte'), 'utf8')
-const generatedPath = join(__dirname, '..', '..', 'wailsjs', 'go', 'main', 'App.js')
+const generatedPath = join(__dirname, '..', '..', 'bindings', 'github.com', 'gjrud', 'steam-achievement-tracker', 'app.js')
 const generatedSource = existsSync(generatedPath) ? readFileSync(generatedPath, 'utf8') : ''
 const describeWithBindings = generatedSource ? describe : describe.skip
-const regenerate = 'Regenerate the bindings with `wails generate module` and update wails-app-mock.js to match.'
+const regenerate = 'Regenerate the bindings with `wails3 generate bindings` and update wails-app-mock.js to match.'
 
 // parseExports maps each exported binding name to its parameter list.
 function parseExports(source, pattern) {
@@ -37,8 +38,9 @@ describeWithBindings('wails mock matches generated bindings', () => {
   })
 
   test('every name App.svelte imports exists in the generated bindings', () => {
-    const importMatch = appSource.match(/import\s*\{([^}]+)\}\s*from '\.\.\/wailsjs\/go\/main\/App\.js'/)
-    expect(importMatch, 'App.svelte imports from wailsjs/go/main/App.js').not.toBeNull()
+    const escapedPath = bindingsImportPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const importMatch = appSource.match(new RegExp(`import\\s*\\{([^}]+)\\}\\s*from '${escapedPath}'`))
+    expect(importMatch, `App.svelte imports from ${bindingsImportPath}`).not.toBeNull()
 
     const imported = importMatch[1].split(',').map((name) => name.trim()).filter(Boolean)
     for (const name of imported) {

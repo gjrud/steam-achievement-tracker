@@ -12,7 +12,7 @@
     SyncNow,
     ToggleGameMissingAchievementsInDLC,
     ValidateProfile
-  } from '../wailsjs/go/main/App.js'
+  } from '../bindings/github.com/gjrud/steam-achievement-tracker/app.js'
   import SetupView from './lib/components/SetupView.svelte'
   import DashboardShell from './lib/components/DashboardShell.svelte'
   import ClearDataConfirmModal from './lib/components/ClearDataConfirmModal.svelte'
