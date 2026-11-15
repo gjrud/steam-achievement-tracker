@@ -1,6 +1,6 @@
 import {describe, expect, test} from 'vitest'
 import {matchesTagFilter} from './filter.js'
-import {gameTags, suggestionTagOptions, tagCountFromGames, tagDescription, tagLabel, tagTone} from './tag.js'
+import {gameTags, suggestionTagOptions, tagCountFromGames, tagCountsFromGames, tagDescription, tagLabel, tagTone} from './tag.js'
 
 // Backend incomplete tag names. MUST stay in sync with internal/repository/tags.go: the profileGameTags sort list and
 // the stat/issue tag candidates (statTagCandidates, issueTagCandidates). Checked against that file when this list was
@@ -186,5 +186,49 @@ describe('dlc_not_owned tag', () => {
   test('uses the danger tone group shared with Achievements in DLC', () => {
     expect(tagTone('dlc_not_owned')).toBe('danger')
     expect(tagTone('dlc_not_owned')).toBe(tagTone('missing_achievements_in_dlc'))
+  })
+})
+
+describe('tagCountsFromGames', () => {
+  const referenceCounts = (games) => Object.fromEntries(suggestionTagOptions.map((tag) => [tag, tagCountFromGames(games, tag)]))
+
+  test('matches a per-tag count for every chip tag on a mixed fixture', () => {
+    const games = [
+      {groupId: 1, dlcAppId: 4173830, unvetted: true, tags: ['almost_there', 'sync_warning']},
+      {groupId: 0, dlcAppId: 0, tags: ['dlc', 'dlc_not_owned', 'dlc_not_owned']},
+      {isCompleted: true, tags: ['completed', 'new_achievements_added', 'missing_achievements_in_dlc', 'missing_cover_art']},
+      {isCompleted: false, tags: ['new_achievements_added', 'missing_achievements_in_dlc', 'in_progress', 'in_progress']},
+      {groupId: 2, unvetted: false, tags: ['set', 'untouched', 'zeta_tag', 'almost_there', '__proto__', 'constructor', 'toString']},
+      {tags: null},
+      {},
+      undefined,
+      {unvetted: true, isCompleted: true, tags: ['completed', 'unvetted', 'no_achievements']}
+    ]
+
+    expect(tagCountsFromGames(games)).toEqual(referenceCounts(games))
+  })
+
+  test('drops incomplete-only tags on completed games and ignores unknown and completed tags', () => {
+    const games = [{isCompleted: true, tags: ['completed', 'new_achievements_added', 'missing_achievements_in_dlc', 'zeta_tag']}]
+    const counts = tagCountsFromGames(games)
+
+    expect(counts.new_achievements_added).toBe(0)
+    expect(counts.missing_achievements_in_dlc).toBe(0)
+    expect(counts).not.toHaveProperty('completed')
+    expect(counts).not.toHaveProperty('zeta_tag')
+    expect(counts).toEqual(referenceCounts(games))
+  })
+
+  test('counts a duplicate stored tag once per game', () => {
+    expect(tagCountsFromGames([{tags: ['in_progress', 'in_progress']}]).in_progress).toBe(1)
+  })
+
+  test('returns all chip tags as zero for empty, missing, or null input', () => {
+    const zeros = Object.fromEntries(suggestionTagOptions.map((tag) => [tag, 0]))
+
+    expect(tagCountsFromGames([])).toEqual(zeros)
+    expect(tagCountsFromGames(undefined)).toEqual(zeros)
+    expect(tagCountsFromGames(null)).toEqual(zeros)
+    expect(Object.keys(tagCountsFromGames([]))).toEqual(suggestionTagOptions)
   })
 })

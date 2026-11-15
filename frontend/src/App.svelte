@@ -27,7 +27,7 @@
     shouldShowSyncErrorMessage
   } from './lib/game.js'
   import {matchesViewFilters, matchesSearchQuery, sortByTitle} from './lib/filter.js'
-  import {gameTags, suggestionTagOptions, tagLabel, tagTone, toneClass, tagCountFromGames} from './lib/tag.js'
+  import {gameTags, suggestionTagOptions, tagLabel, tagTone, toneClass, tagCountsFromGames} from './lib/tag.js'
   import {showDisabledReasonLabel} from './lib/disabled.js'
 
   let state = null
@@ -331,7 +331,7 @@
   $: warningGames = (dashboard?.warnings || []).filter((game) => game.syncWarning)
   // Tag filter chips follow the active view's list; views without a tag filter get no games and no chips.
   $: tagFilterGames = activeView === 'completed' ? completed : activeView === 'suggestions' ? suggestions : []
-  $: tagFilterCounts = Object.fromEntries(suggestionTagOptions.map((tag) => [tag, tagCountFromGames(tagFilterGames, tag)]))
+  $: tagFilterCounts = tagCountsFromGames(tagFilterGames)
   $: visibleTagFilterOptions = suggestionTagOptions.filter((tag) => tagFilterCounts[tag] > 0)
   $: if (activeTagFilter && !tagFilterCounts[activeTagFilter]) activeTagFilter = ''
   $: filteredSuggestions = suggestions.filter((game) => matchesViewFilters(game, normalizedViewSearch, activeTagFilter))
