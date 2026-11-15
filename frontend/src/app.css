@@ -771,6 +771,22 @@
     margin-top: 8px;
   }
 
+  .grid-more {
+    display: flex;
+    justify-content: center;
+    margin: 18px 0 8px;
+  }
+
+  .grid-more button {
+    font-variant-numeric: tabular-nums;
+    min-width: 12em;
+  }
+
+  /* Matches the generic hover lift selector (0,4,1) with one more class so it wins without !important. */
+  .grid-more button:hover:not(:disabled):not(.primary):not(.danger) {
+    transform: none;
+  }
+
   .game-card {
     position: relative;
     display: flex;

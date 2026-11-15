@@ -174,3 +174,13 @@ export function game(overrides = {}) {
     ...overrides
   }
 }
+
+// manyGames builds count games named "Batch Game 001"... so grids go past the 48-card first render.
+// overrides may be an object (same for every game) or a function (index) => object.
+export function manyGames(count, overrides = {}) {
+  return Array.from({length: count}, (_, index) => {
+    const number = String(index + 1).padStart(3, '0')
+    const extra = typeof overrides === 'function' ? overrides(index) : overrides
+    return game({appid: 1000 + index, name: `Batch Game ${number}`, ...extra})
+  })
+}
