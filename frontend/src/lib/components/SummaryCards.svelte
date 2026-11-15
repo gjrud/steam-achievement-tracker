@@ -10,8 +10,10 @@
 </script>
 
 <section class="summary-grid" aria-label="Summary">
-  <article class="summary-card"><span>Owned games</span><strong>{integer(summary.ownedGamesCount)}</strong></article>
+  <article class="summary-card"><span>All games</span><strong>{integer(summary.ownedGamesCount)}</strong></article>
+  <article class="summary-card"><span>Purchased games</span><strong>{integer(summary.purchasedGamesCount)}</strong></article>
   <article class="summary-card"><span>Completed games</span><strong>{integer(summary.completedGamesCount)}</strong></article>
+  <article class="summary-card"><span>Completed sets</span><strong>{integer(summary.completedSetsCount)}</strong></article>
   <article class="summary-card"><span>Achievements</span><strong>{integer(summary.totalAchievementsUnlocked)}</strong></article>
   <article class={`summary-card wide ${toneClass(syncCardTone)}`} aria-live="polite">
     <span>{syncIsRunning ? 'Current sync' : 'Last sync'}</span>

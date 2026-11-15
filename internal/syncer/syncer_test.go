@@ -1268,6 +1268,34 @@ func requireLatestSyncRun(t *testing.T, repo *repository.Repository, profileID i
 	requireSyncResult(t, got, want)
 }
 
+// The purchased flag from GetOwnedGames's second list is stored per game; played-free games stay unpurchased.
+func TestFullSyncStoresPurchasedFlagFromOwnedGames(t *testing.T) {
+	repo := testRepository(t)
+	profile := testProfile(t, repo)
+	fake := newFakeSteamServer(t, []steam.OwnedGame{
+		{AppID: 60, Name: "Bought", PlaytimeForever: 3, Purchased: true},
+		{AppID: 70, Name: "Played Free", PlaytimeForever: 4},
+	})
+
+	result, err := (&Service{Repo: repo, Steam: fake.client}).FullSync(context.Background(), *profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "success" || result.GamesTotal != 2 {
+		t.Fatalf("result = %#v, want success for both games", result)
+	}
+	if got := fake.count("purchased", 0); got != 1 {
+		t.Fatalf("purchased list calls = %d, want 1", got)
+	}
+	summary, err := repo.Summary(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.OwnedGamesCount != 2 || summary.PurchasedGamesCount != 1 {
+		t.Fatalf("owned = %d purchased = %d, want 2 and 1", summary.OwnedGamesCount, summary.PurchasedGamesCount)
+	}
+}
+
 func requireSummaryCounts(t *testing.T, repo *repository.Repository, profileID int64, want summaryCounts) {
 	t.Helper()
 	summary, err := repo.Summary(profileID)
@@ -1544,6 +1572,17 @@ func newFakeSteamServer(t *testing.T, owned []steam.OwnedGame) *fakeSteamServer 
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/IPlayerService/GetOwnedGames/v0001/":
+			// GetOwnedGames makes two requests: the full list ("owned" count) and the purchased list
+			// (include_played_free_games=false, counted as "purchased"). Each game's Purchased flag decides the latter.
+			if r.URL.Query().Get("include_played_free_games") == "false" {
+				f.increment("purchased", 0)
+				if f.ownedStatus != 0 {
+					http.Error(w, "owned games unavailable", f.ownedStatus)
+					return
+				}
+				fmt.Fprint(w, purchasedGamesJSON(owned))
+				return
+			}
 			f.increment("owned", 0)
 			if f.ownedStatus != 0 {
 				http.Error(w, "owned games unavailable", f.ownedStatus)
@@ -1847,6 +1886,19 @@ func ownedGamesJSON(games []steam.OwnedGame) string {
 		parts = append(parts, entry+"}")
 	}
 	return fmt.Sprintf(`{"response":{"game_count":%d,"games":[%s]}}`, len(games), strings.Join(parts, ","))
+}
+
+// purchasedGamesJSON is the purchased list: only games flagged Purchased, without the played-free ones.
+// It is always well formed: game_count and games are both present, even when no game is purchased, because
+// the client rejects a bare `{"response":{}}` purchased answer.
+func purchasedGamesJSON(games []steam.OwnedGame) string {
+	var purchased []steam.OwnedGame
+	for _, g := range games {
+		if g.Purchased {
+			purchased = append(purchased, g)
+		}
+	}
+	return ownedGamesJSON(purchased)
 }
 
 func schemaJSON(names []string) string {

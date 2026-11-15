@@ -72,6 +72,7 @@ func (r *Repository) ClearProfileData(profileID int64) ([]int64, error) {
 	for _, stmt := range []string{
 		`delete from profile_achievements where profile_id=?`,
 		`delete from profile_game_flags where profile_id=?`,
+		`delete from profile_owned_games where profile_id=?`,
 		`delete from profile_game_tags where profile_id=?`,
 		`delete from game_snapshots where profile_id=?`,
 		`delete from profile_games where profile_id=?`,
@@ -139,7 +140,8 @@ func (r *Repository) profileAppIDs(profileID int64) ([]int64, error) {
 		union select appid from profile_game_flags where profile_id=?
 		union select appid from profile_game_tags where profile_id=?
 		union select appid from game_snapshots where profile_id=?
-	) order by appid`, profileID, profileID, profileID, profileID, profileID)
+		union select appid from profile_owned_games where profile_id=?
+	) order by appid`, profileID, profileID, profileID, profileID, profileID, profileID)
 	if err != nil {
 		return nil, err
 	}

@@ -29,7 +29,7 @@ func TestHasSetData(t *testing.T) {
 	})
 
 	t.Run("profile entry with groupid other than 0 counts", func(t *testing.T) {
-		if _, err := repo.db.Exec(`insert into games(appid, name, playtime_forever, created_at, updated_at) values(?,?,?,?,?)`, 9002, "Entry Game", 0, now, now); err != nil {
+		if _, err := repo.db.Exec(`insert into games(appid, name, created_at, updated_at) values(?,?,?,?)`, 9002, "Entry Game", now, now); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := repo.db.Exec(`insert into profile_games(profile_id, appid, groupid) values(?,?,?)`, profile.ID, 9002, 3); err != nil {
@@ -39,7 +39,7 @@ func TestHasSetData(t *testing.T) {
 	})
 
 	t.Run("game_sets row counts", func(t *testing.T) {
-		if _, err := repo.db.Exec(`insert into games(appid, name, playtime_forever, created_at, updated_at) values(?,?,?,?,?)`, 9003, "Set Game", 0, now, now); err != nil {
+		if _, err := repo.db.Exec(`insert into games(appid, name, created_at, updated_at) values(?,?,?,?)`, 9003, "Set Game", now, now); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := repo.db.Exec(`insert into game_sets(appid, groupid, name, dlcappid, updated_at) values(?,?,?,?,?)`, 9003, 7, "Extra", 0, now); err != nil {
@@ -54,7 +54,7 @@ func TestHasSetData(t *testing.T) {
 	})
 
 	t.Run("game without any row is not affected by other apps", func(t *testing.T) {
-		if _, err := repo.db.Exec(`insert into games(appid, name, playtime_forever, created_at, updated_at) values(?,?,?,?,?)`, 9005, "Plain Game", 0, now, now); err != nil {
+		if _, err := repo.db.Exec(`insert into games(appid, name, created_at, updated_at) values(?,?,?,?)`, 9005, "Plain Game", now, now); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := repo.db.Exec(`insert into profile_games(profile_id, appid, groupid) values(?,?,?)`, profile.ID, 9005, 0); err != nil {

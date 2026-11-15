@@ -87,12 +87,13 @@ type gameTagFacts struct {
 }
 
 func loadTagFacts(tx *sql.Tx, profileID, appID, groupID int64) (gameTagFacts, bool, error) {
-	row := tx.QueryRow(`select g.has_achievements, g.playtime_forever, coalesce(ci.path,''), coalesce(f.disabled,0), coalesce(f.missing_achievements_in_dlc,0),
+	row := tx.QueryRow(`select g.has_achievements, coalesce(po.playtime_forever,0), coalesce(ci.path,''), coalesce(f.disabled,0), coalesce(f.missing_achievements_in_dlc,0),
 		pg.total_achievements, pg.unlocked_achievements, pg.completion_percent, pg.missing_avg_unlock, pg.suggestion_score, pg.is_completed, pg.newly_incomplete, pg.sync_warning, pg.last_synced_at, pg.dlc_not_owned
 		from profile_games pg join games g on g.appid=pg.appid
 		left join game_sets gs on gs.appid=pg.appid and gs.groupid=pg.groupid
 		left join cover_images ci on ci.image_appid=`+effectiveCoverAppIDSQL+`
 		left join profile_game_flags f on f.profile_id=pg.profile_id and f.appid=pg.appid and f.groupid=pg.groupid
+		left join profile_owned_games po on po.profile_id=pg.profile_id and po.appid=pg.appid
 		where pg.profile_id=? and pg.appid=? and pg.groupid=?`, profileID, appID, groupID)
 	var facts gameTagFacts
 	err := row.Scan(&facts.hasAchievements, &facts.playtimeForever, &facts.coverPath, &facts.flagDisabled, &facts.missingDLC, &facts.total, &facts.unlocked, &facts.completion, &facts.missingAvg, &facts.suggestionScore, &facts.isCompleted, &facts.newlyIncomplete, &facts.syncWarning, &facts.lastSyncedAt, &facts.dlcNotOwned)

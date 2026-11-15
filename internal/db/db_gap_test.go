@@ -159,7 +159,7 @@ func TestOpenAndMigrateDetectsLegacySchemaFromProfileGames(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 10)
+	assertUserVersion(t, conn, 12)
 	// Recorded as the legacy baseline, so the initial schema is not recorded as a fresh migration.
 	assertCount(t, conn, `select count(*) from schema_migrations where version=1 and name='initial_schema_legacy'`, 1)
 	assertCount(t, conn, `select count(*) from schema_migrations where version=1 and name='initial_schema'`, 0)
@@ -179,7 +179,7 @@ func TestMigrationV8FallsBackToActiveProfileWithoutSyncRuns(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 10)
+	assertUserVersion(t, conn, 12)
 	assertCount(t, conn, `select count(*) from profile_game_flags where profile_id=2 and appid=50 and disabled=1 and disabled_reason='not_owned'`, 1)
 	assertCount(t, conn, `select count(*) from profile_game_flags where profile_id=1 and appid=50`, 0)
 	assertCount(t, conn, `select count(*) from games where appid=50 and disabled=0 and disabled_reason is null`, 1)
@@ -195,7 +195,7 @@ func TestMigrationV8WithoutSyncRunsOrActiveProfileScopesToNobody(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 10)
+	assertUserVersion(t, conn, 12)
 	// No scope profile at all: the global flag is cleared and no profile receives the flag.
 	assertCount(t, conn, `select count(*) from profile_game_flags where appid=50`, 0)
 	assertCount(t, conn, `select count(*) from games where appid=50 and disabled=0 and disabled_reason is null`, 1)

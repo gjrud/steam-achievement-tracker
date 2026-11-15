@@ -25,7 +25,9 @@ type Profile struct {
 }
 
 type Summary struct {
+	CompletedSetsCount          int     `json:"completedSetsCount"`
 	CompletedGamesCount         int     `json:"completedGamesCount"`
+	PurchasedGamesCount         int     `json:"purchasedGamesCount"`
 	TotalUnlockedCount          int     `json:"totalUnlockedCount"`
 	OwnedGamesCount             int     `json:"ownedGamesCount"`
 	GamesWithAchievementsCount  int     `json:"gamesWithAchievementsCount"`
@@ -95,6 +97,7 @@ type GameRecord struct {
 	AppID           int64
 	Name            string
 	PlaytimeForever int
+	Purchased       bool
 }
 
 type AchievementRecord struct {

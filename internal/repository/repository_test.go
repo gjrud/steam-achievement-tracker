@@ -203,7 +203,8 @@ func TestSaveGameWarningPreservesStatsAndSnapshots(t *testing.T) {
 	assertCount(t, repo, `select count(*) from game_snapshots where profile_id=? and appid=? and groupid=?`, 1, profile.ID, 42, 0)
 	assertCount(t, repo, `select count(*) from profile_game_tags where profile_id=? and appid=? and groupid=? and tag='sync_warning'`, 1, profile.ID, 42, 0)
 	assertCount(t, repo, `select count(*) from profile_game_tags where profile_id=? and appid=? and groupid=? and tag='almost_there'`, 1, profile.ID, 42, 0)
-	assertCount(t, repo, `select count(*) from games where appid=? and name=? and playtime_forever=?`, 1, 42, "Warning Game Updated", 999)
+	assertCount(t, repo, `select count(*) from profile_owned_games where profile_id=? and appid=? and playtime_forever=?`, 1, profile.ID, 42, 999)
+	assertCount(t, repo, `select count(*) from games where appid=? and name=?`, 1, 42, "Warning Game Updated")
 	assertCount(t, repo, `select count(*) from profile_games where profile_id=? and appid=? and last_error='temporary Steam failure' and last_error_at is not null`, 1, profile.ID, 42)
 }
 
@@ -558,6 +559,9 @@ func TestDashboardOrdersBucketsAndExcludesDisabled(t *testing.T) {
 	if got, want := dashboard.Summary.OwnedGamesCount, 9; got != want {
 		t.Fatalf("owned games count = %d, want %d", got, want)
 	}
+	if got, want := dashboard.Summary.CompletedSetsCount, 1; got != want {
+		t.Fatalf("completed sets count = %d, want %d", got, want)
+	}
 	if got, want := dashboard.Summary.CompletedGamesCount, 1; got != want {
 		t.Fatalf("completed games count = %d, want %d", got, want)
 	}
@@ -840,11 +844,220 @@ func TestSummaryCountsDistinctGamesAcrossSets(t *testing.T) {
 	if summary.OwnedGamesCount != 1 || summary.GamesWithAchievementsCount != 1 {
 		t.Fatalf("games = owned %d / with achievements %d, want 1/1 (distinct appid)", summary.OwnedGamesCount, summary.GamesWithAchievementsCount)
 	}
-	if summary.CompletedGamesCount != 1 {
-		t.Fatalf("completed entries = %d, want 1", summary.CompletedGamesCount)
+	if summary.CompletedSetsCount != 1 || summary.CompletedGamesCount != 1 {
+		t.Fatalf("completed sets/games = %d/%d, want 1/1", summary.CompletedSetsCount, summary.CompletedGamesCount)
 	}
 	if summary.TotalAchievementsAvailable != 60 || summary.TotalAchievementsUnlocked != 43 {
 		t.Fatalf("achievements = %d/%d, want 43/60", summary.TotalAchievementsUnlocked, summary.TotalAchievementsAvailable)
+	}
+}
+
+// A completed DLC set does not make its game completed while the base set is incomplete, and a completed base
+// set counts as a completed game even when its DLC sets are incomplete. Sets count per entry, games per app.
+func TestSummaryCompletedGamesDifferFromCompletedSets(t *testing.T) {
+	repo := testRepository(t)
+	profile, err := repo.SaveProfile("11111111111111111", "User One", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Game 100: base incomplete, DLC set 1 complete. One completed set, zero completed games.
+	saveSeedGame(t, repo, profile.ID, 100, "Base Open", 10,
+		dashboardSeed{GroupID: 0, Total: 5, Unlocked: 2, Percent: 40},
+		dashboardSeed{GroupID: 1, DLCAppID: 1001, SetName: "Open DLC", Total: 3, Unlocked: 3, Percent: 100, Completed: true, WasCompleted: true})
+	// Game 200: base complete, DLC set 1 incomplete. One completed set and one completed game.
+	saveSeedGame(t, repo, profile.ID, 200, "Base Done", 20,
+		dashboardSeed{GroupID: 0, Total: 5, Unlocked: 5, Percent: 100, Completed: true, WasCompleted: true},
+		dashboardSeed{GroupID: 1, DLCAppID: 2001, SetName: "Idle DLC", Total: 3, Unlocked: 0, Percent: 0})
+	// Game 300: base and DLC set both complete. Two completed sets, one completed game.
+	saveSeedGame(t, repo, profile.ID, 300, "Both Done", 30,
+		dashboardSeed{GroupID: 0, Total: 4, Unlocked: 4, Percent: 100, Completed: true, WasCompleted: true},
+		dashboardSeed{GroupID: 1, DLCAppID: 3001, SetName: "Done DLC", Total: 2, Unlocked: 2, Percent: 100, Completed: true, WasCompleted: true})
+
+	summary, err := repo.Summary(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.CompletedSetsCount != 4 {
+		t.Fatalf("completed sets = %d, want 4", summary.CompletedSetsCount)
+	}
+	if summary.CompletedGamesCount != 2 {
+		t.Fatalf("completed games = %d, want 2 (games 200 and 300)", summary.CompletedGamesCount)
+	}
+	if summary.OwnedGamesCount != 3 {
+		t.Fatalf("owned games = %d, want 3", summary.OwnedGamesCount)
+	}
+}
+
+// Purchased games count distinct enabled apps whose profile_owned_games row has purchased=1.
+// Played-free games and disabled purchased games do not count.
+func TestSummaryPurchasedGamesCount(t *testing.T) {
+	repo := testRepository(t)
+	profile, err := repo.SaveProfile("11111111111111111", "User One", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpsertOwnedGame(profile.ID, GameRecord{AppID: 500, Name: "Bought", Purchased: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpsertOwnedGame(profile.ID, GameRecord{AppID: 501, Name: "Played Free"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpsertOwnedGame(profile.ID, GameRecord{AppID: 502, Name: "Bought Disabled", Purchased: true}); err != nil {
+		t.Fatal(err)
+	}
+	saveSeedGame(t, repo, profile.ID, 500, "Bought", 0, dashboardSeed{GroupID: 0, Total: 2, Unlocked: 1, Percent: 50})
+	saveSeedGame(t, repo, profile.ID, 501, "Played Free", 0, dashboardSeed{GroupID: 0, Total: 2, Unlocked: 1, Percent: 50})
+	saveSeedGame(t, repo, profile.ID, 502, "Bought Disabled", 0, dashboardSeed{GroupID: 0, Total: 2, Unlocked: 1, Percent: 50, Disabled: true})
+
+	summary, err := repo.Summary(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.OwnedGamesCount != 2 || summary.PurchasedGamesCount != 1 {
+		t.Fatalf("owned = %d purchased = %d, want 2 and 1 (disabled purchased game excluded)", summary.OwnedGamesCount, summary.PurchasedGamesCount)
+	}
+}
+
+// Two profiles that own the same app keep their own playtime and purchased flag. Syncing one profile
+// (SaveGameSync) changes neither its own purchased flag nor the other profile's values.
+func TestProfilesKeepOwnPlaytimeAndPurchasedForSharedGame(t *testing.T) {
+	repo := testRepository(t)
+	p1, err := repo.SaveProfile("11111111111111111", "User One", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := repo.SaveProfile("22222222222222222", "User Two", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveSeedGame(t, repo, p1.ID, 700, "Shared", 100, dashboardSeed{GroupID: 0, Total: 2, Unlocked: 2, Percent: 100, Completed: true, WasCompleted: true})
+	saveSeedGame(t, repo, p2.ID, 700, "Shared", 5, dashboardSeed{GroupID: 0, Total: 2, Unlocked: 2, Percent: 100, Completed: true, WasCompleted: true})
+	if err := repo.UpsertOwnedGame(p1.ID, GameRecord{AppID: 700, Name: "Shared", PlaytimeForever: 100, Purchased: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpsertOwnedGame(p2.ID, GameRecord{AppID: 700, Name: "Shared", PlaytimeForever: 5, Purchased: false}); err != nil {
+		t.Fatal(err)
+	}
+	assertGameCardPlaytime(t, repo, p1.ID, 700, 100)
+	assertGameCardPlaytime(t, repo, p2.ID, 700, 5)
+	assertSummaryPurchased(t, repo, p1.ID, 1)
+	assertSummaryPurchased(t, repo, p2.ID, 0)
+
+	// Profile B syncs with new playtime. Profile A keeps its values; B keeps its own purchased=0.
+	saveSeedGame(t, repo, p2.ID, 700, "Shared", 7, dashboardSeed{GroupID: 0, Total: 2, Unlocked: 2, Percent: 100, Completed: true, WasCompleted: true})
+	assertGameCardPlaytime(t, repo, p1.ID, 700, 100)
+	assertGameCardPlaytime(t, repo, p2.ID, 700, 7)
+	assertSummaryPurchased(t, repo, p1.ID, 1)
+	assertSummaryPurchased(t, repo, p2.ID, 0)
+	assertCount(t, repo, `select count(*) from profile_owned_games where profile_id=? and appid=? and playtime_forever=? and purchased=1`, 1, p1.ID, 700, 100)
+	assertCount(t, repo, `select count(*) from profile_owned_games where profile_id=? and appid=? and playtime_forever=? and purchased=0`, 1, p2.ID, 700, 7)
+}
+
+// Clearing a profile removes its profile_owned_games rows. The shared games row stays while another profile
+// still owns the game, and is removed once no profile references it.
+func TestClearProfileDataRemovesOwnedGameFacts(t *testing.T) {
+	repo := testRepository(t)
+	p1, err := repo.SaveProfile("11111111111111111", "User One", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := repo.SaveProfile("22222222222222222", "User Two", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveSeedGame(t, repo, p1.ID, 800, "Shared Owned", 10, dashboardSeed{GroupID: 0, Total: 2, Unlocked: 1, Percent: 50})
+	saveSeedGame(t, repo, p2.ID, 800, "Shared Owned", 20, dashboardSeed{GroupID: 0, Total: 2, Unlocked: 1, Percent: 50})
+	if err := repo.UpsertOwnedGame(p2.ID, GameRecord{AppID: 800, Name: "Shared Owned", PlaytimeForever: 20, Purchased: true}); err != nil {
+		t.Fatal(err)
+	}
+	// Owned only through UpsertOwnedGame: no profile_games, achievement, or snapshot rows reference app 801.
+	if err := repo.UpsertOwnedGame(p2.ID, GameRecord{AppID: 801, Name: "Owned Only", PlaytimeForever: 3, Purchased: true}); err != nil {
+		t.Fatal(err)
+	}
+	// Owned by both profiles through UpsertOwnedGame only: no profile_games, achievement, or snapshot rows reference app 802.
+	// Clearing p2 must keep the games row because p1 still owns it.
+	if err := repo.UpsertOwnedGame(p1.ID, GameRecord{AppID: 802, Name: "Owned By Both", PlaytimeForever: 4}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpsertOwnedGame(p2.ID, GameRecord{AppID: 802, Name: "Owned By Both", PlaytimeForever: 6, Purchased: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := repo.ClearProfileData(p2.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertCount(t, repo, `select count(*) from profile_owned_games where profile_id=?`, 0, p2.ID)
+	assertCount(t, repo, `select count(*) from profile_owned_games where profile_id=? and appid=? and playtime_forever=?`, 1, p1.ID, 800, 10)
+	assertCount(t, repo, `select count(*) from profile_owned_games where profile_id=? and appid=?`, 1, p1.ID, 802)
+	assertCount(t, repo, `select count(*) from games where appid=?`, 1, 800)
+	assertCount(t, repo, `select count(*) from games where appid=?`, 1, 802)
+	assertCount(t, repo, `select count(*) from games where appid=?`, 0, 801)
+
+	if _, err := repo.ClearProfileData(p1.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertCount(t, repo, `select count(*) from profile_owned_games`, 0)
+	assertCount(t, repo, `select count(*) from games where appid=?`, 0, 800)
+	assertCount(t, repo, `select count(*) from games where appid=?`, 0, 802)
+}
+
+func assertGameCardPlaytime(t *testing.T, repo *Repository, profileID, appID int64, want int) {
+	t.Helper()
+	cards, err := repo.GameCards(profileID, "completed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cards {
+		if c.AppID == appID {
+			if c.PlaytimeForever != want {
+				t.Fatalf("profile %d app %d playtime = %d, want %d", profileID, appID, c.PlaytimeForever, want)
+			}
+			return
+		}
+	}
+	t.Fatalf("profile %d has no card for app %d", profileID, appID)
+}
+
+func assertSummaryPurchased(t *testing.T, repo *Repository, profileID int64, want int) {
+	t.Helper()
+	summary, err := repo.Summary(profileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.PurchasedGamesCount != want {
+		t.Fatalf("profile %d purchased games = %d, want %d", profileID, summary.PurchasedGamesCount, want)
+	}
+}
+
+// Re-syncing a game must not reset the purchased flag written by UpsertOwnedGame.
+func TestSaveGameSyncPreservesPurchasedFlag(t *testing.T) {
+	repo := testRepository(t)
+	profile, err := repo.SaveProfile("11111111111111111", "User One", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpsertOwnedGame(profile.ID, GameRecord{AppID: 600, Name: "Bought", PlaytimeForever: 1, Purchased: true}); err != nil {
+		t.Fatal(err)
+	}
+	saveSeedGame(t, repo, profile.ID, 600, "Bought", 5, dashboardSeed{GroupID: 0, Total: 2, Unlocked: 2, Percent: 100, Completed: true, WasCompleted: true})
+
+	summary, err := repo.Summary(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.PurchasedGamesCount != 1 {
+		t.Fatalf("purchased games after sync = %d, want 1", summary.PurchasedGamesCount)
+	}
+	// A later owned-games upsert with purchased=false clears it (the purchased list no longer has the game).
+	if err := repo.UpsertOwnedGame(profile.ID, GameRecord{AppID: 600, Name: "Bought", PlaytimeForever: 5}); err != nil {
+		t.Fatal(err)
+	}
+	summary, err = repo.Summary(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.PurchasedGamesCount != 0 {
+		t.Fatalf("purchased games after unpurchased upsert = %d, want 0", summary.PurchasedGamesCount)
 	}
 }
 
@@ -928,7 +1141,7 @@ func TestDisabledProfileGameIDsIgnoresOrphanFlagsUntilSynced(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Flag written for an owned app without any profile entry must not lock the app out of sync.
-	if err := repo.UpsertOwnedGame(GameRecord{AppID: 777, Name: "Owned Without Entries"}); err != nil {
+	if err := repo.UpsertOwnedGame(profile.ID, GameRecord{AppID: 777, Name: "Owned Without Entries"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := repo.DisableProfileGame(profile.ID, 777, 0); err != nil {

@@ -118,7 +118,9 @@ export function dashboardState(overrides = {}) {
     dashboard: {
       summary: {
         ownedGamesCount: 6,
+        purchasedGamesCount: 5,
         completedGamesCount: completed.length,
+        completedSetsCount: completed.length,
         totalAchievementsUnlocked: 180
       },
       latestSyncRun: overrides.latestSyncRun ?? {

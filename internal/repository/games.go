@@ -6,15 +6,29 @@ import (
 	"time"
 )
 
-func (r *Repository) UpsertOwnedGame(g GameRecord) error {
+// UpsertOwnedGame records one owned game for a profile. The shared games row gets the name only; the
+// per-profile playtime and purchased flag go to profile_owned_games, so another profile's values are untouched.
+func (r *Repository) UpsertOwnedGame(profileID int64, g GameRecord) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := r.db.Exec(`insert into games(appid, name, playtime_forever, created_at, updated_at)
-		values(?,?,?,?,?)
-		on conflict(appid) do update set name=excluded.name, playtime_forever=excluded.playtime_forever, updated_at=excluded.updated_at`, g.AppID, g.Name, g.PlaytimeForever, now, now)
-	return err
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`insert into games(appid, name, created_at, updated_at) values(?,?,?,?)
+		on conflict(appid) do update set name=excluded.name, updated_at=excluded.updated_at`, g.AppID, g.Name, now, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`insert into profile_owned_games(profile_id, appid, playtime_forever, purchased, updated_at) values(?,?,?,?,?)
+		on conflict(profile_id, appid) do update set playtime_forever=excluded.playtime_forever, purchased=excluded.purchased, updated_at=excluded.updated_at`, profileID, g.AppID, g.PlaytimeForever, boolInt(g.Purchased), now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-// SaveGameSync writes one game and all its eligible entries in a single transaction.
+// SaveGameSync writes one game and all its eligible entries in a single transaction. The playtime goes to
+// the profile's profile_owned_games row. Its purchased flag is preserved: UpsertOwnedGame sets it from the
+// purchased list, and this write does not reset it (a brand-new row defaults to purchased=0).
 func (r *Repository) SaveGameSync(update GameSyncUpdate) error {
 	tx, err := r.db.Begin()
 	if err != nil {
@@ -22,10 +36,14 @@ func (r *Repository) SaveGameSync(update GameSyncUpdate) error {
 	}
 	defer tx.Rollback()
 	now := update.SyncedAt
-	_, err = tx.Exec(`insert into games(appid, name, playtime_forever, has_achievements, achievement_status, created_at, updated_at)
-		values(?,?,?,?,?,?,?)
-		on conflict(appid) do update set name=excluded.name, playtime_forever=excluded.playtime_forever, has_achievements=excluded.has_achievements, achievement_status=excluded.achievement_status, updated_at=excluded.updated_at`, update.AppID, update.Name, update.PlaytimeForever, boolInt(update.HasAchievements), update.AchievementStatus, now, now)
+	_, err = tx.Exec(`insert into games(appid, name, has_achievements, achievement_status, created_at, updated_at)
+		values(?,?,?,?,?,?)
+		on conflict(appid) do update set name=excluded.name, has_achievements=excluded.has_achievements, achievement_status=excluded.achievement_status, updated_at=excluded.updated_at`, update.AppID, update.Name, boolInt(update.HasAchievements), update.AchievementStatus, now, now)
 	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`insert into profile_owned_games(profile_id, appid, playtime_forever, purchased, updated_at) values(?,?,?,0,?)
+		on conflict(profile_id, appid) do update set playtime_forever=excluded.playtime_forever, updated_at=excluded.updated_at`, update.ProfileID, update.AppID, update.PlaytimeForever, now); err != nil {
 		return err
 	}
 	if err := pruneProfileAchievements(tx, update.ProfileID, update.AppID, allSetAchievements(update.Sets)); err != nil {
@@ -148,7 +166,7 @@ func profileGroupIDs(tx *sql.Tx, profileID, appID int64) ([]int64, error) {
 // SaveGameWarning marks a sync failure on every existing entry of the game, or creates a group-0 placeholder.
 func (r *Repository) SaveGameWarning(profileID int64, game GameRecord, warning string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	if err := r.UpsertOwnedGame(game); err != nil {
+	if err := r.UpsertOwnedGame(profileID, game); err != nil {
 		return err
 	}
 	tx, err := r.db.Begin()

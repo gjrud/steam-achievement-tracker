@@ -38,6 +38,9 @@ type OwnedGame struct {
 	// CapsuleFilename is the library capsule file name Steam lists for the game (trimmed). It is
 	// relative to steam/apps/<appid>/ and may be empty.
 	CapsuleFilename string
+	// Purchased is true when the game is in the account's purchased list (GetOwnedGames without played
+	// free-to-play games). Games present only because they were played for free are false.
+	Purchased bool
 }
 
 type SchemaAchievement struct {
@@ -174,37 +177,77 @@ func (c *Client) GetPlayerSummary(ctx context.Context, steamID64 string) (Player
 	return PlayerSummary{SteamID64: p.SteamID, DisplayName: p.PersonaName, AvatarURL: avatar}, nil
 }
 
-func (c *Client) GetOwnedGames(ctx context.Context, steamID64 string) ([]OwnedGame, error) {
-	var payload struct {
-		Response struct {
-			GameCount *int `json:"game_count"`
-			Games     []struct {
-				AppID           int64  `json:"appid"`
-				Name            string `json:"name"`
-				PlaytimeForever int    `json:"playtime_forever"`
-				CapsuleFilename string `json:"capsule_filename"`
-			} `json:"games"`
-		} `json:"response"`
-	}
+// ownedGamesResponse is the IPlayerService/GetOwnedGames payload. GameCount is nil when Steam omits it.
+type ownedGamesResponse struct {
+	Response struct {
+		GameCount *int `json:"game_count"`
+		Games     []struct {
+			AppID           int64  `json:"appid"`
+			Name            string `json:"name"`
+			PlaytimeForever int    `json:"playtime_forever"`
+			CapsuleFilename string `json:"capsule_filename"`
+		} `json:"games"`
+	} `json:"response"`
+}
+
+// getOwnedGamesList requests one GetOwnedGames list. includePlayedFree=true asks for the full library
+// (purchased games plus games played for free); false asks only for the games the account purchased.
+func (c *Client) getOwnedGamesList(ctx context.Context, steamID64 string, includePlayedFree bool) (ownedGamesResponse, error) {
+	var payload ownedGamesResponse
 	// include_extended_appinfo adds capsule_filename. language is deliberately not set: with a language,
 	// Steam returns localized art file names for some games.
-	q := url.Values{"key": {c.APIKey}, "steamid": {steamID64}, "include_appinfo": {"true"}, "include_extended_appinfo": {"true"}, "include_played_free_games": {"true"}, "format": {"json"}}
+	// skip_unvetted_apps=false: Steam hides unvetted (new) apps by default. They are part of the library
+	// the tracker shows, so they are requested explicitly.
+	q := url.Values{"key": {c.APIKey}, "steamid": {steamID64}, "include_appinfo": {"true"}, "include_extended_appinfo": {"true"}, "include_played_free_games": {strconv.FormatBool(includePlayedFree)}, "skip_unvetted_apps": {"false"}, "format": {"json"}}
 	if err := c.getJSON(ctx, "/IPlayerService/GetOwnedGames/v0001/", q, &payload); err != nil {
+		return ownedGamesResponse{}, err
+	}
+	return payload, nil
+}
+
+// checkOwnedGamesList rejects an unusable GetOwnedGames answer. A response with neither games nor game_count
+// is unusable; so is a non-zero game_count with no games. An explicit game_count of 0 with an empty or missing
+// games list is a valid empty library.
+func checkOwnedGamesList(r ownedGamesResponse, unavailable, incomplete string) error {
+	if r.Response.Games == nil && r.Response.GameCount == nil {
+		return errors.New(unavailable)
+	}
+	if r.Response.GameCount != nil && *r.Response.GameCount > 0 && len(r.Response.Games) == 0 {
+		return errors.New(incomplete)
+	}
+	return nil
+}
+
+// GetOwnedGames returns the full library. It makes two requests: the full list, and the purchased list
+// (played-free games excluded) used to set OwnedGame.Purchased. A failure of either request fails the call.
+func (c *Client) GetOwnedGames(ctx context.Context, steamID64 string) ([]OwnedGame, error) {
+	full, err := c.getOwnedGamesList(ctx, steamID64, true)
+	if err != nil {
 		return nil, err
 	}
-	if payload.Response.Games == nil && payload.Response.GameCount == nil {
-		return nil, errors.New("owned games unavailable; profile game details may be private")
+	if err := checkOwnedGamesList(full, "owned games unavailable; profile game details may be private", "owned games response was incomplete"); err != nil {
+		return nil, err
 	}
-	if payload.Response.GameCount != nil && *payload.Response.GameCount > 0 && len(payload.Response.Games) == 0 {
-		return nil, errors.New("owned games response was incomplete")
+	purchasedList, err := c.getOwnedGamesList(ctx, steamID64, false)
+	if err != nil {
+		return nil, err
 	}
-	games := make([]OwnedGame, 0, len(payload.Response.Games))
-	for _, g := range payload.Response.Games {
+	// Checked like the full list: a glitched or throttled `{"response":{}}` must not read as "no purchases",
+	// which would clear every purchased flag. A genuinely empty purchased list still carries game_count.
+	if err := checkOwnedGamesList(purchasedList, "purchased games list unavailable", "purchased games response was incomplete"); err != nil {
+		return nil, err
+	}
+	purchased := make(map[int64]bool, len(purchasedList.Response.Games))
+	for _, g := range purchasedList.Response.Games {
+		purchased[g.AppID] = true
+	}
+	games := make([]OwnedGame, 0, len(full.Response.Games))
+	for _, g := range full.Response.Games {
 		name := strings.TrimSpace(g.Name)
 		if name == "" {
 			name = fmt.Sprintf("App %d", g.AppID)
 		}
-		games = append(games, OwnedGame{AppID: g.AppID, Name: name, PlaytimeForever: g.PlaytimeForever, CapsuleFilename: strings.TrimSpace(g.CapsuleFilename)})
+		games = append(games, OwnedGame{AppID: g.AppID, Name: name, PlaytimeForever: g.PlaytimeForever, CapsuleFilename: strings.TrimSpace(g.CapsuleFilename), Purchased: purchased[g.AppID]})
 	}
 	return games, nil
 }

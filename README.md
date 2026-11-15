@@ -13,15 +13,15 @@ This app was born for personal use and was entirely vibecoded. I have entry-leve
 - **Steam profile setup** from SteamID64, `steamcommunity.com/profiles/...` URLs, `steamcommunity.com/id/...` URLs, or vanity names.
 - **Secret Service-only API key storage** for the Steam Web API key; no environment variable or plaintext fallback is used.
 - **Startup and manual sync** against Steam Web API data.
-- **Dashboard summary** for owned games, completed games, unlocked achievements, and latest sync status.
+- **Dashboard summary** for all games, purchased games, completed games, completed sets, unlocked achievements, and latest sync status.
 - **Not completed view** with ranked suggestions, search, and tag filters.
-- **Completed games view** for games with full achievement completion.
+- **Completed games view** for achievement sets with full completion, including completed named and DLC sets.
 - **Sync errors view** for games that failed refresh while preserving prior local data.
 - **Disabled games view** for manually disabled games or games no longer owned by the active profile.
 - **Achievement sets**: each achievement set of a game (base game, named sets, DLC sets) is its own card, completed and disabled independently.
 - **Per-set actions** to mark a set as previously completed, flag missing achievements as DLC-related, disable a set, or re-enable it.
 - **Local cover cache** using Steam library capsule images taken from the owned-games list; the store API is only queried for DLC sets and for base games without a listed cover, with hero, header and main capsule fallbacks. DLC sets without any image of their own show the parent game's cover.
-- **Profile-scoped data clear** that removes the active profile, tracked games, achievements, sync history, manual flags, and cached covers while keeping the Secret Service key and logs.
+- **Profile-scoped data clear** that removes the active profile, tracked games, owned-game playtime and purchase status, achievements, sync history, manual flags, and cached covers while keeping the Secret Service key and logs.
 - **Local SQLite storage** with migration backups, WAL mode, and app-local log rotation.
 
 ## Requirements
@@ -212,7 +212,7 @@ Sync starts after saving a profile and again on app startup when a profile and A
 
 Sync behavior:
 
-- Owned games, names, playtime, achievements, and cover images are loaded from Steam.
+- Owned games, names, playtime, purchase status, achievements, and cover images are loaded from Steam. Playtime and purchase status are stored per profile.
 - Games no longer returned by Steam for the active profile are disabled for that profile.
 - Disabled games are skipped, including manually disabled games and games disabled because Steam no longer reports them as owned.
 - Each achievement set of a game becomes its own dashboard entry, and archived achievements are excluded from completion counts.
@@ -229,8 +229,10 @@ Sync behavior:
 
 The top summary shows:
 
-- active owned games count, excluding disabled games
-- completed games count, excluding disabled games
+- all games count, excluding disabled games. This includes played free-to-play games.
+- purchased games count, excluding disabled games. This counts the games in the account's purchased list, so played free-to-play games are not included. Steam's purchased list may also include free license grants.
+- completed games count, excluding disabled games. A game counts when its base achievement set is completed. A game with only a completed DLC set does not count, and neither does a game whose base set is not listed for the profile (for example, a game whose achievements all belong to named or DLC sets).
+- completed sets count, excluding disabled games and sets. Each completed set (base, named, or DLC) counts separately.
 - unlocked achievement count, excluding disabled games
 - current or latest sync status and per-game progress
 
@@ -336,7 +338,7 @@ These flags are mainly for incomplete games that need local context. They are pr
 
 ### Clear active user data
 
-Open **Settings** and click **Clear data**. The app asks you to type the shown profile identifier before clearing. This removes the active profile, tracked games, achievement data, sync history, manual flags, profile-scoped tags, and cached covers for that profile. It does not remove the Secret Service API key or logs.
+Open **Settings** and click **Clear data**. The app asks you to type the shown profile identifier before clearing. This removes the active profile, tracked games, owned-game playtime and purchase status, achievement data, sync history, manual flags, profile-scoped tags, and cached covers for that profile. It does not remove the Secret Service API key or logs.
 
 ![Clear active user data](docs/clear-data.gif)
 
@@ -370,18 +372,21 @@ All app-owned files live under `~/.steam-achievement-tracker` unless noted. Dire
 | Table | Columns | Notes |
 | --- | --- | --- |
 | `settings` | `key` PK, `value` | App settings. Currently stores `active_profile_id`. |
-| `schema_migrations` | `version` PK, `name`, `applied_at` | Applied DB migrations. Current schema version is `10`. |
+| `schema_migrations` | `version` PK, `name`, `applied_at` | Applied DB migrations. Current schema version is `12`. |
 | `game_sets` | `appid`, `groupid`, `name`, `dlcappid`, `sort_order`, `updated_at`; PK (`appid`, `groupid`) | Achievement set catalog per game. Group `0` is the base set; `dlcappid` ties a set to a DLC app. |
 | `cover_images` | `image_appid` PK, `kind`, `file_name`, `path`, `source_url`, `checked_at`, `downloaded_at` | Cover image per image app id (the game, or the DLC for DLC sets). `kind` is `library`, `hero`, `header` or `main`. |
 | `profiles` | `id` PK, `steam_id64` unique, `display_name`, `avatar_url`, `created_at`, `updated_at`, `last_synced_at` | Steam profiles known to the app. |
-| `games` | `appid` PK, `name`, `playtime_forever`, `has_achievements`, `achievement_status`, `disabled`, `disabled_reason`, `cover_path`, `cover_source_url`, `cover_checked_at`, `cover_downloaded_at`, `created_at`, `updated_at` | Shared Steam app metadata and cover cache metadata. `disabled`/`disabled_reason` are legacy/global fields; current manual disables are profile-scoped. |
+| `games` | `appid` PK, `name`, `playtime_forever`, `purchased`, `has_achievements`, `achievement_status`, `disabled`, `disabled_reason`, `cover_path`, `cover_source_url`, `cover_checked_at`, `cover_downloaded_at`, `created_at`, `updated_at` | Shared Steam app metadata and cover cache metadata. `playtime_forever` and `purchased` are legacy columns (migrations 11 and 12): app code no longer reads or writes them; per-profile values are in `profile_owned_games`. `disabled`/`disabled_reason` are legacy/global fields; current manual disables are profile-scoped. |
 | `profile_games` | `profile_id`, `appid`, `groupid`, `total_achievements`, `unlocked_achievements`, `completion_percent`, `missing_avg_unlock`, `suggestion_score`, `is_completed`, `was_completed`, `newly_incomplete`, `sync_warning`, `last_error`, `last_error_at`, `last_synced_at`, `dlc_not_owned`; PK (`profile_id`, `appid`, `groupid`) | Per-profile entry progress and latest warning state. `dlc_not_owned` is `1` for a DLC-bound set the profile does not own. |
+| `profile_owned_games` | `profile_id`, `appid`, `playtime_forever`, `purchased`, `updated_at`; PK (`profile_id`, `appid`) | Per-profile playtime and purchase status for each owned game (migration 12). `purchased` is `1` when the game is in the profile's purchased list. |
 | `achievements` | `appid`, `apiname`, `global_percent`, `updated_at`; PK (`appid`, `apiname`) | Per-game achievement catalog with global unlock percentage. |
 | `profile_achievements` | `profile_id`, `appid`, `apiname`, `unlocked`, `unlock_time`, `updated_at`; PK (`profile_id`, `appid`, `apiname`) | Per-profile achievement unlock state. |
 | `game_snapshots` | `id` PK, `profile_id`, `appid`, `total_achievements`, `unlocked_achievements`, `completion_percent`, `missing_avg_unlock`, `is_completed`, `synced_at` | Historical per-sync progress snapshots. |
 | `sync_runs` | `id` PK, `profile_id`, `started_at`, `finished_at`, `status`, `games_total`, `games_synced`, `games_failed`, `error` | Sync run history and progress. Status values include `running`, `success`, `partial`, and `failed`. |
 | `profile_game_flags` | `profile_id`, `appid`, `manual_was_completed`, `missing_achievements_in_dlc`, `disabled`, `disabled_reason`, `created_at`, `updated_at`; PK (`profile_id`, `appid`) | Manual, profile-scoped game flags. Indexed by (`profile_id`, `disabled`). |
 | `profile_game_tags` | `profile_id`, `appid`, `tag`, `score`, `reason`, `computed_at`; PK (`profile_id`, `appid`, `tag`) | Computed profile-scoped tags used by suggestion filters. Indexed by (`profile_id`, `tag`). |
+
+Migration 11 adds `games.purchased`. Migration 12 creates `profile_owned_games` and copies each profile entry's legacy `games.playtime_forever` and `games.purchased` values into it. The legacy purchased flag was global, so migration 12 copies it to every profile that has the game, even a profile that did not buy it, until that profile's next sync corrects it.
 
 ```mermaid
 erDiagram
@@ -407,6 +412,7 @@ erDiagram
     integer appid PK
     text name
     integer playtime_forever
+    integer purchased
     integer has_achievements
     text achievement_status
     integer disabled
@@ -434,6 +440,13 @@ erDiagram
     text last_error_at
     text last_synced_at
     integer dlc_not_owned
+  }
+  PROFILE_OWNED_GAMES {
+    integer profile_id PK,FK
+    integer appid PK,FK
+    integer playtime_forever
+    integer purchased
+    text updated_at
   }
   ACHIEVEMENTS {
     integer appid PK,FK
@@ -492,6 +505,8 @@ erDiagram
 
   PROFILES ||--o{ PROFILE_GAMES : tracks
   GAMES ||--o{ PROFILE_GAMES : appears_in
+  PROFILES ||--o{ PROFILE_OWNED_GAMES : owns
+  GAMES ||--o{ PROFILE_OWNED_GAMES : owned_in
   GAMES ||--o{ ACHIEVEMENTS : has
   PROFILES ||--o{ PROFILE_ACHIEVEMENTS : unlocks
   ACHIEVEMENTS ||--o{ PROFILE_ACHIEVEMENTS : recorded_as
@@ -510,7 +525,7 @@ erDiagram
 | --- | --- |
 | `https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/` | Resolves Steam vanity names and `/id/<name>` profile URLs to SteamID64. Requires the API key. |
 | `https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/` | Loads profile display name and avatar URL for setup/confirmation. Requires the API key. |
-| `https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/` | Loads the public owned game list, app names, playtime, and the library cover file name (`include_extended_appinfo`) for the active profile. Requires the API key and public game details. |
+| `https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/` | Loads the public owned game list, app names, playtime, the library cover file name (`include_extended_appinfo`), and the purchased list for the active profile. Unvetted apps are included (`skip_unvetted_apps=false`). Called twice per sync: once with `include_played_free_games=true` (full library) and once with `include_played_free_games=false` (purchased list). A failure or unusable response from either call fails the sync run before any game is synced. Requires the API key and public game details. |
 | `https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/` | Loads each game's achievement schema. Requires the API key. |
 | `https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v1/` | Loads per-profile unlocked achievements and unlock times for a game. Requires the API key and accessible profile/game stats. |
 | `https://api.steampowered.com/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v0002/` | Loads global achievement unlock percentages used for rarity/missing-average calculations. |

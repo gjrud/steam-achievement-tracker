@@ -8,7 +8,13 @@ afterEach(() => {
   cleanup()
 })
 
-const summary = {ownedGamesCount: 1234, completedGamesCount: 7, totalAchievementsUnlocked: 4321}
+const summary = {
+  ownedGamesCount: 1234,
+  purchasedGamesCount: 987,
+  completedGamesCount: 7,
+  completedSetsCount: 9,
+  totalAchievementsUnlocked: 4321
+}
 const finishedRun = {
   status: 'success',
   startedAt: '2026-05-22T10:00:00Z',
@@ -29,11 +35,22 @@ function cardFor(label) {
 }
 
 describe('SummaryCards', () => {
-  test('shows the owned, completed, and achievement totals', () => {
+  test('shows the all, purchased, completed, sets, and achievement totals in order', () => {
     renderCards()
 
-    expect(cardFor('Owned games')).toHaveTextContent(integer(1234))
+    const labels = Array.from(document.querySelectorAll('.summary-card > span')).map((el) => el.textContent)
+    expect(labels).toEqual([
+      'All games',
+      'Purchased games',
+      'Completed games',
+      'Completed sets',
+      'Achievements',
+      'Last sync'
+    ])
+    expect(cardFor('All games')).toHaveTextContent(integer(1234))
+    expect(cardFor('Purchased games')).toHaveTextContent(integer(987))
     expect(cardFor('Completed games')).toHaveTextContent(integer(7))
+    expect(cardFor('Completed sets')).toHaveTextContent(integer(9))
     expect(cardFor('Achievements')).toHaveTextContent(integer(4321))
   })
 

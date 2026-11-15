@@ -6,11 +6,14 @@ import (
 	"strings"
 )
 
-// entryBaseFromSQL joins one profile entry with its game, set catalog row and manual flags.
+// entryBaseFromSQL joins one profile entry with its game, set catalog row, manual flags and the profile's
+// owned-game facts (po: playtime and purchased flag). po is left-joined, so an entry with no po row reads as
+// zero playtime and not purchased (coalesce in the select lists).
 const entryBaseFromSQL = `from profile_games pg
 		join games g on g.appid=pg.appid
 		left join game_sets gs on gs.appid=pg.appid and gs.groupid=pg.groupid
-		left join profile_game_flags f on f.profile_id=pg.profile_id and f.appid=pg.appid and f.groupid=pg.groupid`
+		left join profile_game_flags f on f.profile_id=pg.profile_id and f.appid=pg.appid and f.groupid=pg.groupid
+		left join profile_owned_games po on po.profile_id=pg.profile_id and po.appid=pg.appid`
 
 const coverJoinSQL = `left join cover_images ci on ci.image_appid=` + effectiveCoverAppIDSQL
 
@@ -42,14 +45,21 @@ func (r *Repository) Dashboard(profileID int64) (Dashboard, error) {
 	return Dashboard{Summary: summary, LatestSyncRun: latest, Suggestions: suggestions, Completed: completed, Warnings: warnings, Disabled: disabled}, nil
 }
 
-// Summary counts completed/newly-incomplete per entry, and games (distinct appid) for owned/with-achievements.
-// Unlocked/available sums are per entry; entries partition an app's achievements, so totals are not double counted.
-// Entries of DLC the profile does not own are left out of the unlocked/available sums, so the overall
-// percentage reflects owned content only.
+// Summary counts entries and games for one profile only. CompletedSetsCount counts completed enabled entries
+// (a game's base set and each completed DLC set count separately). CompletedGamesCount counts distinct apps
+// whose enabled base entry (groupid 0) is completed, so a completed DLC set alone does not make its game
+// completed. OwnedGamesCount, GamesWithAchievementsCount and PurchasedGamesCount count distinct enabled apps.
+// PurchasedGamesCount reads the profile's own purchased flag (profile_owned_games), so each profile counts its
+// own purchases.
+// Newly-incomplete counts entries. Unlocked/available sums are per entry; entries partition an app's
+// achievements, so totals are not double counted. Entries of DLC the profile does not own are left out of
+// the unlocked/available sums, so the overall percentage reflects owned content only.
 func (r *Repository) Summary(profileID int64) (Summary, error) {
 	var s Summary
 	row := r.db.QueryRow(`select
 		coalesce(sum(case when pg.is_completed=1 and coalesce(f.disabled,0)=0 then 1 else 0 end),0),
+		coalesce(count(distinct case when pg.groupid=0 and pg.is_completed=1 and coalesce(f.disabled,0)=0 then pg.appid end),0),
+		coalesce(count(distinct case when coalesce(f.disabled,0)=0 and coalesce(po.purchased,0)=1 then pg.appid end),0),
 		coalesce(sum(case when coalesce(f.disabled,0)=0 and pg.dlc_not_owned=0 then pg.unlocked_achievements else 0 end),0),
 		coalesce(count(distinct case when coalesce(f.disabled,0)=0 then pg.appid end),0),
 		coalesce(count(distinct case when coalesce(f.disabled,0)=0 and g.has_achievements=1 then pg.appid end),0),
@@ -57,7 +67,7 @@ func (r *Repository) Summary(profileID int64) (Summary, error) {
 		coalesce(sum(case when coalesce(f.disabled,0)=0 and pg.dlc_not_owned=0 then pg.total_achievements else 0 end),0),
 		coalesce(sum(case when coalesce(f.disabled,0)=0 and pg.newly_incomplete=1 then 1 else 0 end),0)
 		`+entryBaseFromSQL+` where pg.profile_id=?`, profileID)
-	if err := row.Scan(&s.CompletedGamesCount, &s.TotalUnlockedCount, &s.OwnedGamesCount, &s.GamesWithAchievementsCount, &s.TotalAchievementsUnlocked, &s.TotalAchievementsAvailable, &s.NewlyIncompleteGamesCount); err != nil {
+	if err := row.Scan(&s.CompletedSetsCount, &s.CompletedGamesCount, &s.PurchasedGamesCount, &s.TotalUnlockedCount, &s.OwnedGamesCount, &s.GamesWithAchievementsCount, &s.TotalAchievementsUnlocked, &s.TotalAchievementsAvailable, &s.NewlyIncompleteGamesCount); err != nil {
 		return s, err
 	}
 	if s.TotalAchievementsAvailable > 0 {
@@ -71,7 +81,7 @@ func (r *Repository) GameCards(profileID int64, filter string) ([]GameCard, erro
 	if err != nil {
 		return nil, err
 	}
-	rows, err := r.db.Query(`select pg.appid, pg.groupid, g.name, coalesce(gs.name,''), coalesce(gs.dlcappid,0), g.playtime_forever,
+	rows, err := r.db.Query(`select pg.appid, pg.groupid, g.name, coalesce(gs.name,''), coalesce(gs.dlcappid,0), coalesce(po.playtime_forever,0),
 		coalesce(ci.image_appid,0), coalesce(ci.kind,''), coalesce(ci.file_name,''), coalesce(ci.path,''), ci.downloaded_at,
 		g.has_achievements, g.achievement_status,
 		pg.total_achievements, pg.unlocked_achievements, pg.completion_percent, pg.missing_avg_unlock, pg.suggestion_score, pg.is_completed, pg.was_completed, pg.newly_incomplete, pg.sync_warning, pg.last_error, pg.last_error_at, pg.last_synced_at,
