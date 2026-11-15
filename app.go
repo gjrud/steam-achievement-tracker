@@ -210,7 +210,11 @@ func (a *App) ValidateProfile(input string) (ProfilePreview, error) {
 	if err != nil {
 		return ProfilePreview{}, err
 	}
+	a.mu.Lock()
+	baseURL := a.steamBaseURL
+	a.mu.Unlock()
 	client := steam.New(key)
+	applySteamBaseURL(client, baseURL)
 	steamID64, err := client.ResolveProfileInput(a.context(), input)
 	if err != nil {
 		return ProfilePreview{}, err
@@ -486,9 +490,7 @@ func (a *App) startSync(force bool) error {
 		done()
 		return err
 	}
-	if baseURL != "" {
-		client.BaseURL = baseURL
-	}
+	applySteamBaseURL(client, baseURL)
 	// The baseline is read before the goroutine starts, so no run of this sync exists yet: it is the run that was
 	// latest at start. If it cannot be read, the sync does not start and the error is returned. StartSyncRun would
 	// very likely fail too, and a sync started without a baseline could not tell its own run from an older one.
@@ -661,6 +663,14 @@ func newSteamClient(key string, s repository.LibrarySettings) *steam.Client {
 	client.SkipUnvettedApps = !s.IncludeUnvettedApps
 	client.ExcludePlayedFreeGames = !s.IncludePlayedFreeGames
 	return client
+}
+
+// applySteamBaseURL points client at baseURL when it is non-empty. Sync and profile validation both call it with
+// App.steamBaseURL, which only tests set; production leaves it empty and the client keeps its default base URL.
+func applySteamBaseURL(client *steam.Client, baseURL string) {
+	if baseURL != "" {
+		client.BaseURL = baseURL
+	}
 }
 
 // context returns the service lifetime context, the parent of sync and Steam request contexts. It is nil-safe: an App
