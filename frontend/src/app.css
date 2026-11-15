@@ -865,6 +865,99 @@
     margin-top: 6px;
   }
 
+  .library-sync {
+    margin-top: 24px;
+    padding: 16px;
+    border: 1px solid #26384d;
+    border-radius: 16px;
+    background: #0c1725;
+  }
+
+  .library-sync h3,
+  .library-sync > .muted {
+    margin: 0;
+  }
+
+  .library-sync > .muted {
+    margin-top: 14px;
+  }
+
+  .setting-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    margin-top: 14px;
+  }
+
+  /* Switch built on a native checkbox. The global input rule (flex-grow, padding, border) targets text
+     fields, so it is reset here. */
+  .setting-row input[type="checkbox"] {
+    appearance: none;
+    -webkit-appearance: none;
+    position: relative;
+    flex: 0 0 auto;
+    width: 40px;
+    height: 22px;
+    margin: 1px 0 0;
+    padding: 0;
+    border: 1px solid #2d4560;
+    border-radius: 999px;
+    background: #1b2f45;
+    cursor: pointer;
+    transition: background 150ms ease, border-color 150ms ease;
+  }
+
+  .setting-row input[type="checkbox"]::before {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #9db4cb;
+    transition: transform 150ms ease, background 150ms ease;
+  }
+
+  .setting-row input[type="checkbox"]:checked {
+    border-color: #66c0f4;
+    background: #2a7fb0;
+  }
+
+  .setting-row input[type="checkbox"]:checked::before {
+    transform: translateX(18px);
+    background: #e8f3ff;
+  }
+
+  /* The global input:focus ring is for text fields. Switches only show a ring for keyboard focus. */
+  .setting-row input[type="checkbox"]:focus {
+    box-shadow: none;
+  }
+
+  /* Solid accent outline, offset from the switch, so the keyboard ring stays visible in both ON and OFF states. */
+  .setting-row input[type="checkbox"]:focus-visible {
+    outline: 2px solid #66c0f4;
+    outline-offset: 2px;
+  }
+
+  .setting-row input[type="checkbox"][aria-busy="true"] {
+    cursor: progress;
+  }
+
+  .setting-row > div {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .setting-row label {
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .setting-row p {
+    margin: 4px 0 0;
+  }
+
   .modal-backdrop {
     position: fixed;
     inset: 0;

@@ -159,6 +159,60 @@ func TestGetOwnedGamesFullListFailureSkipsPurchasedList(t *testing.T) {
 	}
 }
 
+func TestGetOwnedGamesSkipUnvettedAppsParam(t *testing.T) {
+	const path = "/IPlayerService/GetOwnedGames/v0001/"
+	full := `{"response":{"game_count":1,"games":[{"appid":10,"name":"Game","playtime_forever":1}]}}`
+	for _, skip := range []bool{false, true} {
+		client, log, closeServer := testOwnedClient(t, full, full, 0)
+		client.SkipUnvettedApps = skip
+		if _, err := client.GetOwnedGames(context.Background(), testSteamID); err != nil {
+			t.Fatal(err)
+		}
+		queries := log.queryHistory(path)
+		if len(queries) != 2 {
+			t.Fatalf("skip=%v requests = %d, want 2", skip, len(queries))
+		}
+		want := strconv.FormatBool(skip)
+		for i, query := range queries {
+			if got := query.Get("skip_unvetted_apps"); got != want {
+				t.Fatalf("skip=%v request %d skip_unvetted_apps = %q, want %q", skip, i, got, want)
+			}
+		}
+		closeServer()
+	}
+}
+
+// With ExcludePlayedFreeGames the full list is requested as purchased only: one request, and every game is
+// Purchased. testOwnedClient serves include_played_free_games=false from its purchased body, so that body
+// carries the library here.
+func TestGetOwnedGamesExcludePlayedFreeGamesUsesOneRequest(t *testing.T) {
+	const path = "/IPlayerService/GetOwnedGames/v0001/"
+	library := `{"response":{"game_count":2,"games":[{"appid":10,"name":"Bought","playtime_forever":1},{"appid":30,"name":"Bought Too","playtime_forever":3}]}}`
+	client, log, closeServer := testOwnedClient(t, `{"response":{}}`, library, 0)
+	defer closeServer()
+	client.ExcludePlayedFreeGames = true
+
+	games, err := client.GetOwnedGames(context.Background(), testSteamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(games) != 2 {
+		t.Fatalf("games = %#v, want 2", games)
+	}
+	for _, g := range games {
+		if !g.Purchased {
+			t.Fatalf("game %d Purchased = false, want true", g.AppID)
+		}
+	}
+	queries := log.queryHistory(path)
+	if len(queries) != 1 {
+		t.Fatalf("requests = %d, want 1 (no purchased-list request)", len(queries))
+	}
+	if got := queries[0].Get("include_played_free_games"); got != "false" {
+		t.Fatalf("include_played_free_games = %q, want false", got)
+	}
+}
+
 // The purchased list is validated like the full list. An explicit empty list (game_count 0) is valid; a bare
 // `{"response":{}}` or an incomplete list is an error, so a glitch cannot read as "no purchases" and clear
 // every purchased flag.

@@ -296,6 +296,41 @@ describe('App sync polling', () => {
       expect(getState).toHaveBeenCalledTimes(3)
     })
   }
+
+  test('pauses polling during a library settings save and resumes it while the sync still runs', async () => {
+    const saved = {includeUnvettedApps: false, includePlayedFreeGames: true}
+    let resolveSave
+    const getState = vi.fn()
+      .mockResolvedValueOnce(syncingState(2))
+      .mockResolvedValue({...syncingState(3), settings: saved})
+    const setSettings = vi.fn(() => new Promise((resolve) => {
+      resolveSave = resolve
+    }))
+    __setWailsMocks({GetAppState: getState, SetLibrarySettings: setSettings})
+
+    render(App)
+    await settle()
+    await fireEvent.click(screen.getByRole('button', {name: 'Settings'}))
+    expect(getState).toHaveBeenCalledTimes(1)
+    const unvetted = screen.getByRole('switch', {name: 'Include unvetted apps'})
+
+    // A poll timer is pending from the running sync. It must not fire while the save is in flight.
+    await fireEvent.click(unvetted)
+    expect(setSettings).toHaveBeenCalledWith(false, true)
+    await advance(3000)
+    expect(getState).toHaveBeenCalledTimes(1)
+
+    resolveSave({...syncingState(2), settings: saved})
+    await settle()
+    expect(unvetted).not.toBeChecked()
+    expect(unvetted).toHaveAttribute('aria-busy', 'false')
+    expect(getState).toHaveBeenCalledTimes(1)
+
+    // The sync is still running, so polling restarts and keeps the saved setting.
+    await advance(1000)
+    expect(getState).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('switch', {name: 'Include unvetted apps'})).not.toBeChecked()
+  })
 })
 
 describe('App sync now', () => {

@@ -231,6 +231,143 @@ func TestGetAppStateWithoutKeyOrProfile(t *testing.T) {
 	}
 }
 
+// Library sync settings are per profile. With no active profile, SetLibrarySettings fails and state shows defaults.
+func TestSetLibrarySettingsRequiresActiveProfile(t *testing.T) {
+	app := newTestApp(t)
+	state, err := app.GetAppState()
+	if err != nil {
+		t.Fatalf("GetAppState: %v", err)
+	}
+	if state.Settings != repository.DefaultLibrarySettings() {
+		t.Fatalf("Settings without profile = %+v, want defaults", state.Settings)
+	}
+	if _, err := app.SetLibrarySettings(false, false); err == nil || !strings.Contains(err.Error(), "no active profile") {
+		t.Fatalf("SetLibrarySettings without profile err = %v, want no-active-profile", err)
+	}
+	state, err = app.GetAppState()
+	if err != nil {
+		t.Fatalf("GetAppState after failed save: %v", err)
+	}
+	if state.Settings != repository.DefaultLibrarySettings() {
+		t.Fatalf("Settings after failed save = %+v, want defaults", state.Settings)
+	}
+}
+
+// Settings save for the active profile without starting a sync. A new profile starts at defaults, and each
+// profile keeps its own values when the active profile changes.
+func TestSetLibrarySettingsIsPerProfile(t *testing.T) {
+	app := newTestApp(t)
+	profileA := saveTestProfile(t, app)
+	defaults := repository.DefaultLibrarySettings()
+	off := repository.LibrarySettings{IncludeUnvettedApps: false, IncludePlayedFreeGames: false}
+	onB := repository.LibrarySettings{IncludeUnvettedApps: true, IncludePlayedFreeGames: false}
+
+	state, err := app.SetLibrarySettings(false, false)
+	if err != nil {
+		t.Fatalf("SetLibrarySettings for profile A: %v", err)
+	}
+	if state.Settings != off {
+		t.Fatalf("SetLibrarySettings returned Settings = %+v, want %+v", state.Settings, off)
+	}
+	if state.SyncInProgress {
+		t.Fatal("SetLibrarySettings started a sync, want settings to apply on the next sync")
+	}
+
+	// SaveProfile makes the new profile active. With no key in the keyring its post-save sync does not run.
+	state, err = app.SaveProfile(ProfilePreview{SteamID64: "76561198000000002", DisplayName: "Other"})
+	if err != nil {
+		t.Fatalf("SaveProfile profile B: %v", err)
+	}
+	if state.Profile == nil || state.Profile.ID == profileA.ID {
+		t.Fatalf("active profile after SaveProfile = %+v, want a new profile", state.Profile)
+	}
+	if state.Settings != defaults {
+		t.Fatalf("new profile Settings = %+v, want defaults %+v", state.Settings, defaults)
+	}
+	state, err = app.SetLibrarySettings(true, false)
+	if err != nil {
+		t.Fatalf("SetLibrarySettings for profile B: %v", err)
+	}
+	if state.Settings != onB {
+		t.Fatalf("profile B SetLibrarySettings returned Settings = %+v, want %+v", state.Settings, onB)
+	}
+
+	// Switching back to profile A (SaveProfile of its Steam ID) shows A's own values.
+	state, err = app.SaveProfile(ProfilePreview{SteamID64: testSteamID, DisplayName: "Tester"})
+	if err != nil {
+		t.Fatalf("SaveProfile back to profile A: %v", err)
+	}
+	if state.Profile == nil || state.Profile.ID != profileA.ID {
+		t.Fatalf("active profile = %+v, want profile A %d", state.Profile, profileA.ID)
+	}
+	if state.Settings != off {
+		t.Fatalf("profile A Settings after switching back = %+v, want %+v", state.Settings, off)
+	}
+	state, err = app.GetAppState()
+	if err != nil {
+		t.Fatalf("GetAppState: %v", err)
+	}
+	if state.Settings != off {
+		t.Fatalf("GetAppState Settings for profile A = %+v, want %+v", state.Settings, off)
+	}
+}
+
+// Each sync maps the settings of the profile it syncs: the Steam client flags come from that profile only.
+func TestSteamClientForProfileUsesOwnSettings(t *testing.T) {
+	app := newTestApp(t)
+	profileA := saveTestProfile(t, app)
+	if _, err := app.SetLibrarySettings(false, false); err != nil {
+		t.Fatalf("SetLibrarySettings for profile A: %v", err)
+	}
+	profileB, err := app.repo.SaveProfile("76561198000000002", "Other", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.repo.SaveLibrarySettings(profileB.ID, repository.LibrarySettings{IncludeUnvettedApps: true, IncludePlayedFreeGames: false}); err != nil {
+		t.Fatal(err)
+	}
+
+	clientA, err := steamClientForProfile(app.repo, "fixture-steam-key", profileA.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !clientA.SkipUnvettedApps || !clientA.ExcludePlayedFreeGames {
+		t.Fatalf("profile A client SkipUnvettedApps=%v ExcludePlayedFreeGames=%v, want both true", clientA.SkipUnvettedApps, clientA.ExcludePlayedFreeGames)
+	}
+	clientB, err := steamClientForProfile(app.repo, "fixture-steam-key", profileB.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clientB.SkipUnvettedApps || !clientB.ExcludePlayedFreeGames {
+		t.Fatalf("profile B client SkipUnvettedApps=%v ExcludePlayedFreeGames=%v, want false and true", clientB.SkipUnvettedApps, clientB.ExcludePlayedFreeGames)
+	}
+}
+
+// newSteamClient maps the inverted Steam flags: SkipUnvettedApps = !IncludeUnvettedApps and
+// ExcludePlayedFreeGames = !IncludePlayedFreeGames, for every combination of the two settings.
+func TestNewSteamClientMapsLibrarySettings(t *testing.T) {
+	tests := []struct {
+		name string
+		s    repository.LibrarySettings
+	}{
+		{name: "both included", s: repository.LibrarySettings{IncludeUnvettedApps: true, IncludePlayedFreeGames: true}},
+		{name: "unvetted excluded", s: repository.LibrarySettings{IncludeUnvettedApps: false, IncludePlayedFreeGames: true}},
+		{name: "played free excluded", s: repository.LibrarySettings{IncludeUnvettedApps: true, IncludePlayedFreeGames: false}},
+		{name: "both excluded", s: repository.LibrarySettings{IncludeUnvettedApps: false, IncludePlayedFreeGames: false}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newSteamClient("fixture-steam-key", tc.s)
+			if client.SkipUnvettedApps != !tc.s.IncludeUnvettedApps {
+				t.Fatalf("SkipUnvettedApps = %v, want %v", client.SkipUnvettedApps, !tc.s.IncludeUnvettedApps)
+			}
+			if client.ExcludePlayedFreeGames != !tc.s.IncludePlayedFreeGames {
+				t.Fatalf("ExcludePlayedFreeGames = %v, want %v", client.ExcludePlayedFreeGames, !tc.s.IncludePlayedFreeGames)
+			}
+		})
+	}
+}
+
 func TestGetAppStateReportsKeyPresenceWithoutLeakingKey(t *testing.T) {
 	const secret = "fixture-steam-key-value"
 	app := newTestAppWithKey(t, secret)

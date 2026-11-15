@@ -236,7 +236,20 @@ var migrations = []migration{
 	{version: 10, name: "dlc_not_owned_sets", sql: dlcNotOwnedSetsSQL},
 	{version: 11, name: "purchased_games", sql: purchasedGamesSQL},
 	{version: 12, name: "profile_owned_games", sql: profileOwnedGamesSQL},
+	{version: 13, name: "profile_library_settings", sql: profileLibrarySettingsSQL},
 }
+
+// profileLibrarySettingsSQL stores the library sync options per profile. A profile without a row uses the
+// defaults (both on), so no backfill is needed. Rows are removed with their profile (see repository.ClearProfileData).
+const profileLibrarySettingsSQL = `
+CREATE TABLE IF NOT EXISTS profile_library_settings(
+  profile_id integer primary key,
+  include_unvetted_apps integer not null default 1,
+  include_played_free_games integer not null default 1,
+  updated_at text not null,
+  foreign key(profile_id) references profiles(id)
+);
+`
 
 // purchasedGamesSQL records whether the game is in the account's purchased list. Rows from before this
 // migration default to 0 (not known to be purchased) until the next owned-games sync sets the flag.

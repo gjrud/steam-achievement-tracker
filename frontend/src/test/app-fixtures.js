@@ -82,6 +82,7 @@ export function baseState() {
     dashboard: null,
     syncInProgress: false,
     initError: '',
+    settings: {includeUnvettedApps: true, includePlayedFreeGames: true},
     secretSetupCommand: 'secret-tool store service steam-achievement-tracker username steam-web-api-key'
   }
 }

@@ -28,7 +28,7 @@
     </div>
 
     <p class="muted">
-      This deletes this active profile, tracked games, achievement data, sync history, manual flags, and cached game images.
+      This deletes this active profile, tracked games, achievement data, sync history, manual flags, library sync settings, and cached game images.
       Secret Service API key and logs stay.
     </p>
 

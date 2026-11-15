@@ -55,6 +55,8 @@ func (r *Repository) SaveProfile(steamID64, displayName, avatarURL string) (*Pro
 // ClearProfileData deletes a profile and returns the image app ids whose cover_images rows were removed,
 // i.e. no remaining profile still displays them. Their cached image directories are safe to delete.
 // Image app ids still used by other profiles are not returned, so their covers stay on disk.
+// The profile's library settings row is deleted with the profile (it references profiles(id)); a profile
+// that is re-added starts from DefaultLibrarySettings.
 func (r *Repository) ClearProfileData(profileID int64) ([]int64, error) {
 	appIDs, err := r.profileAppIDs(profileID)
 	if err != nil {
@@ -77,6 +79,7 @@ func (r *Repository) ClearProfileData(profileID int64) ([]int64, error) {
 		`delete from game_snapshots where profile_id=?`,
 		`delete from profile_games where profile_id=?`,
 		`delete from sync_runs where profile_id=?`,
+		`delete from profile_library_settings where profile_id=?`,
 	} {
 		if _, err := tx.Exec(stmt, profileID); err != nil {
 			return nil, err

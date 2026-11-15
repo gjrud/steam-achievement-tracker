@@ -336,9 +336,18 @@ These flags are mainly for incomplete games that need local context. They are pr
 
 ![Manually flag games](docs/flag-games.gif)
 
+### Library sync options
+
+Open **Settings** to choose what a sync of the active profile loads. Settings are stored per profile: each profile has its own values, and a new profile starts with both options on:
+
+- **Include unvetted apps**: includes new Steam apps that Steam hides until they are vetted.
+- **Include played free games**: includes free-to-play games you played but did not buy. Off limits the library to purchased games.
+
+Changes apply on the next sync and do not start one. Turning an option off removes the games it excluded from the library on that sync, so they may be marked as no longer owned or disabled.
+
 ### Clear active user data
 
-Open **Settings** and click **Clear data**. The app asks you to type the shown profile identifier before clearing. This removes the active profile, tracked games, owned-game playtime and purchase status, achievement data, sync history, manual flags, profile-scoped tags, and cached covers for that profile. It does not remove the Secret Service API key or logs.
+Open **Settings** and click **Clear data**. The app asks you to type the shown profile identifier before clearing. This removes the active profile, tracked games, owned-game playtime and purchase status, achievement data, sync history, manual flags, profile-scoped tags, library sync settings, and cached covers for that profile. It does not remove the Secret Service API key or logs. Re-adding the profile starts with both library sync options on.
 
 ![Clear active user data](docs/clear-data.gif)
 
@@ -371,14 +380,15 @@ All app-owned files live under `~/.steam-achievement-tracker` unless noted. Dire
 
 | Table | Columns | Notes |
 | --- | --- | --- |
-| `settings` | `key` PK, `value` | App settings. Currently stores `active_profile_id`. |
-| `schema_migrations` | `version` PK, `name`, `applied_at` | Applied DB migrations. Current schema version is `12`. |
+| `settings` | `key` PK, `value` | App settings. Stores `active_profile_id`. |
+| `schema_migrations` | `version` PK, `name`, `applied_at` | Applied DB migrations. Current schema version is `13`. |
 | `game_sets` | `appid`, `groupid`, `name`, `dlcappid`, `sort_order`, `updated_at`; PK (`appid`, `groupid`) | Achievement set catalog per game. Group `0` is the base set; `dlcappid` ties a set to a DLC app. |
 | `cover_images` | `image_appid` PK, `kind`, `file_name`, `path`, `source_url`, `checked_at`, `downloaded_at` | Cover image per image app id (the game, or the DLC for DLC sets). `kind` is `library`, `hero`, `header` or `main`. |
 | `profiles` | `id` PK, `steam_id64` unique, `display_name`, `avatar_url`, `created_at`, `updated_at`, `last_synced_at` | Steam profiles known to the app. |
 | `games` | `appid` PK, `name`, `playtime_forever`, `purchased`, `has_achievements`, `achievement_status`, `disabled`, `disabled_reason`, `cover_path`, `cover_source_url`, `cover_checked_at`, `cover_downloaded_at`, `created_at`, `updated_at` | Shared Steam app metadata and cover cache metadata. `playtime_forever` and `purchased` are legacy columns (migrations 11 and 12): app code no longer reads or writes them; per-profile values are in `profile_owned_games`. `disabled`/`disabled_reason` are legacy/global fields; current manual disables are profile-scoped. |
 | `profile_games` | `profile_id`, `appid`, `groupid`, `total_achievements`, `unlocked_achievements`, `completion_percent`, `missing_avg_unlock`, `suggestion_score`, `is_completed`, `was_completed`, `newly_incomplete`, `sync_warning`, `last_error`, `last_error_at`, `last_synced_at`, `dlc_not_owned`; PK (`profile_id`, `appid`, `groupid`) | Per-profile entry progress and latest warning state. `dlc_not_owned` is `1` for a DLC-bound set the profile does not own. |
 | `profile_owned_games` | `profile_id`, `appid`, `playtime_forever`, `purchased`, `updated_at`; PK (`profile_id`, `appid`) | Per-profile playtime and purchase status for each owned game (migration 12). `purchased` is `1` when the game is in the profile's purchased list. |
+| `profile_library_settings` | `profile_id` PK (FK `profiles`), `include_unvetted_apps`, `include_played_free_games`, `updated_at` | Per-profile library sync options (migration 13). `1` or `0`; a profile with no row uses both on. Removed with its profile by Clear data. |
 | `achievements` | `appid`, `apiname`, `global_percent`, `updated_at`; PK (`appid`, `apiname`) | Per-game achievement catalog with global unlock percentage. |
 | `profile_achievements` | `profile_id`, `appid`, `apiname`, `unlocked`, `unlock_time`, `updated_at`; PK (`profile_id`, `appid`, `apiname`) | Per-profile achievement unlock state. |
 | `game_snapshots` | `id` PK, `profile_id`, `appid`, `total_achievements`, `unlocked_achievements`, `completion_percent`, `missing_avg_unlock`, `is_completed`, `synced_at` | Historical per-sync progress snapshots. |
@@ -387,6 +397,8 @@ All app-owned files live under `~/.steam-achievement-tracker` unless noted. Dire
 | `profile_game_tags` | `profile_id`, `appid`, `tag`, `score`, `reason`, `computed_at`; PK (`profile_id`, `appid`, `tag`) | Computed profile-scoped tags used by suggestion filters. Indexed by (`profile_id`, `tag`). |
 
 Migration 11 adds `games.purchased`. Migration 12 creates `profile_owned_games` and copies each profile entry's legacy `games.playtime_forever` and `games.purchased` values into it. The legacy purchased flag was global, so migration 12 copies it to every profile that has the game, even a profile that did not buy it, until that profile's next sync corrects it.
+
+Migration 13 creates `profile_library_settings`. It does not backfill rows: every profile starts with both library sync options on until it saves its own values.
 
 ```mermaid
 erDiagram
@@ -502,6 +514,12 @@ erDiagram
     text reason
     text computed_at
   }
+  PROFILE_LIBRARY_SETTINGS {
+    integer profile_id PK,FK
+    integer include_unvetted_apps
+    integer include_played_free_games
+    text updated_at
+  }
 
   PROFILES ||--o{ PROFILE_GAMES : tracks
   GAMES ||--o{ PROFILE_GAMES : appears_in
@@ -517,6 +535,7 @@ erDiagram
   GAMES ||--o{ PROFILE_GAME_FLAGS : flagged
   PROFILES ||--o{ PROFILE_GAME_TAGS : tags
   GAMES ||--o{ PROFILE_GAME_TAGS : tagged
+  PROFILES ||--o| PROFILE_LIBRARY_SETTINGS : configures
 ```
 
 ### Data sources
@@ -525,7 +544,7 @@ erDiagram
 | --- | --- |
 | `https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/` | Resolves Steam vanity names and `/id/<name>` profile URLs to SteamID64. Requires the API key. |
 | `https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/` | Loads profile display name and avatar URL for setup/confirmation. Requires the API key. |
-| `https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/` | Loads the public owned game list, app names, playtime, the library cover file name (`include_extended_appinfo`), and the purchased list for the active profile. Unvetted apps are included (`skip_unvetted_apps=false`). Called twice per sync: once with `include_played_free_games=true` (full library) and once with `include_played_free_games=false` (purchased list). A failure or unusable response from either call fails the sync run before any game is synced. Requires the API key and public game details. |
+| `https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/` | Loads the public owned game list, app names, playtime, the library cover file name (`include_extended_appinfo`), and the purchased list for the active profile. Unvetted apps are included by default (`skip_unvetted_apps=false`; `true` when that profile's **Include unvetted apps** is off; each profile uses its own setting from `profile_library_settings`). Called twice per sync by default: once with `include_played_free_games=true` (full library) and once with `include_played_free_games=false` (purchased list). With **Include played free games** off, it is called once, with `include_played_free_games=false`, and every game counts as purchased. A failure or unusable response from any call fails the sync run before any game is synced. Requires the API key and public game details. |
 | `https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/` | Loads each game's achievement schema. Requires the API key. |
 | `https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v1/` | Loads per-profile unlocked achievements and unlock times for a game. Requires the API key and accessible profile/game stats. |
 | `https://api.steampowered.com/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v0002/` | Loads global achievement unlock percentages used for rarity/missing-average calculations. |

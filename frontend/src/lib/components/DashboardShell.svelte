@@ -25,7 +25,9 @@
   export let viewFiltered = false
   export let gameActionLoading = false
   export let clearingData = false
+  export let savingSettings = false
   export let onSyncNow = () => {}
+  export let onSetLibrarySettings = () => {}
   export let onActiveViewChange = () => {}
   export let onViewSearch = () => {}
   export let onActiveTagFilter = () => {}
@@ -70,6 +72,6 @@
   {:else if activeView === 'disabled'}
     <DisabledView games={filteredDisabled} {viewSearch} {gameTitle} {gameWarning} {hasAchievements} {completionLabel} {pct} {formatPlaytime} {onRunGameAction} showDisabledReasonLabel={showDisabledReasonLabel} />
   {:else}
-    <SettingsView {state} {clearingData} onClearData={onClearData} />
+    <SettingsView {state} {clearingData} {savingSettings} onClearData={onClearData} onSetLibrarySettings={onSetLibrarySettings} />
   {/if}
 </main>

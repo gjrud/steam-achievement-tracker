@@ -8,6 +8,7 @@
     MarkGamePreviouslyCompleted,
     RetryAPIKey,
     SaveProfile,
+    SetLibrarySettings,
     SyncNow,
     ToggleGameMissingAchievementsInDLC,
     ValidateProfile
@@ -51,6 +52,7 @@
   let contextMenuEl = null
   let gameActionLoading = false
   let clearingData = false
+  let savingSettings = false
   let clearConfirmOpen = false
   let clearConfirmInput = ''
   const menuMargin = 12
@@ -163,6 +165,32 @@
         error = formatMessage(err)
         schedulePolling()
       }
+    }
+  }
+
+  // Settings only change what the next sync gathers; this does not start a sync.
+  async function saveLibrarySettings(includeUnvettedApps, includePlayedFreeGames) {
+    if (savingSettings) return
+    // Stop the sync poll first: a tick during the save would bump stateRequestToken and drop this result.
+    // schedulePolling() below restarts it if the sync is still running.
+    stopPolling()
+    const token = ++stateRequestToken
+    savingSettings = true
+    error = ''
+    pollError = false
+    try {
+      const nextState = await SetLibrarySettings(includeUnvettedApps, includePlayedFreeGames)
+      if (token === stateRequestToken) {
+        state = nextState
+        schedulePolling()
+      }
+    } catch (err) {
+      if (token === stateRequestToken) {
+        error = formatMessage(err)
+        schedulePolling()
+      }
+    } finally {
+      savingSettings = false
     }
   }
 
@@ -362,7 +390,9 @@
     {viewFiltered}
     {gameActionLoading}
     {clearingData}
+    {savingSettings}
     onSyncNow={syncNow}
+    onSetLibrarySettings={saveLibrarySettings}
     onActiveViewChange={changeView}
     onViewSearch={(value) => (viewSearch = value)}
     onActiveTagFilter={(value) => (activeTagFilter = value)}

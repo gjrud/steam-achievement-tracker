@@ -895,6 +895,87 @@ describe('App clear-data confirmation', () => {
   })
 })
 
+describe('App library sync settings', () => {
+  function settingsState(settings) {
+    return {...dashboardState(), settings}
+  }
+
+  test('saves toggled library settings and shows the returned state', async () => {
+    const setSettings = vi.fn(async (includeUnvettedApps, includePlayedFreeGames) => settingsState({includeUnvettedApps, includePlayedFreeGames}))
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => settingsState({includeUnvettedApps: true, includePlayedFreeGames: true})),
+      SetLibrarySettings: setSettings
+    })
+    const user = userEvent.setup()
+
+    render(App)
+    await user.click(await screen.findByRole('button', {name: 'Settings'}))
+    const unvetted = screen.getByRole('switch', {name: 'Include unvetted apps'})
+    const playedFree = screen.getByRole('switch', {name: 'Include played free games'})
+    expect(unvetted).toBeChecked()
+    expect(playedFree).toBeChecked()
+
+    await user.click(unvetted)
+
+    expect(setSettings).toHaveBeenLastCalledWith(false, true)
+    await waitFor(() => expect(unvetted).not.toBeChecked())
+    expect(playedFree).toBeChecked()
+
+    await user.click(playedFree)
+
+    expect(setSettings).toHaveBeenLastCalledWith(false, false)
+    await waitFor(() => expect(playedFree).not.toBeChecked())
+    expect(setSettings).toHaveBeenCalledTimes(2)
+    // Settings never start a sync, so the sync button stays idle.
+    expect(screen.getByRole('button', {name: 'Sync now'})).toBeEnabled()
+  })
+
+  test('ignores toggle clicks while the save is in flight', async () => {
+    let resolveSave
+    const setSettings = vi.fn(() => new Promise((resolve) => {
+      resolveSave = resolve
+    }))
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState()), SetLibrarySettings: setSettings})
+    const user = userEvent.setup()
+
+    render(App)
+    await user.click(await screen.findByRole('button', {name: 'Settings'}))
+    await user.click(screen.getByRole('switch', {name: 'Include unvetted apps'}))
+
+    const unvetted = screen.getByRole('switch', {name: 'Include unvetted apps'})
+    const playedFree = screen.getByRole('switch', {name: 'Include played free games'})
+    // Never `disabled`: that would dim the switch and drop focus mid-click.
+    expect(unvetted).toBeEnabled()
+    expect(unvetted).toHaveAttribute('aria-busy', 'true')
+    expect(playedFree).toHaveAttribute('aria-busy', 'true')
+
+    await user.click(playedFree)
+    expect(playedFree).toBeChecked()
+    expect(setSettings).toHaveBeenCalledTimes(1)
+
+    resolveSave(settingsState({includeUnvettedApps: false, includePlayedFreeGames: true}))
+    await waitFor(() => expect(unvetted).toHaveAttribute('aria-busy', 'false'))
+    expect(unvetted).not.toBeChecked()
+  })
+
+  test('shows the error and keeps the stored setting when saving fails', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState()),
+      SetLibrarySettings: rejecting()
+    })
+    const user = userEvent.setup()
+
+    render(App)
+    await user.click(await screen.findByRole('button', {name: 'Settings'}))
+    const unvetted = screen.getByRole('switch', {name: 'Include unvetted apps'})
+    await user.click(unvetted)
+
+    expect(await screen.findByText(failureMessage)).toBeInTheDocument()
+    await waitFor(() => expect(unvetted).toBeChecked())
+    expect(screen.getByRole('switch', {name: 'Include unvetted apps'})).toHaveAttribute('aria-busy', 'false')
+  })
+})
+
 // cardTagLabels returns the tag chip labels rendered on one game card, in display order.
 function cardTagLabels(card) {
   return Array.from(card.querySelectorAll('.tag-list .tag')).map((tag) => tag.textContent.trim())

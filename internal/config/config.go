@@ -6,7 +6,7 @@ const (
 	DataDirName   = ".steam-achievement-tracker"
 	DBFileName    = "steam-achievement-tracker.db"
 	KeyringUser   = "steam-web-api-key"
-	SchemaVersion = 12
+	SchemaVersion = 13
 )
 
 const SecretSetupCommand = `secret-tool store \

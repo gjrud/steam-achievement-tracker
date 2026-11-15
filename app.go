@@ -41,17 +41,18 @@ type App struct {
 }
 
 type AppState struct {
-	AppName            string                `json:"appName"`
-	DataDir            string                `json:"dataDir"`
-	LogFile            string                `json:"logFile"`
-	APIKeyPresent      bool                  `json:"apiKeyPresent"`
-	APIKeyError        string                `json:"apiKeyError"`
-	SecretSetupCommand string                `json:"secretSetupCommand"`
-	ProfileExists      bool                  `json:"profileExists"`
-	Profile            *repository.Profile   `json:"profile"`
-	Dashboard          *repository.Dashboard `json:"dashboard"`
-	SyncInProgress     bool                  `json:"syncInProgress"`
-	InitError          string                `json:"initError"`
+	AppName            string                     `json:"appName"`
+	DataDir            string                     `json:"dataDir"`
+	LogFile            string                     `json:"logFile"`
+	APIKeyPresent      bool                       `json:"apiKeyPresent"`
+	APIKeyError        string                     `json:"apiKeyError"`
+	SecretSetupCommand string                     `json:"secretSetupCommand"`
+	ProfileExists      bool                       `json:"profileExists"`
+	Profile            *repository.Profile        `json:"profile"`
+	Dashboard          *repository.Dashboard      `json:"dashboard"`
+	Settings           repository.LibrarySettings `json:"settings"`
+	SyncInProgress     bool                       `json:"syncInProgress"`
+	InitError          string                     `json:"initError"`
 }
 
 type ProfilePreview struct {
@@ -111,6 +112,7 @@ func (a *App) GetAppState() (AppState, error) {
 
 	var profile *repository.Profile
 	var dashboard *repository.Dashboard
+	settings := repository.DefaultLibrarySettings()
 	if repo != nil {
 		p, err := repo.ActiveProfile()
 		if err != nil {
@@ -118,6 +120,11 @@ func (a *App) GetAppState() (AppState, error) {
 		}
 		profile = p
 		if p != nil {
+			s, err := repo.LibrarySettings(p.ID)
+			if err != nil {
+				return AppState{}, err
+			}
+			settings = s
 			d, err := repo.Dashboard(p.ID)
 			if err != nil {
 				return AppState{}, err
@@ -136,7 +143,21 @@ func (a *App) GetAppState() (AppState, error) {
 	state.APIKeyError = apiKeyError
 	state.SyncInProgress = syncInProgress
 	state.InitError = initError
+	state.Settings = settings
 	return state, nil
+}
+
+// SetLibrarySettings saves the library sync options of the active profile. They apply on the next sync of that
+// profile; this does not start one.
+func (a *App) SetLibrarySettings(includeUnvettedApps, includePlayedFreeGames bool) (AppState, error) {
+	repo, profile, err := a.activeRepoAndProfile()
+	if err != nil {
+		return AppState{}, err
+	}
+	if err := repo.SaveLibrarySettings(profile.ID, repository.LibrarySettings{IncludeUnvettedApps: includeUnvettedApps, IncludePlayedFreeGames: includePlayedFreeGames}); err != nil {
+		return AppState{}, err
+	}
+	return a.GetAppState()
 }
 
 func (a *App) RetryAPIKey() (AppState, error) {
@@ -420,9 +441,14 @@ func (a *App) startSync(force bool) error {
 		done()
 		return errors.New("no active profile")
 	}
+	client, err := steamClientForProfile(repo, key, profile.ID)
+	if err != nil {
+		done()
+		return err
+	}
 	go func(p repository.Profile) {
 		defer done()
-		service := syncer.Service{Repo: repo, Steam: steam.New(key), Images: images.New(paths)}
+		service := syncer.Service{Repo: repo, Steam: client, Images: images.New(paths)}
 		if _, err := service.FullSync(syncCtx, p); err != nil {
 			log.Printf("full sync failed: %v", err)
 		}
@@ -459,8 +485,25 @@ func (a *App) baseState(profile *repository.Profile, dashboard *repository.Dashb
 	return AppState{
 		AppName: config.AppName, DataDir: paths.Root, LogFile: paths.LogFile, APIKeyPresent: apiKeyPresent, APIKeyError: apiKeyError,
 		SecretSetupCommand: config.SecretSetupCommand, ProfileExists: profile != nil, Profile: profile,
-		Dashboard: dashboard, SyncInProgress: syncInProgress, InitError: initError,
+		Dashboard: dashboard, Settings: repository.DefaultLibrarySettings(), SyncInProgress: syncInProgress, InitError: initError,
 	}
+}
+
+// steamClientForProfile builds the Steam client for a sync of profileID, using that profile's library settings.
+func steamClientForProfile(repo *repository.Repository, key string, profileID int64) (*steam.Client, error) {
+	s, err := repo.LibrarySettings(profileID)
+	if err != nil {
+		return nil, err
+	}
+	return newSteamClient(key, s), nil
+}
+
+// newSteamClient builds the Steam client for a sync. Library settings map to the client's inverted flags.
+func newSteamClient(key string, s repository.LibrarySettings) *steam.Client {
+	client := steam.New(key)
+	client.SkipUnvettedApps = !s.IncludeUnvettedApps
+	client.ExcludePlayedFreeGames = !s.IncludePlayedFreeGames
+	return client
 }
 
 func (a *App) context() context.Context {
