@@ -773,8 +773,16 @@
 
   .grid-more {
     display: flex;
-    justify-content: center;
+    flex-direction: column;
+    align-items: center;
     margin: 18px 0 8px;
+    /* The spacer height changes as cards load; keep the browser from adjusting scroll to follow it. */
+    overflow-anchor: none;
+  }
+
+  .grid-spacer {
+    width: 100%;
+    flex: none;
   }
 
   .grid-more button {
