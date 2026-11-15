@@ -168,9 +168,14 @@ tasks:
     dir: build
     cmds:
       - mkdir -p {{.ROOT_DIR}}/build/linux/appimage
-      - wails3 generate .desktop -name "{{.APP_NAME}}" -exec "{{.EXEC}}" -icon "{{.ICON}}" -outputfile "{{.ROOT_DIR}}/build/linux/{{.APP_NAME}}.desktop" -categories "{{.CATEGORIES}}"
+      - wails3 generate .desktop -name "{{.DISPLAY_NAME}}" -exec "{{.EXEC}}" -icon "{{.ICON}}" -comment "{{.COMMENT}}" -keywords "{{.KEYWORDS}}" -outputfile "{{.ROOT_DIR}}/build/linux/{{.APP_NAME}}.desktop" -categories "{{.CATEGORIES}}"
     vars:
       APP_NAME: '{{.APP_NAME}}'
+      # Human-readable menu name. The file name and Icon= stay the executable name, which is also the Wayland app_id
+      # (Linux.ProgramName in main.go), so the shell matches windows to this entry and its icon.
+      DISPLAY_NAME: 'Steam Achievement Tracker'
+      COMMENT: 'Track Steam achievement progress for your public library'
+      KEYWORDS: 'steam;achievements;games;'
       EXEC: '{{.APP_NAME}}'
       ICON: '{{.APP_NAME}}'
       CATEGORIES: 'Game;Utility;'

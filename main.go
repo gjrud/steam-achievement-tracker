@@ -20,7 +20,10 @@ func main() {
 	app := application.New(application.Options{
 		Name:        "steam-achievement-tracker",
 		Description: "Track Steam achievement progress for your public library",
-		Icon:        icon,
+		// On GTK4 this does not set the window or taskbar icon (GTK4 removed that API). The shell takes the icon from
+		// the installed .desktop file's Icon= entry (see build/linux/Taskfile.yml and nfpm.yaml). It is kept for
+		// dialogs and for the app-level default.
+		Icon: icon,
 		// Wails warnings and errors (service shutdown, asset errors, failed bound calls) go to the app log file. Setting
 		// Logger replaces Wails's default: LogLevel is ignored and the default release logger, which discards
 		// everything, is not used. See newWailsLogger for the level.

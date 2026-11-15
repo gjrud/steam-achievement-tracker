@@ -84,36 +84,19 @@ Use `wails3 doctor` to check local Wails dependencies.
 
 Install GTK/WebKit runtime libraries, a Secret Service provider, and `secret-tool` for your distribution.
 
-### 2. Install the app binary and desktop icon
+### 2. Install the app
 
-Download the release artifact for Linux, then install the executable and Linux desktop metadata:
+Install the Linux package for your distribution (deb, rpm, or Arch), or run the AppImage. The packages install the binary, the `.desktop` entry, and the hicolor app icons (`scalable` SVG and 1024x1024 PNG). The desktop shell takes the window and taskbar icon from that entry, because GTK4 has no API to set it from the app.
 
-```sh
-./scripts/install-linux-user.sh install ./steam-achievement-tracker
-```
-
-If you build from source, the production binary is created at `bin/steam-achievement-tracker`; install it with:
+If you build from source, create the packages in `bin/` and install one with your package manager:
 
 ```sh
-wails3 build
-./scripts/install-linux-user.sh install
+wails3 package
 ```
 
-The script installs:
+A bare `bin/steam-achievement-tracker` from `wails3 build` runs fine but has no menu entry or icon until it is installed through a package.
 
-- `~/.local/bin/steam-achievement-tracker`
-- `~/.local/share/applications/steam-achievement-tracker.desktop`
-- hicolor app icons under `~/.local/share/icons/hicolor/`
-
-Launch from the app menu after install so the window manager can associate the window with the desktop icon.
-
-To uninstall the binary, desktop entry, and icons:
-
-```sh
-./scripts/install-linux-user.sh uninstall
-```
-
-Uninstall keeps `~/.steam-achievement-tracker` and the Secret Service API key.
+Uninstalling through the package manager keeps `~/.steam-achievement-tracker` and the Secret Service API key.
 
 ### 3. Store the Steam Web API key
 

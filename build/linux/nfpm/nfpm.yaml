@@ -19,8 +19,12 @@ release: "1"
 contents:
   - src: "./bin/steam-achievement-tracker"
     dst: "/usr/local/bin/steam-achievement-tracker"
+  # Icon= in the .desktop file is the bare name "steam-achievement-tracker"; the icon theme resolves it from hicolor.
+  # The SVG scales to any size; the 1024x1024 PNG is the fallback for consumers without SVG support.
+  - src: "./build/appicon.svg"
+    dst: "/usr/share/icons/hicolor/scalable/apps/steam-achievement-tracker.svg"
   - src: "./build/appicon.png"
-    dst: "/usr/share/icons/hicolor/128x128/apps/steam-achievement-tracker.png"
+    dst: "/usr/share/icons/hicolor/1024x1024/apps/steam-achievement-tracker.png"
   - src: "./build/linux/steam-achievement-tracker.desktop"
     dst: "/usr/share/applications/steam-achievement-tracker.desktop"
 
