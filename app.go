@@ -21,6 +21,7 @@ import (
 	"github.com/gjrud/steam-achievement-tracker/internal/repository"
 	"github.com/gjrud/steam-achievement-tracker/internal/steam"
 	"github.com/gjrud/steam-achievement-tracker/internal/syncer"
+	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 // errSyncAlreadyInProgress is startSync's error for a forced start while a sync is running.
@@ -101,6 +102,20 @@ func (a *App) shutdown(ctx context.Context) {
 	if repo != nil {
 		_ = repo.Close()
 	}
+}
+
+// ServiceStartup is the Wails v3 service startup hook. Wails calls it before the first window opens. Its name is
+// reserved by the binding engine, so the frontend never sees it as a bound method.
+func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) error {
+	a.startup(ctx)
+	return nil
+}
+
+// ServiceShutdown is the Wails v3 service shutdown hook. Wails calls it after the window has closed. It is not bound
+// to the frontend.
+func (a *App) ServiceShutdown() error {
+	a.shutdown(context.Background())
+	return nil
 }
 
 func (a *App) GetAppState() (AppState, error) {
