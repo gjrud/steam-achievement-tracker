@@ -5,5 +5,5 @@ unleash:
   timeout-coefficient: 20
   exclude-files:
     - "^frontend/"
-    - "wailsjs"
+    - "bindings"
     - "^main\\.go$"

@@ -14,7 +14,7 @@ permissions:
 
 env:
   # Keep in sync with the wails version in go.mod.
-  WAILS_VERSION: v2.17.1
+  WAILS_VERSION: v3.1.0
 
 jobs:
   test:
@@ -33,29 +33,29 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      # CGO deps for Wails (GTK3 + WebKit2GTK 4.1 + libsoup 3) and go-sqlite3.
+      # CGO deps for Wails v3 on Linux (GTK4 + WebKitGTK 6.0) and go-sqlite3.
       - name: Install system packages
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev
+            build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev
 
       - name: Install frontend dependencies
         run: npm ci
         working-directory: frontend
 
-      # frontend/wailsjs (git-ignored) is needed by the frontend build and by the
+      # frontend/bindings (git-ignored) is needed by the frontend build and by the
       # mock drift check, but generating it compiles the Go app, whose main.go
       # embeds frontend/dist. Break the cycle with a placeholder dist; the real
       # build below overwrites it.
       - name: Install Wails CLI
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
 
       - name: Generate Wails bindings
         run: |
           mkdir -p frontend/dist
           touch frontend/dist/.gitkeep
-          wails generate module -tags webkit2_41
+          wails3 generate bindings
 
       - name: Build frontend
         run: npm run build
@@ -66,8 +66,8 @@ jobs:
         working-directory: frontend
 
       - name: Go vet
-        run: go vet -tags webkit2_41 ./...
+        run: go vet ./...
 
       # Race detector on: some tests only catch regressions under -race.
       - name: Go tests
-        run: go test -race -tags webkit2_41 ./...
+        run: go test -race ./...

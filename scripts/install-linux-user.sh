@@ -16,7 +16,7 @@ Usage:
   $0 uninstall
 
 Defaults:
-  install binary: $ROOT_DIR/build/bin/$APP_ID
+  install binary: $ROOT_DIR/bin/$APP_ID
 
 Uninstall removes app binary, desktop entry, and icons.
 It does not remove ~/.steam-achievement-tracker or Secret Service keys.
@@ -34,11 +34,11 @@ refresh_caches() {
 }
 
 install_app() {
-	BINARY_SOURCE="${1:-$ROOT_DIR/build/bin/$APP_ID}"
+	BINARY_SOURCE="${1:-$ROOT_DIR/bin/$APP_ID}"
 
 	if [ ! -f "$BINARY_SOURCE" ]; then
 		printf '%s\n' "Missing binary: $BINARY_SOURCE" >&2
-		printf '%s\n' "Run: wails build" >&2
+		printf '%s\n' "Run: wails3 build" >&2
 		exit 1
 	fi
 
