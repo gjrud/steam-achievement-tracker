@@ -235,10 +235,11 @@ The header shows the app title, the profile card, and five counters in three lab
 - **Completed** group:
   - **Completed games**: count excluding disabled games. A game counts when its base achievement set is completed. A game with only a completed DLC set does not count, and neither does a game whose base set is not listed for the profile (for example, a game whose achievements all belong to named or DLC sets).
   - **Completed sets**: count excluding disabled games and sets. Each completed set (base, named, or DLC) counts separately.
+  - When at least one counted game or set is unvetted (see **Include unvetted apps** in [Library sync options](#library-sync-options)), the counter reads `<vetted> (<total>)`, with the vetted count in green, for example `12 (15)`. A set follows the vetted state of its game. Each counter decides on its own, so one can show both numbers while the other shows only its total. When nothing counted is unvetted, only the total is shown.
 - **Unlocked** group:
   - **Achievements**: unlocked achievement count, excluding disabled games.
 
-The profile card shows the avatar, the profile name, and the **Sync now** button. Below them, a status line shows the current or latest sync (a colored dot: blue while running, green on success, amber for partial or failed, grey when no sync has run yet) with its per-game progress.
+The profile card shows the avatar, the profile name, and the **Sync now** button. Below them, a status line shows the current or latest sync (a colored dot: blue while running, green on success, amber for partial or failed, grey when no sync has run yet). The date and time of the sync (`Started <date>` while it runs) sit on their own line under the status, followed by its per-game progress.
 
 The main tabs are **Not completed**, **Completed**, **Sync errors**, **Disabled**, and **Settings**, drawn as folder tabs with the active tab raised. Below 1180 px wide the header stacks (title, profile card, one row of counters, tabs) and the tabs wrap without a baseline.
 
@@ -247,7 +248,7 @@ The main tabs are **Not completed**, **Completed**, **Sync errors**, **Disabled*
 Steam groups achievements into sets. A game with several sets (for example Team Fortress 2 classes, or a game with DLC) shows **one card per set** instead of one card for the whole game:
 
 - A set is completed on its own. A completed set moves to **Completed** while its unfinished siblings stay in **Not completed**.
-- Sets are named after the game when Steam does not name them, for example `Team Fortress 2 – Scout`. The card title shows the set name, a **Set** tag marks every set other than the game's base set, and a **DLC** tag marks sets that belong to a DLC. A card lists its tags in the same order as the filter chips (see [Tags and sorting](#tags-and-sorting)), so **Set** and **DLC** appear after the status tags and before **Missing cover art** and **Sync error**.
+- Sets are named after the game when Steam does not name them, for example `Team Fortress 2 – Scout`. The card title shows the set name, a **Set** tag marks every set other than the game's base set, and a **DLC** tag marks sets that belong to a DLC. A card lists its tags in the same order as the filter chips (see [Tags and sorting](#tags-and-sorting)), so **Set** and **DLC** appear after the progress tags and the other grey tags, and before the red issue tags (**Not owned**, **Achievements in DLC**, **Missing cover art**, **Sync error**).
 - **DLC** sets (sets tied to a DLC app) are shown whether or not you own the DLC. A set for DLC you do not own is tagged **Not owned**, sits in **Not completed** with no progress tags, and is left out of the overall achievement totals, so it does not lower your overall completion percentage. Once you own the DLC, the next sync removes the tag and counts the set normally.
 - Achievements marked **archived** by Steam are not counted toward a set's total or completion. Locked archived achievements never block completion.
 - Set cards show the same playtime as their game, because Steam reports playtime per game.
@@ -278,7 +279,7 @@ This view lists non-disabled games that are not currently complete. Cards show c
 
 ![Not completed view](docs/not-completed.gif)
 
-Suggestion tags include **New achievements added**, **Almost there**, **In progress**, **Untouched**, **Not owned**, **Achievements in DLC**, **No achievements**, **Set**, **DLC**, **Missing cover art**, and **Sync error**. Use the search box to filter by title and the tag chips to filter the **Not completed** and **Completed** lists. Each chip shows how many cards match it.
+Suggestion tags include **New achievements added**, **Almost there**, **In progress**, **Untouched**, **Unvetted**, **No achievements**, **Set**, **DLC**, **Not owned**, **Achievements in DLC**, **Missing cover art**, and **Sync error**. Use the search box to filter by title and the tag chips to filter the **Not completed** and **Completed** lists. Each chip shows how many cards match it.
 
 #### Tags and sorting
 
@@ -291,7 +292,7 @@ The **Not completed** list is sorted to surface likely finishable games first:
 
 A set that is both **Not owned** and flagged **Achievements in DLC** is listed in group 2.
 
-The tag filter chips and the tags shown on each card use the same order: **New achievements added**, **Almost there**, **In progress**, **Untouched**, **Not owned**, **Achievements in DLC**, **No achievements**, **Set**, **DLC**, **Missing cover art**, **Sync error**. On a completed card, **Completed** comes first, then the rest in that order. Tags the app does not recognize, if any, are shown last in their stored order. The chips appear in both **Not completed** and **Completed**, and each view lists only the tags that at least one of its cards carries. The active tag chip resets whenever you switch views; search still applies.
+The tag filter chips and the tags shown on each card use the same order: **New achievements added**, **Almost there**, **In progress**, **Untouched**, **Unvetted**, **No achievements**, **Set**, **DLC**, **Not owned**, **Achievements in DLC**, **Missing cover art**, **Sync error**. The grey informational tags (**Untouched**, **Unvetted**, **No achievements**, **Set**, **DLC**) sit together right after the progress tags. On a completed card, **Completed** comes first, then the rest in that order. Tags the app does not recognize, if any, are shown last in their stored order. The chips appear in both **Not completed** and **Completed**, and each view lists only the tags that at least one of its cards carries. The active tag chip resets whenever you switch views; search still applies.
 
 Within active achievement games, the app sorts by suggestion score, highest first. Suggestion score is based on completion percentage and, when Steam global achievement percentages are available, the average unlock rate of the achievements you are missing. Games with a score of `40` or higher get the **Almost there** tag; other started games get **In progress**.
 
@@ -301,6 +302,7 @@ Tag meanings:
 - **Almost there**: the suggestion score is at least `40`.
 - **In progress**: the game has progress, but its suggestion score is below the **Almost there** threshold.
 - **Untouched**: the game has no recorded playtime.
+- **Unvetted**: Steam has not vetted the app yet (a new app that Steam hides from the owned-games list unless **Include unvetted apps** is on). Shown on every card of such a game, including its set and DLC cards, and filterable. It also appears on completed cards. The tag clears on the next sync after Steam vets the app. A game that left the library (for example after turning **Include unvetted apps** off) is disabled as no longer owned and keeps its last known state, so it may still show the tag in **Disabled**.
 - **No achievements**: Steam reports no achievements for the game.
 - **Set**: the card is any achievement set other than the game's base set. Shown on every such card and filterable. A DLC set carries both **Set** and **DLC**.
 - **DLC**: the set belongs to a DLC app. Shown on every DLC set card and filterable.
@@ -344,7 +346,7 @@ These flags are mainly for incomplete games that need local context. They are pr
 
 Open **Settings** to choose what a sync of the active profile loads. Settings are stored per profile: each profile has its own values, and a new profile starts with both options on:
 
-- **Include unvetted apps**: includes new Steam apps that Steam hides until they are vetted.
+- **Include unvetted apps**: includes new Steam apps that Steam hides until they are vetted. With it on, each sync also asks Steam for the vetted list, so the app can tell which games are unvetted: those get the **Unvetted** tag and are counted separately in the **Completed** counters. With it off, every game is vetted.
 - **Include played free games**: includes free-to-play games you played but did not buy. Off limits the library to purchased games.
 
 Changes apply on the next sync and do not start one. Turning an option off removes the games it excluded from the library on that sync, so they may be marked as no longer owned or disabled.
@@ -385,13 +387,13 @@ All app-owned files live under `~/.steam-achievement-tracker` unless noted. Dire
 | Table | Columns | Notes |
 | --- | --- | --- |
 | `settings` | `key` PK, `value` | App settings. Stores `active_profile_id`. |
-| `schema_migrations` | `version` PK, `name`, `applied_at` | Applied DB migrations. Current schema version is `13`. |
+| `schema_migrations` | `version` PK, `name`, `applied_at` | Applied DB migrations. Current schema version is `14`. |
 | `game_sets` | `appid`, `groupid`, `name`, `dlcappid`, `sort_order`, `updated_at`; PK (`appid`, `groupid`) | Achievement set catalog per game. Group `0` is the base set; `dlcappid` ties a set to a DLC app. |
 | `cover_images` | `image_appid` PK, `kind`, `file_name`, `path`, `source_url`, `checked_at`, `downloaded_at` | Cover image per image app id (the game, or the DLC for DLC sets). `kind` is `library`, `hero`, `header` or `main`. |
 | `profiles` | `id` PK, `steam_id64` unique, `display_name`, `avatar_url`, `created_at`, `updated_at`, `last_synced_at` | Steam profiles known to the app. |
 | `games` | `appid` PK, `name`, `playtime_forever`, `purchased`, `has_achievements`, `achievement_status`, `disabled`, `disabled_reason`, `cover_path`, `cover_source_url`, `cover_checked_at`, `cover_downloaded_at`, `created_at`, `updated_at` | Shared Steam app metadata and cover cache metadata. `playtime_forever` and `purchased` are legacy columns (migrations 11 and 12): app code no longer reads or writes them; per-profile values are in `profile_owned_games`. `disabled`/`disabled_reason` are legacy/global fields; current manual disables are profile-scoped. |
 | `profile_games` | `profile_id`, `appid`, `groupid`, `total_achievements`, `unlocked_achievements`, `completion_percent`, `missing_avg_unlock`, `suggestion_score`, `is_completed`, `was_completed`, `newly_incomplete`, `sync_warning`, `last_error`, `last_error_at`, `last_synced_at`, `dlc_not_owned`; PK (`profile_id`, `appid`, `groupid`) | Per-profile entry progress and latest warning state. `dlc_not_owned` is `1` for a DLC-bound set the profile does not own. |
-| `profile_owned_games` | `profile_id`, `appid`, `playtime_forever`, `purchased`, `updated_at`; PK (`profile_id`, `appid`) | Per-profile playtime and purchase status for each owned game (migration 12). `purchased` is `1` when the game is in the profile's purchased list. |
+| `profile_owned_games` | `profile_id`, `appid`, `playtime_forever`, `purchased`, `vetted`, `updated_at`; PK (`profile_id`, `appid`) | Per-profile playtime, purchase status and vetted status for each owned game (migrations 12 and 14). `purchased` is `1` when the game is in the profile's purchased list. `vetted` is `0` when Steam returns the app only with unvetted apps included; it defaults to `1`. |
 | `profile_library_settings` | `profile_id` PK (FK `profiles`), `include_unvetted_apps`, `include_played_free_games`, `updated_at` | Per-profile library sync options (migration 13). `1` or `0`; a profile with no row uses both on. Removed with its profile by Clear data. |
 | `achievements` | `appid`, `apiname`, `global_percent`, `updated_at`; PK (`appid`, `apiname`) | Per-game achievement catalog with global unlock percentage. |
 | `profile_achievements` | `profile_id`, `appid`, `apiname`, `unlocked`, `unlock_time`, `updated_at`; PK (`profile_id`, `appid`, `apiname`) | Per-profile achievement unlock state. |
@@ -403,6 +405,8 @@ All app-owned files live under `~/.steam-achievement-tracker` unless noted. Dire
 Migration 11 adds `games.purchased`. Migration 12 creates `profile_owned_games` and copies each profile entry's legacy `games.playtime_forever` and `games.purchased` values into it. The legacy purchased flag was global, so migration 12 copies it to every profile that has the game, even a profile that did not buy it, until that profile's next sync corrects it.
 
 Migration 13 creates `profile_library_settings`. It does not backfill rows: every profile starts with both library sync options on until it saves its own values.
+
+Migration 14 adds `profile_owned_games.vetted` (default `1`). Existing rows count as vetted until the profile's next sync sets the real value.
 
 ```mermaid
 erDiagram
@@ -462,6 +466,7 @@ erDiagram
     integer appid PK,FK
     integer playtime_forever
     integer purchased
+    integer vetted
     text updated_at
   }
   ACHIEVEMENTS {
@@ -548,7 +553,7 @@ erDiagram
 | --- | --- |
 | `https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/` | Resolves Steam vanity names and `/id/<name>` profile URLs to SteamID64. Requires the API key. |
 | `https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/` | Loads profile display name and avatar URL for setup/confirmation. Requires the API key. |
-| `https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/` | Loads the public owned game list, app names, playtime, the library cover file name (`include_extended_appinfo`), and the purchased list for the active profile. Unvetted apps are included by default (`skip_unvetted_apps=false`; `true` when that profile's **Include unvetted apps** is off; each profile uses its own setting from `profile_library_settings`). Called twice per sync by default: once with `include_played_free_games=true` (full library) and once with `include_played_free_games=false` (purchased list). With **Include played free games** off, it is called once, with `include_played_free_games=false`, and every game counts as purchased. A failure or unusable response from any call fails the sync run before any game is synced. Requires the API key and public game details. |
+| `https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/` | Loads the public owned game list, app names, playtime, the library cover file name (`include_extended_appinfo`), and the purchased list for the active profile. Unvetted apps are included by default (`skip_unvetted_apps=false`; `true` when that profile's **Include unvetted apps** is off; each profile uses its own setting from `profile_library_settings`). Called three times per sync by default: once with `include_played_free_games=true` (full library), once with `include_played_free_games=false` (purchased list), and once with `skip_unvetted_apps=true` and the same `include_played_free_games` value as the full-library call (vetted list; a game missing from it is unvetted). With **Include played free games** off, the full list and the purchased list are one call with `include_played_free_games=false`, and every game counts as purchased. With **Include unvetted apps** off, the vetted-list call is skipped and every game counts as vetted. A failure or unusable response from any call fails the sync run before any game is synced. Requires the API key and public game details. |
 | `https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/` | Loads each game's achievement schema. Requires the API key. |
 | `https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v1/` | Loads per-profile unlocked achievements and unlock times for a game. Requires the API key and accessible profile/game stats. |
 | `https://api.steampowered.com/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v0002/` | Loads global achievement unlock percentages used for rarity/missing-average calculations. |

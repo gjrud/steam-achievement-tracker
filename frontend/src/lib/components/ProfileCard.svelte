@@ -1,10 +1,11 @@
 <script>
-  import {syncDetails, syncTitle} from '../sync.js'
+  import {syncDetails, syncTime, syncTitle} from '../sync.js'
   export let state
   export let latestSyncRun = null
   export let syncIsRunning = false
   export let onSyncNow = () => {}
 
+  $: syncTimeText = syncTime(latestSyncRun, syncIsRunning)
   $: syncTone = syncIsRunning
     ? 'run'
     : !latestSyncRun
@@ -21,6 +22,7 @@
   <div class="profile-sync" aria-live="polite">
     <span class={`sync-dot ${syncTone}`} aria-hidden="true"></span>
     <p class="sync-line"><span class="sr-only">{syncIsRunning ? 'Current sync' : 'Last sync'}</span>{' '}{syncTitle(latestSyncRun, syncIsRunning)}</p>
+    {#if syncTimeText}<small class="sync-detail sync-time">{syncTimeText}</small>{/if}
     <small class="sync-detail">{syncDetails(latestSyncRun, syncIsRunning)}</small>
   </div>
 </div>

@@ -121,7 +121,9 @@ export function dashboardState(overrides = {}) {
         ownedGamesCount: 6,
         purchasedGamesCount: 5,
         completedGamesCount: completed.length,
+        completedGamesVettedCount: completed.length,
         completedSetsCount: completed.length,
+        completedSetsVettedCount: completed.length,
         totalAchievementsUnlocked: 180
       },
       latestSyncRun: overrides.latestSyncRun ?? {
@@ -167,6 +169,7 @@ export function game(overrides = {}) {
     manualWasCompleted: false,
     missingAchievementsInDLC: false,
     dlcNotOwned: false,
+    unvetted: false,
     isCompleted: false,
     ...overrides
   }

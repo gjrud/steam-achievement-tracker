@@ -7,8 +7,8 @@ import (
 )
 
 // entryBaseFromSQL joins one profile entry with its game, set catalog row, manual flags and the profile's
-// owned-game facts (po: playtime and purchased flag). po is left-joined, so an entry with no po row reads as
-// zero playtime and not purchased (coalesce in the select lists).
+// owned-game facts (po: playtime, purchased and vetted flags). po is left-joined, so an entry with no po row
+// reads as zero playtime, not purchased and vetted (coalesce in the select lists).
 const entryBaseFromSQL = `from profile_games pg
 		join games g on g.appid=pg.appid
 		left join game_sets gs on gs.appid=pg.appid and gs.groupid=pg.groupid
@@ -51,9 +51,12 @@ func (r *Repository) Dashboard(profileID int64) (Dashboard, error) {
 // completed. OwnedGamesCount, GamesWithAchievementsCount and PurchasedGamesCount count distinct enabled apps.
 // PurchasedGamesCount reads the profile's own purchased flag (profile_owned_games), so each profile counts its
 // own purchases.
+// CompletedSetsVettedCount and CompletedGamesVettedCount apply the same filters to the vetted subset: entries
+// whose app is in the profile's vetted list (profile_owned_games.vetted=1). They are at most the matching totals.
 // Newly-incomplete counts entries. Unlocked/available sums are per entry; entries partition an app's
 // achievements, so totals are not double counted. Entries of DLC the profile does not own are left out of
 // the unlocked/available sums, so the overall percentage reflects owned content only.
+// A DLC/named set follows its base app's vetted state (it shares the base app's profile_owned_games row).
 func (r *Repository) Summary(profileID int64) (Summary, error) {
 	var s Summary
 	row := r.db.QueryRow(`select
@@ -65,9 +68,11 @@ func (r *Repository) Summary(profileID int64) (Summary, error) {
 		coalesce(count(distinct case when coalesce(f.disabled,0)=0 and g.has_achievements=1 then pg.appid end),0),
 		coalesce(sum(case when coalesce(f.disabled,0)=0 and pg.dlc_not_owned=0 then pg.unlocked_achievements else 0 end),0),
 		coalesce(sum(case when coalesce(f.disabled,0)=0 and pg.dlc_not_owned=0 then pg.total_achievements else 0 end),0),
-		coalesce(sum(case when coalesce(f.disabled,0)=0 and pg.newly_incomplete=1 then 1 else 0 end),0)
+		coalesce(sum(case when coalesce(f.disabled,0)=0 and pg.newly_incomplete=1 then 1 else 0 end),0),
+		coalesce(sum(case when pg.is_completed=1 and coalesce(f.disabled,0)=0 and coalesce(po.vetted,1)=1 then 1 else 0 end),0),
+		coalesce(count(distinct case when pg.groupid=0 and pg.is_completed=1 and coalesce(f.disabled,0)=0 and coalesce(po.vetted,1)=1 then pg.appid end),0)
 		`+entryBaseFromSQL+` where pg.profile_id=?`, profileID)
-	if err := row.Scan(&s.CompletedSetsCount, &s.CompletedGamesCount, &s.PurchasedGamesCount, &s.TotalUnlockedCount, &s.OwnedGamesCount, &s.GamesWithAchievementsCount, &s.TotalAchievementsUnlocked, &s.TotalAchievementsAvailable, &s.NewlyIncompleteGamesCount); err != nil {
+	if err := row.Scan(&s.CompletedSetsCount, &s.CompletedGamesCount, &s.PurchasedGamesCount, &s.TotalUnlockedCount, &s.OwnedGamesCount, &s.GamesWithAchievementsCount, &s.TotalAchievementsUnlocked, &s.TotalAchievementsAvailable, &s.NewlyIncompleteGamesCount, &s.CompletedSetsVettedCount, &s.CompletedGamesVettedCount); err != nil {
 		return s, err
 	}
 	if s.TotalAchievementsAvailable > 0 {
@@ -85,7 +90,7 @@ func (r *Repository) GameCards(profileID int64, filter string) ([]GameCard, erro
 		coalesce(ci.image_appid,0), coalesce(ci.kind,''), coalesce(ci.file_name,''), coalesce(ci.path,''), ci.downloaded_at,
 		g.has_achievements, g.achievement_status,
 		pg.total_achievements, pg.unlocked_achievements, pg.completion_percent, pg.missing_avg_unlock, pg.suggestion_score, pg.is_completed, pg.was_completed, pg.newly_incomplete, pg.sync_warning, pg.last_error, pg.last_error_at, pg.last_synced_at,
-		coalesce(f.manual_was_completed,0), coalesce(f.missing_achievements_in_dlc,0), coalesce(f.disabled,0), f.disabled_reason, pg.dlc_not_owned
+		coalesce(f.manual_was_completed,0), coalesce(f.missing_achievements_in_dlc,0), coalesce(f.disabled,0), f.disabled_reason, pg.dlc_not_owned, coalesce(po.vetted,1)
 		`+entryBaseFromSQL+`
 		`+coverJoinSQL+`
 		where pg.profile_id=?`, profileID)
@@ -121,15 +126,16 @@ func scanGameCard(scanner gameCardScanner, tagMap map[entryRef][]string) (GameCa
 	var coverDownloadedAt, lastErr, lastErrAt, lastSynced, flagDisabledReason sql.NullString
 	var setName string
 	var missing, score sql.NullFloat64
-	var has, completed, was, newly, warning, manual, dlc, flagDisabled, dlcNotOwned int
+	var has, completed, was, newly, warning, manual, dlc, flagDisabled, dlcNotOwned, vetted int
 	if err := scanner.Scan(&c.AppID, &c.GroupID, &c.Name, &setName, &c.DLCAppID, &c.PlaytimeForever,
 		&coverImageAppID, &coverKind, &coverFileName, &coverPath, &coverDownloadedAt,
 		&has, &c.AchievementStatus, &c.TotalAchievements, &c.UnlockedAchievements, &c.CompletionPercent, &missing, &score, &completed, &was, &newly, &warning, &lastErr, &lastErrAt, &lastSynced,
-		&manual, &dlc, &flagDisabled, &flagDisabledReason, &dlcNotOwned); err != nil {
+		&manual, &dlc, &flagDisabled, &flagDisabledReason, &dlcNotOwned, &vetted); err != nil {
 		return GameCard{}, err
 	}
 	applyGameCardScalars(&c, has, completed, was, newly, warning, manual, dlc, flagDisabled)
 	c.DLCNotOwned = dlcNotOwned == 1
+	c.Unvetted = vetted == 0
 	c.EntryKey = EntryKey(c.AppID, c.GroupID)
 	c.IsSet = c.GroupID != 0
 	if c.IsSet {

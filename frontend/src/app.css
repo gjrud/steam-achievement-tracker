@@ -391,8 +391,13 @@
     font-size: 0.95em;
   }
 
-  .sync-detail {
+  /* Date/time line under the status (row 2 when present), then the game counts on the next free row. Both are muted. */
+  .sync-time {
     grid-row: 2;
+    grid-column: 2;
+  }
+
+  .sync-detail {
     grid-column: 2;
     color: #8aa4bd;
     font-size: 0.88em;
@@ -458,6 +463,18 @@
     font-variant-numeric: tabular-nums;
     word-break: normal;
     white-space: nowrap;
+  }
+
+  /* Vetted count green matches the tone-success foreground. */
+  .stat dd .vetted {
+    color: #9df4b8;
+  }
+
+  .stat dd .vetted-total {
+    margin-left: 0.3em;
+    font-size: 0.55em;
+    font-weight: 600;
+    color: #a9c3da;
   }
 
   .tabs {
@@ -526,12 +543,37 @@
     border-radius: 12px;
     color: #e8f3ff;
     background: #101c2a;
+    /* type=search gets native searchfield paint (WebKitGTK adds its own inner ring on focus). Turning it off leaves
+       one focus state: the accent border plus the thin ring below. */
+    -webkit-appearance: none;
+    appearance: none;
     outline: none;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
   }
 
+  /* Single accent border and one thin, soft ring, the same accent as the other text fields. No outline is drawn on
+     top, so there is no stacked ring. Keyboard focus is still visible: the border and ring change on focus. */
   .search-input:focus {
-    border-color: #8dcdf2;
-    box-shadow: 0 0 0 3px rgba(141, 205, 242, 0.16);
+    border-color: #66c0f4;
+    box-shadow: 0 0 0 2px rgba(102, 192, 244, 0.25);
+  }
+
+  .search-input::-webkit-search-decoration,
+  .search-input::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    appearance: none;
+  }
+
+  .search-input::-webkit-search-cancel-button {
+    height: 14px;
+    width: 14px;
+    margin-left: 8px;
+    cursor: pointer;
+    background: center / contain no-repeat url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14' stroke='%238aa4bd' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M3 3l8 8M11 3l-8 8'/%3E%3C/svg%3E");
+  }
+
+  .search-input::-webkit-search-cancel-button:hover {
+    filter: brightness(1.4);
   }
 
   .tag-filter-panel,

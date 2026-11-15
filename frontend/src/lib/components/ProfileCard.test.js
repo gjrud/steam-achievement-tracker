@@ -2,6 +2,7 @@ import {cleanup, fireEvent, render, screen} from '@testing-library/svelte'
 import {afterEach, describe, expect, test, vi} from 'vitest'
 import ProfileCard from './ProfileCard.svelte'
 import {syncDetails, syncTitle} from '../sync.js'
+import {formatDateTime} from '../format.js'
 
 afterEach(() => {
   cleanup()
@@ -16,6 +17,7 @@ const finishedRun = {
   gamesTotal: 6,
   gamesFailed: 0
 }
+const runningRun = {...finishedRun, status: 'running', finishedAt: '', gamesSynced: 2}
 
 function renderCard(props = {}) {
   return render(ProfileCard, {
@@ -64,39 +66,53 @@ describe('ProfileCard', () => {
     const block = syncBlock()
     expect(block).toHaveAttribute('aria-live', 'polite')
     expect(screen.getByText('Last sync')).toBeInTheDocument()
-    expect(block).toHaveTextContent(syncTitle(finishedRun))
-    expect(block).toHaveTextContent('6/6 games synced, 0 failed')
+    expect(block.querySelector('.sync-line')).toHaveTextContent(syncTitle(finishedRun))
+    expect(block.querySelector('.sync-line')).not.toHaveTextContent(formatDateTime(finishedRun.finishedAt))
+    expect(block.querySelector('.sync-time')).toHaveTextContent(formatDateTime(finishedRun.finishedAt))
+    expect(block.querySelector('.sync-detail:not(.sync-time)')).toHaveTextContent('6/6 games synced, 0 failed')
+    expect(block.querySelector('.sync-detail:not(.sync-time)')).not.toHaveTextContent(formatDateTime(finishedRun.finishedAt))
+  })
+
+  test('shows the date and time once, on its own line under the status', () => {
+    renderCard()
+
+    const block = syncBlock()
+    const date = formatDateTime(finishedRun.finishedAt)
+    expect(block.textContent.split(date)).toHaveLength(2)
+    const lines = Array.from(block.querySelectorAll('.sync-line, .sync-detail')).map((el) => el.textContent.trim())
+    // The first line is the visually hidden "Last sync" label followed by the status.
+    expect(lines).toEqual(['Last sync Success', date, '6/6 games synced, 0 failed'])
   })
 
   test('shows running progress as the current sync', () => {
-    renderCard({
-      syncIsRunning: true,
-      latestSyncRun: {...finishedRun, status: 'running', finishedAt: '', gamesSynced: 2}
-    })
+    renderCard({syncIsRunning: true, latestSyncRun: runningRun})
 
     const block = syncBlock()
     expect(block).toHaveAttribute('aria-live', 'polite')
     expect(screen.getByText('Current sync')).toBeInTheDocument()
     expect(screen.queryByText('Last sync')).not.toBeInTheDocument()
-    expect(block).toHaveTextContent('Sync running')
-    expect(block).toHaveTextContent('2/6 games synced')
+    expect(block.querySelector('.sync-line')).toHaveTextContent('Sync running')
+    expect(block.querySelector('.sync-time')).toHaveTextContent(`Started ${formatDateTime(runningRun.startedAt)}`)
+    expect(block).toHaveTextContent('2/6 games synced, 0 failed')
   })
 
-  test('says a sync is starting before its run record arrives', () => {
+  test('says a sync is starting before its run record arrives, with no date line', () => {
     renderCard({syncIsRunning: true, latestSyncRun: null})
 
     const block = syncBlock()
     expect(screen.getByText('Current sync')).toBeInTheDocument()
-    expect(block).toHaveTextContent('Sync starting')
+    expect(block.querySelector('.sync-line')).toHaveTextContent('Sync starting')
+    expect(block.querySelector('.sync-time')).toBeNull()
     expect(block).toHaveTextContent('Starting sync…')
   })
 
-  test('says no sync has run yet when there is no run record', () => {
+  test('says no sync has run yet when there is no run record, with no date line', () => {
     renderCard({latestSyncRun: null})
 
     const block = syncBlock()
     expect(screen.getByText('Last sync')).toBeInTheDocument()
-    expect(block).toHaveTextContent('No sync yet')
+    expect(block.querySelector('.sync-line')).toHaveTextContent('No sync yet')
+    expect(block.querySelector('.sync-time')).toBeNull()
     expect(block).toHaveTextContent(syncDetails(null))
   })
 

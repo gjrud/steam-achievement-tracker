@@ -27,6 +27,8 @@ type Profile struct {
 type Summary struct {
 	CompletedSetsCount          int     `json:"completedSetsCount"`
 	CompletedGamesCount         int     `json:"completedGamesCount"`
+	CompletedSetsVettedCount    int     `json:"completedSetsVettedCount"`
+	CompletedGamesVettedCount   int     `json:"completedGamesVettedCount"`
 	PurchasedGamesCount         int     `json:"purchasedGamesCount"`
 	TotalUnlockedCount          int     `json:"totalUnlockedCount"`
 	OwnedGamesCount             int     `json:"ownedGamesCount"`
@@ -78,10 +80,12 @@ type GameCard struct {
 	ManualWasCompleted   bool     `json:"manualWasCompleted"`
 	MissingDLC           bool     `json:"missingAchievementsInDLC"`
 	DLCNotOwned          bool     `json:"dlcNotOwned"`
-	ManualDisabled       bool     `json:"manuallyDisabled"`
-	Disabled             bool     `json:"disabled"`
-	DisabledReason       *string  `json:"disabledReason"`
-	Tags                 []string `json:"tags"`
+	// Unvetted is true when the entry's app (base game, set or DLC set of it) is not in the profile's vetted list.
+	Unvetted       bool     `json:"unvetted"`
+	ManualDisabled bool     `json:"manuallyDisabled"`
+	Disabled       bool     `json:"disabled"`
+	DisabledReason *string  `json:"disabledReason"`
+	Tags           []string `json:"tags"`
 }
 
 type Dashboard struct {
@@ -98,6 +102,9 @@ type GameRecord struct {
 	Name            string
 	PlaytimeForever int
 	Purchased       bool
+	// Unvetted mirrors steam.OwnedGame.Unvetted: true for an unvetted app seen in the library. Stored as
+	// profile_owned_games.vetted=0; the zero value means vetted.
+	Unvetted bool
 }
 
 type AchievementRecord struct {

@@ -93,7 +93,7 @@ func syncableGames(owned []steam.OwnedGame, disabledIDs map[int64]bool) []steam.
 }
 
 func gameRecord(g steam.OwnedGame) repository.GameRecord {
-	return repository.GameRecord{AppID: g.AppID, Name: g.Name, PlaytimeForever: g.PlaytimeForever, Purchased: g.Purchased}
+	return repository.GameRecord{AppID: g.AppID, Name: g.Name, PlaytimeForever: g.PlaytimeForever, Purchased: g.Purchased, Unvetted: g.Unvetted}
 }
 
 func (r *fullSyncRun) syncGames(ctx context.Context, games []steam.OwnedGame) error {

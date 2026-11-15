@@ -49,6 +49,10 @@ type OwnedGame struct {
 	// were played for free are false. With Client.ExcludePlayedFreeGames set, the library is the purchased
 	// list, so every game is true.
 	Purchased bool
+	// Unvetted is true when the app is not in Steam's vetted list. Unvetted (new) apps are returned only when
+	// Client.SkipUnvettedApps is unset; with it set, the library already excludes them, so no game is Unvetted
+	// and no extra request is made. The zero value (false) means vetted.
+	Unvetted bool
 }
 
 type SchemaAchievement struct {
@@ -200,13 +204,13 @@ type ownedGamesResponse struct {
 
 // getOwnedGamesList requests one GetOwnedGames list. includePlayedFree=true asks for the full library
 // (purchased games plus games played for free); false asks only for the games the account purchased.
-// skip_unvetted_apps follows Client.SkipUnvettedApps: by default Steam hides unvetted (new) apps, so the
-// tracker requests them explicitly (skip_unvetted_apps=false).
-func (c *Client) getOwnedGamesList(ctx context.Context, steamID64 string, includePlayedFree bool) (ownedGamesResponse, error) {
+// skipUnvetted is sent as skip_unvetted_apps. Callers pass Client.SkipUnvettedApps for the library lists, so
+// by default Steam hides nothing (skip_unvetted_apps=false); the vetted list passes true.
+func (c *Client) getOwnedGamesList(ctx context.Context, steamID64 string, includePlayedFree, skipUnvetted bool) (ownedGamesResponse, error) {
 	var payload ownedGamesResponse
 	// include_extended_appinfo adds capsule_filename. language is deliberately not set: with a language,
 	// Steam returns localized art file names for some games.
-	q := url.Values{"key": {c.APIKey}, "steamid": {steamID64}, "include_appinfo": {"true"}, "include_extended_appinfo": {"true"}, "include_played_free_games": {strconv.FormatBool(includePlayedFree)}, "skip_unvetted_apps": {strconv.FormatBool(c.SkipUnvettedApps)}, "format": {"json"}}
+	q := url.Values{"key": {c.APIKey}, "steamid": {steamID64}, "include_appinfo": {"true"}, "include_extended_appinfo": {"true"}, "include_played_free_games": {strconv.FormatBool(includePlayedFree)}, "skip_unvetted_apps": {strconv.FormatBool(skipUnvetted)}, "format": {"json"}}
 	if err := c.getJSON(ctx, "/IPlayerService/GetOwnedGames/v0001/", q, &payload); err != nil {
 		return ownedGamesResponse{}, err
 	}
@@ -226,13 +230,18 @@ func checkOwnedGamesList(r ownedGamesResponse, unavailable, incomplete string) e
 	return nil
 }
 
-// GetOwnedGames returns the library. By default it makes two requests: the full list (played free games
-// included), and the purchased list (played-free games excluded) used to set OwnedGame.Purchased. A failure
-// of either request fails the call.
-// With ExcludePlayedFreeGames set, the full list is requested without played free games, which already is
-// the purchased list: one request is made and every game is Purchased.
+// GetOwnedGames returns the library. It makes up to three requests:
+//  1. the full list (played free games included, skip_unvetted_apps per Client.SkipUnvettedApps);
+//  2. the purchased list (played-free games excluded) used to set OwnedGame.Purchased;
+//  3. only when SkipUnvettedApps is unset: the vetted list (skip_unvetted_apps=true) used to set OwnedGame.Unvetted.
+//
+// Any failing request fails the call. With ExcludePlayedFreeGames set, the full list is requested without
+// played free games, which already is the purchased list: request 2 is skipped and every game is Purchased.
+// With SkipUnvettedApps set, the library already excludes unvetted apps: request 3 is skipped and no game is Unvetted.
+// An explicit empty vetted list (game_count 0) is a valid answer: every game is then Unvetted. Unusable answers
+// (a bare `{"response":{}}`, an incomplete list) fail the call via checkOwnedGamesList.
 func (c *Client) GetOwnedGames(ctx context.Context, steamID64 string) ([]OwnedGame, error) {
-	full, err := c.getOwnedGamesList(ctx, steamID64, !c.ExcludePlayedFreeGames)
+	full, err := c.getOwnedGamesList(ctx, steamID64, !c.ExcludePlayedFreeGames, c.SkipUnvettedApps)
 	if err != nil {
 		return nil, err
 	}
@@ -242,7 +251,7 @@ func (c *Client) GetOwnedGames(ctx context.Context, steamID64 string) ([]OwnedGa
 	purchasedAll := c.ExcludePlayedFreeGames
 	purchased := make(map[int64]bool)
 	if !purchasedAll {
-		purchasedList, err := c.getOwnedGamesList(ctx, steamID64, false)
+		purchasedList, err := c.getOwnedGamesList(ctx, steamID64, false, c.SkipUnvettedApps)
 		if err != nil {
 			return nil, err
 		}
@@ -255,13 +264,36 @@ func (c *Client) GetOwnedGames(ctx context.Context, steamID64 string) ([]OwnedGa
 			purchased[g.AppID] = true
 		}
 	}
+	allVetted := c.SkipUnvettedApps
+	vetted := make(map[int64]bool)
+	if !allVetted {
+		// Same played-free setting as the full list, so the vetted membership covers every game in it.
+		vettedList, err := c.getOwnedGamesList(ctx, steamID64, !c.ExcludePlayedFreeGames, true)
+		if err != nil {
+			return nil, err
+		}
+		// Checked like the other lists: an unusable answer must not read as "nothing vetted".
+		if err := checkOwnedGamesList(vettedList, "vetted games list unavailable", "vetted games response was incomplete"); err != nil {
+			return nil, err
+		}
+		for _, g := range vettedList.Response.Games {
+			vetted[g.AppID] = true
+		}
+	}
 	games := make([]OwnedGame, 0, len(full.Response.Games))
 	for _, g := range full.Response.Games {
 		name := strings.TrimSpace(g.Name)
 		if name == "" {
 			name = fmt.Sprintf("App %d", g.AppID)
 		}
-		games = append(games, OwnedGame{AppID: g.AppID, Name: name, PlaytimeForever: g.PlaytimeForever, CapsuleFilename: strings.TrimSpace(g.CapsuleFilename), Purchased: purchasedAll || purchased[g.AppID]})
+		games = append(games, OwnedGame{
+			AppID:           g.AppID,
+			Name:            name,
+			PlaytimeForever: g.PlaytimeForever,
+			CapsuleFilename: strings.TrimSpace(g.CapsuleFilename),
+			Purchased:       purchasedAll || purchased[g.AppID],
+			Unvetted:        !allVetted && !vetted[g.AppID],
+		})
 	}
 	return games, nil
 }

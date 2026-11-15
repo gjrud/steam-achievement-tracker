@@ -114,8 +114,9 @@ func TestSummaryIsolatesProfilesAndComputesOverallPercentage(t *testing.T) {
 		want    Summary
 		pct     float64
 	}{
-		{label: "p1", profile: p1.ID, want: Summary{CompletedSetsCount: 1, CompletedGamesCount: 1, TotalUnlockedCount: 3, OwnedGamesCount: 2, GamesWithAchievementsCount: 2, TotalAchievementsUnlocked: 3, TotalAchievementsAvailable: 6}, pct: 50},
-		{label: "p2", profile: p2.ID, want: Summary{CompletedSetsCount: 1, CompletedGamesCount: 1, TotalUnlockedCount: 4, OwnedGamesCount: 2, GamesWithAchievementsCount: 2, TotalAchievementsUnlocked: 4, TotalAchievementsAvailable: 14}, pct: 200.0 / 7},
+		// No profile_owned_games rows here, so the completed entries read as vetted.
+		{label: "p1", profile: p1.ID, want: Summary{CompletedSetsCount: 1, CompletedGamesCount: 1, CompletedSetsVettedCount: 1, CompletedGamesVettedCount: 1, TotalUnlockedCount: 3, OwnedGamesCount: 2, GamesWithAchievementsCount: 2, TotalAchievementsUnlocked: 3, TotalAchievementsAvailable: 6}, pct: 50},
+		{label: "p2", profile: p2.ID, want: Summary{CompletedSetsCount: 1, CompletedGamesCount: 1, CompletedSetsVettedCount: 1, CompletedGamesVettedCount: 1, TotalUnlockedCount: 4, OwnedGamesCount: 2, GamesWithAchievementsCount: 2, TotalAchievementsUnlocked: 4, TotalAchievementsAvailable: 14}, pct: 200.0 / 7},
 		{label: "p3 zero total", profile: p3.ID, want: Summary{OwnedGamesCount: 1}, pct: 0},
 	}
 	for _, tt := range tests {

@@ -1,6 +1,6 @@
 import {describe, expect, test} from 'vitest'
 import {matchesTagFilter} from './filter.js'
-import {gameTags, suggestionTagOptions, tagCountFromGames, tagTone} from './tag.js'
+import {gameTags, suggestionTagOptions, tagCountFromGames, tagDescription, tagLabel, tagTone} from './tag.js'
 
 // Backend incomplete tag names. MUST stay in sync with internal/repository/tags.go: the profileGameTags sort list and
 // the stat/issue tag candidates (statTagCandidates, issueTagCandidates). Checked against that file when this list was
@@ -51,7 +51,7 @@ describe('gameTags', () => {
   test('sorts a mixed incomplete card by the filter chip order', () => {
     const tags = gameTags({groupId: 2, dlcAppId: 4173830, tags: ['sync_warning', 'missing_cover_art', 'dlc_not_owned', 'in_progress', 'new_achievements_added']})
 
-    expect(tags).toEqual(['new_achievements_added', 'in_progress', 'dlc_not_owned', 'set', 'dlc', 'missing_cover_art', 'sync_warning'])
+    expect(tags).toEqual(['new_achievements_added', 'in_progress', 'set', 'dlc', 'dlc_not_owned', 'missing_cover_art', 'sync_warning'])
   })
 
   test('sorts unknown tags last and keeps their original relative order', () => {
@@ -74,7 +74,7 @@ describe('gameTags', () => {
   })
 
   test('orders set before dlc on DLC sets, and both after dlc_not_owned', () => {
-    expect(gameTags({groupId: 1, dlcAppId: 4173830, tags: ['dlc_not_owned']})).toEqual(['dlc_not_owned', 'set', 'dlc'])
+    expect(gameTags({groupId: 1, dlcAppId: 4173830, tags: ['dlc_not_owned']})).toEqual(['set', 'dlc', 'dlc_not_owned'])
     expect(gameTags({groupId: 0, dlcAppId: 4173830, tags: []})).toEqual(['dlc'])
   })
 })
@@ -88,6 +88,10 @@ describe('suggestion tag options', () => {
     }
     expect(suggestionTagOptions).not.toContain('completed')
     expect(new Set(suggestionTagOptions).size).toBe(suggestionTagOptions.length)
+  })
+
+  test('pins the chip order: neutral tags adjacent after untouched, danger tags last', () => {
+    expect(suggestionTagOptions).toEqual(['new_achievements_added', 'almost_there', 'in_progress', 'untouched', 'unvetted', 'no_achievements', 'set', 'dlc', 'dlc_not_owned', 'missing_achievements_in_dlc', 'missing_cover_art', 'sync_warning'])
   })
 
   test('card tags use the filter chip order for every chip tag', () => {
@@ -134,6 +138,47 @@ describe('derived set and dlc tags', () => {
     for (const tag of tags) {
       expect(tagTone(tag)).toBe('neutral')
     }
+  })
+})
+
+describe('unvetted tag', () => {
+  test('derives an unvetted tag from game.unvetted and nothing else', () => {
+    expect(gameTags({unvetted: true, tags: []})).toEqual(['unvetted'])
+    expect(gameTags({unvetted: false, tags: ['almost_there']})).toEqual(['almost_there'])
+    expect(gameTags({tags: ['in_progress']})).toEqual(['in_progress'])
+  })
+
+  test('de-duplicates a stored unvetted tag', () => {
+    expect(gameTags({unvetted: true, tags: ['unvetted', 'in_progress']})).toEqual(['in_progress', 'unvetted'])
+  })
+
+  test('is kept on completed cards, after completed', () => {
+    expect(gameTags({unvetted: true, isCompleted: true, tags: ['completed', 'missing_achievements_in_dlc']})).toEqual(['completed', 'unvetted'])
+  })
+
+  test('sorts after untouched and before no_achievements, set, dlc', () => {
+    const tags = gameTags({unvetted: true, groupId: 1, dlcAppId: 4173830, tags: ['no_achievements', 'untouched', 'sync_warning']})
+
+    expect(tags).toEqual(['untouched', 'unvetted', 'no_achievements', 'set', 'dlc', 'sync_warning'])
+  })
+
+  test('uses the neutral tone, the Unvetted label and the hover text', () => {
+    expect(tagTone('unvetted')).toBe('neutral')
+    expect(tagLabel('unvetted')).toBe('Unvetted')
+    expect(tagDescription('unvetted')).toBe('New Steam app that Steam has not vetted yet')
+  })
+
+  test('counts and filters on the derived unvetted tag', () => {
+    const games = [
+      {unvetted: true, tags: []},
+      {unvetted: true, groupId: 2, tags: ['in_progress']},
+      {unvetted: false, tags: []},
+      {tags: []}
+    ]
+
+    expect(tagCountFromGames(games, 'unvetted')).toBe(2)
+    expect(matchesTagFilter(games[0], 'unvetted')).toBe(true)
+    expect(matchesTagFilter(games[2], 'unvetted')).toBe(false)
   })
 })
 

@@ -1296,6 +1296,91 @@ func TestFullSyncStoresPurchasedFlagFromOwnedGames(t *testing.T) {
 	}
 }
 
+// The unvetted flag from GetOwnedGames's vetted list is stored per profile game: an unvetted app is stored vetted=0.
+func TestFullSyncStoresVettedFlagFromOwnedGames(t *testing.T) {
+	paths := testPaths(t)
+	repo := openTestRepository(t, paths)
+	profile := testProfile(t, repo)
+	fake := newFakeSteamServer(t, []steam.OwnedGame{
+		{AppID: 60, Name: "Vetted", PlaytimeForever: 3},
+		{AppID: 70, Name: "Unvetted", PlaytimeForever: 4, Unvetted: true},
+	})
+
+	result, err := (&Service{Repo: repo, Steam: fake.client}).FullSync(context.Background(), *profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "success" || result.GamesTotal != 2 {
+		t.Fatalf("result = %#v, want success for both games", result)
+	}
+	if got := fake.count("vetted", 0); got != 1 {
+		t.Fatalf("vetted list calls = %d, want 1", got)
+	}
+	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?_busy_timeout=5000", paths.DB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for appID, want := range map[int64]int{60: 1, 70: 0} {
+		var got int
+		if err := db.QueryRow(`select vetted from profile_owned_games where profile_id=? and appid=?`, profile.ID, appID).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("app %d vetted = %d, want %d", appID, got, want)
+		}
+	}
+}
+
+// A resync reads the vetted list again: an app that was unvetted and is now vetted gets vetted=1, and an app that
+// became unvetted gets vetted=0.
+func TestFullSyncResyncUpdatesVettedFlag(t *testing.T) {
+	paths := testPaths(t)
+	repo := openTestRepository(t, paths)
+	profile := testProfile(t, repo)
+	owned := []steam.OwnedGame{
+		{AppID: 80, Name: "Becomes Vetted", PlaytimeForever: 3, Unvetted: true},
+		{AppID: 81, Name: "Becomes Unvetted", PlaytimeForever: 4},
+	}
+	fake := newFakeSteamServer(t, owned)
+	svc := &Service{Repo: repo, Steam: fake.client}
+
+	if _, err := svc.FullSync(context.Background(), *profile); err != nil {
+		t.Fatal(err)
+	}
+	assertVettedFlags(t, paths, profile.ID, map[int64]int{80: 0, 81: 1})
+
+	// The fake reads owned at request time, so changing its elements changes the next library and vetted lists.
+	owned[0].Unvetted = false
+	owned[1].Unvetted = true
+	result, err := svc.FullSync(context.Background(), *profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "success" || result.GamesTotal != 2 {
+		t.Fatalf("resync result = %#v, want success for both games", result)
+	}
+	assertVettedFlags(t, paths, profile.ID, map[int64]int{80: 1, 81: 0})
+}
+
+func assertVettedFlags(t *testing.T, paths appdata.Paths, profileID int64, want map[int64]int) {
+	t.Helper()
+	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?_busy_timeout=5000", paths.DB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for appID, wantVetted := range want {
+		var got int
+		if err := db.QueryRow(`select vetted from profile_owned_games where profile_id=? and appid=?`, profileID, appID).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != wantVetted {
+			t.Fatalf("app %d vetted = %d, want %d", appID, got, wantVetted)
+		}
+	}
+}
+
 func requireSummaryCounts(t *testing.T, repo *repository.Repository, profileID int64, want summaryCounts) {
 	t.Helper()
 	summary, err := repo.Summary(profileID)
@@ -1572,8 +1657,18 @@ func newFakeSteamServer(t *testing.T, owned []steam.OwnedGame) *fakeSteamServer 
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/IPlayerService/GetOwnedGames/v0001/":
-			// GetOwnedGames makes two requests: the full list ("owned" count) and the purchased list
-			// (include_played_free_games=false, counted as "purchased"). Each game's Purchased flag decides the latter.
+			// GetOwnedGames makes up to three requests: the full list ("owned" count), the purchased list
+			// (include_played_free_games=false, counted as "purchased"; Purchased decides it) and the vetted list
+			// (skip_unvetted_apps=true, counted as "vetted"; Unvetted decides it).
+			if r.URL.Query().Get("skip_unvetted_apps") == "true" {
+				f.increment("vetted", 0)
+				if f.ownedStatus != 0 {
+					http.Error(w, "owned games unavailable", f.ownedStatus)
+					return
+				}
+				fmt.Fprint(w, vettedGamesJSON(owned, r.URL.Query().Get("include_played_free_games") != "false"))
+				return
+			}
 			if r.URL.Query().Get("include_played_free_games") == "false" {
 				f.increment("purchased", 0)
 				if f.ownedStatus != 0 {
@@ -1899,6 +1994,18 @@ func purchasedGamesJSON(games []steam.OwnedGame) string {
 		}
 	}
 	return ownedGamesJSON(purchased)
+}
+
+// vettedGamesJSON is the vetted list: every game not flagged Unvetted. With includePlayedFree false it also drops
+// the played-free games, like the purchased list does.
+func vettedGamesJSON(games []steam.OwnedGame, includePlayedFree bool) string {
+	var vetted []steam.OwnedGame
+	for _, g := range games {
+		if !g.Unvetted && (includePlayedFree || g.Purchased) {
+			vetted = append(vetted, g)
+		}
+	}
+	return ownedGamesJSON(vetted)
 }
 
 func schemaJSON(names []string) string {

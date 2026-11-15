@@ -237,7 +237,15 @@ var migrations = []migration{
 	{version: 11, name: "purchased_games", sql: purchasedGamesSQL},
 	{version: 12, name: "profile_owned_games", sql: profileOwnedGamesSQL},
 	{version: 13, name: "profile_library_settings", sql: profileLibrarySettingsSQL},
+	{version: 14, name: "profile_owned_games_vetted", sql: profileOwnedGamesVettedSQL},
 }
+
+// profileOwnedGamesVettedSQL records per profile whether the app is in Steam's vetted list (vetted=1). An unvetted
+// app (vetted=0) is one the library returns only when unvetted apps are included. Rows from before this migration
+// default to 1 (vetted) until the next owned-games sync sets the flag.
+const profileOwnedGamesVettedSQL = `
+ALTER TABLE profile_owned_games ADD COLUMN vetted integer not null default 1;
+`
 
 // profileLibrarySettingsSQL stores the library sync options per profile. A profile without a row uses the
 // defaults (both on), so no backfill is needed. Rows are removed with their profile (see repository.ClearProfileData).
