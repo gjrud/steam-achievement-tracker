@@ -71,7 +71,7 @@ func (s *Service) prepareOwnedGames(ctx context.Context, profile repository.Prof
 	ownedIDs := make([]int64, 0, len(owned))
 	for _, g := range owned {
 		ownedIDs = append(ownedIDs, g.AppID)
-		if err := s.Repo.UpsertOwnedGame(gameRecord(g)); err != nil {
+		if err := s.Repo.UpsertOwnedGame(profile.ID, gameRecord(g)); err != nil {
 			log.Printf("upsert owned game %d: %v", g.AppID, err)
 		}
 	}
@@ -93,7 +93,7 @@ func syncableGames(owned []steam.OwnedGame, disabledIDs map[int64]bool) []steam.
 }
 
 func gameRecord(g steam.OwnedGame) repository.GameRecord {
-	return repository.GameRecord{AppID: g.AppID, Name: g.Name, PlaytimeForever: g.PlaytimeForever}
+	return repository.GameRecord{AppID: g.AppID, Name: g.Name, PlaytimeForever: g.PlaytimeForever, Purchased: g.Purchased, Unvetted: g.Unvetted}
 }
 
 func (r *fullSyncRun) syncGames(ctx context.Context, games []steam.OwnedGame) error {

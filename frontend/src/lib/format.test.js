@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest'
-import {formatDateTime, formatMessage, formatPlaytime, integer, pct} from './format.js'
+import {formatDateTime, formatMessage, formatPlaytime, formatRelativeTime, integer, pct} from './format.js'
 
 describe('formatMessage', () => {
   test('uses the Error message', () => {
@@ -96,5 +96,39 @@ describe('formatDateTime', () => {
 
   test('returns input it cannot parse unchanged', () => {
     expect(formatDateTime('not a date')).toBe('not a date')
+  })
+})
+
+describe('formatRelativeTime', () => {
+  const now = Date.parse('2026-05-22T10:00:00Z')
+
+  test('shows nothing when there is no date', () => {
+    expect(formatRelativeTime('', now)).toBe('')
+    expect(formatRelativeTime(null, now)).toBe('')
+  })
+
+  test('words recent times in minutes and hours', () => {
+    expect(formatRelativeTime('2026-05-22T10:00:00Z', now)).toBe('just now')
+    expect(formatRelativeTime('2026-05-22T09:59:30Z', now)).toBe('just now')
+    expect(formatRelativeTime('2026-05-22T09:58:00Z', now)).toBe('2 min ago')
+    expect(formatRelativeTime('2026-05-22T09:00:00Z', now)).toBe('1 hour ago')
+    expect(formatRelativeTime('2026-05-22T08:00:00Z', now)).toBe('2 hours ago')
+  })
+
+  test('words older times in days', () => {
+    expect(formatRelativeTime('2026-05-21T10:00:00Z', now)).toBe('1 day ago')
+    expect(formatRelativeTime('2026-05-19T10:00:00Z', now)).toBe('3 days ago')
+  })
+
+  test('falls back to the absolute date from seven days on', () => {
+    expect(formatRelativeTime('2026-05-15T10:00:00Z', now)).toBe(formatDateTime('2026-05-15T10:00:00Z'))
+  })
+
+  test('treats a time ahead of the clock as just now', () => {
+    expect(formatRelativeTime('2026-05-22T10:05:00Z', now)).toBe('just now')
+  })
+
+  test('returns input it cannot parse unchanged', () => {
+    expect(formatRelativeTime('not a date', now)).toBe('not a date')
   })
 })

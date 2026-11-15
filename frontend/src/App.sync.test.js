@@ -44,17 +44,17 @@ describe('App sync polling', () => {
     render(App)
     await settle()
 
-    expect(screen.getByText('Current sync')).toBeInTheDocument()
-    expect(screen.getByText(/1\/6 games synced/)).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Current sync: Sync running')
+    expect(screen.getByText(/Syncing 1 \/ 6/)).toBeInTheDocument()
     expect(screen.getByRole('button', {name: 'Syncing…'})).toBeDisabled()
     expect(getState).toHaveBeenCalledTimes(1)
 
     await advance(1000)
-    expect(screen.getByText(/4\/6 games synced/)).toBeInTheDocument()
+    expect(screen.getByText(/Syncing 4 \/ 6/)).toBeInTheDocument()
     expect(getState).toHaveBeenCalledTimes(2)
 
     await advance(1000)
-    expect(screen.getByText('Last sync')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Last sync: Partial sync, 1 failed')
     expect(screen.getByRole('button', {name: 'Sync now'})).toBeEnabled()
     expect(getState).toHaveBeenCalledTimes(3)
 
@@ -77,7 +77,7 @@ describe('App sync polling', () => {
 
     await advance(1000)
     expect(screen.queryByText(failureMessage)).not.toBeInTheDocument()
-    expect(screen.getByText(/3\/6 games synced/)).toBeInTheDocument()
+    expect(screen.getByText(/Syncing 3 \/ 6/)).toBeInTheDocument()
     expect(getState).toHaveBeenCalledTimes(3)
   })
 
@@ -103,12 +103,12 @@ describe('App sync polling', () => {
     // Polling continues while the sync runs; the action's banner must survive each poll.
     await advance(1000)
     expect(getState).toHaveBeenCalledTimes(2)
-    expect(screen.getByText(/3\/6 games synced/)).toBeInTheDocument()
+    expect(screen.getByText(/Syncing 3 \/ 6/)).toBeInTheDocument()
     expect(screen.getByText(failureMessage)).toBeInTheDocument()
 
     await advance(1000)
     expect(getState).toHaveBeenCalledTimes(3)
-    expect(screen.getByText(/4\/6 games synced/)).toBeInTheDocument()
+    expect(screen.getByText(/Syncing 4 \/ 6/)).toBeInTheDocument()
     expect(screen.getByText(failureMessage)).toBeInTheDocument()
 
     // A later action that succeeds takes over the error state and clears the banner.
@@ -117,7 +117,7 @@ describe('App sync polling', () => {
     await settle()
     expect(disable).toHaveBeenCalledTimes(2)
     expect(screen.queryByText(failureMessage)).not.toBeInTheDocument()
-    expect(screen.getByText(/5\/6 games synced/)).toBeInTheDocument()
+    expect(screen.getByText(/Syncing 5 \/ 6/)).toBeInTheDocument()
   })
 
   test('stops polling when the dashboard unmounts', async () => {
@@ -151,12 +151,12 @@ describe('App sync polling', () => {
     await fireEvent.click(screen.getByRole('button', {name: 'Disable game'}))
     await settle()
     expect(disable).toHaveBeenCalledWith(1, 0)
-    expect(screen.getByText(/6\/6 games synced/)).toBeInTheDocument()
+    expect(screen.getByText(/6 \/ 6 games/)).toBeInTheDocument()
 
     resolveSlowPoll(syncingState(5))
     await settle()
-    expect(screen.getByText(/6\/6 games synced/)).toBeInTheDocument()
-    expect(screen.queryByText(/5\/6 games synced/)).not.toBeInTheDocument()
+    expect(screen.getByText(/6 \/ 6 games/)).toBeInTheDocument()
+    expect(screen.queryByText(/Syncing 5 \/ 6/)).not.toBeInTheDocument()
     expect(screen.getByRole('button', {name: 'Sync now'})).toBeEnabled()
 
     await advance(5000)
@@ -210,7 +210,7 @@ describe('App sync polling', () => {
 
     resolveSlowPoll(syncingState(5))
     await settle()
-    expect(screen.queryByText(/5\/6 games synced/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Syncing 5 \/ 6/)).not.toBeInTheDocument()
 
     await advance(1000)
     expect(getState).toHaveBeenCalledTimes(3)
@@ -285,7 +285,7 @@ describe('App sync polling', () => {
       expect(getState).toHaveBeenCalledTimes(1)
 
       await advance(1000)
-      expect(screen.getByText(/3\/6 games synced/)).toBeInTheDocument()
+      expect(screen.getByText(/Syncing 3 \/ 6/)).toBeInTheDocument()
       expect(getState).toHaveBeenCalledTimes(2)
 
       await advance(1000)
@@ -296,6 +296,41 @@ describe('App sync polling', () => {
       expect(getState).toHaveBeenCalledTimes(3)
     })
   }
+
+  test('pauses polling during a library settings save and resumes it while the sync still runs', async () => {
+    const saved = {includeUnvettedApps: false, includePlayedFreeGames: true}
+    let resolveSave
+    const getState = vi.fn()
+      .mockResolvedValueOnce(syncingState(2))
+      .mockResolvedValue({...syncingState(3), settings: saved})
+    const setSettings = vi.fn(() => new Promise((resolve) => {
+      resolveSave = resolve
+    }))
+    __setWailsMocks({GetAppState: getState, SetLibrarySettings: setSettings})
+
+    render(App)
+    await settle()
+    await fireEvent.click(screen.getByRole('button', {name: 'Settings'}))
+    expect(getState).toHaveBeenCalledTimes(1)
+    const unvetted = screen.getByRole('switch', {name: 'Include unvetted apps'})
+
+    // A poll timer is pending from the running sync. It must not fire while the save is in flight.
+    await fireEvent.click(unvetted)
+    expect(setSettings).toHaveBeenCalledWith(false, true)
+    await advance(3000)
+    expect(getState).toHaveBeenCalledTimes(1)
+
+    resolveSave({...syncingState(2), settings: saved})
+    await settle()
+    expect(unvetted).not.toBeChecked()
+    expect(unvetted).toHaveAttribute('aria-busy', 'false')
+    expect(getState).toHaveBeenCalledTimes(1)
+
+    // The sync is still running, so polling restarts and keeps the saved setting.
+    await advance(1000)
+    expect(getState).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('switch', {name: 'Include unvetted apps'})).not.toBeChecked()
+  })
 })
 
 describe('App sync now', () => {
@@ -316,6 +351,6 @@ describe('App sync now', () => {
 
     expect(syncNow).toHaveBeenCalledOnce()
     expect(await screen.findByRole('button', {name: 'Syncing…'})).toBeDisabled()
-    expect(screen.getByText('Current sync')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Current sync: Sync running')
   })
 })

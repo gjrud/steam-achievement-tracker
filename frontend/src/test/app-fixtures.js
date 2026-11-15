@@ -82,6 +82,7 @@ export function baseState() {
     dashboard: null,
     syncInProgress: false,
     initError: '',
+    settings: {includeUnvettedApps: true, includePlayedFreeGames: true},
     secretSetupCommand: 'secret-tool store service steam-achievement-tracker username steam-web-api-key'
   }
 }
@@ -118,7 +119,11 @@ export function dashboardState(overrides = {}) {
     dashboard: {
       summary: {
         ownedGamesCount: 6,
+        purchasedGamesCount: 5,
         completedGamesCount: completed.length,
+        completedGamesVettedCount: completed.length,
+        completedSetsCount: completed.length,
+        completedSetsVettedCount: completed.length,
         totalAchievementsUnlocked: 180
       },
       latestSyncRun: overrides.latestSyncRun ?? {
@@ -164,6 +169,7 @@ export function game(overrides = {}) {
     manualWasCompleted: false,
     missingAchievementsInDLC: false,
     dlcNotOwned: false,
+    unvetted: false,
     isCompleted: false,
     ...overrides
   }

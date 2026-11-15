@@ -54,6 +54,7 @@ func deleteOrphanRowsForAppIDs(tx *sql.Tx, appIDs []int64) error {
 	_, err := tx.Exec(`delete from games where appid in (`+inClause+`) and not exists (select 1 from profile_games pg where pg.appid=games.appid)
 		and not exists (select 1 from profile_achievements pa where pa.appid=games.appid)
 		and not exists (select 1 from profile_game_flags f where f.appid=games.appid)
+		and not exists (select 1 from profile_owned_games po where po.appid=games.appid)
 		and not exists (select 1 from profile_game_tags t where t.appid=games.appid)
 		and not exists (select 1 from game_snapshots s where s.appid=games.appid)`, args...)
 	return err

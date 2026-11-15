@@ -52,15 +52,428 @@ func TestGetOwnedGamesRequestsExtendedAppInfoAndTrimsCapsuleFilename(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	query := log.query(path)
-	if query.Get("include_appinfo") != "true" || query.Get("include_extended_appinfo") != "true" {
-		t.Fatalf("query = %v, want include_appinfo and include_extended_appinfo set", query)
+	queries := log.queryHistory(path)
+	if len(queries) != 3 {
+		t.Fatalf("GetOwnedGames requests = %d, want 3 (full list, purchased list and vetted list)", len(queries))
 	}
-	if query.Get("language") != "" {
-		t.Fatalf("query language = %q, want unset", query.Get("language"))
+	wantSkip := []string{"false", "false", "true"}
+	for i, query := range queries {
+		if query.Get("include_appinfo") != "true" || query.Get("include_extended_appinfo") != "true" {
+			t.Fatalf("request %d query = %v, want include_appinfo and include_extended_appinfo set", i, query)
+		}
+		if query.Get("language") != "" {
+			t.Fatalf("request %d query language = %q, want unset", i, query.Get("language"))
+		}
+		if query.Get("skip_unvetted_apps") != wantSkip[i] {
+			t.Fatalf("request %d skip_unvetted_apps = %q, want %q", i, query.Get("skip_unvetted_apps"), wantSkip[i])
+		}
 	}
 	if len(games) != 2 || games[0].CapsuleFilename != "library_600x900.jpg" || games[1].CapsuleFilename != "" {
 		t.Fatalf("games = %#v, want trimmed capsule file name for game 10 and empty for game 20", games)
+	}
+}
+
+// testOwnedClient serves GetOwnedGames by the include_played_free_games value: "true" gets full, "false"
+// gets purchased. Each answer is a raw body; statuses, when set, overrides the answer with that HTTP status.
+func testOwnedClient(t *testing.T, full, purchased string, purchasedStatus int) (*Client, *requestLog, func()) {
+	t.Helper()
+	const path = "/IPlayerService/GetOwnedGames/v0001/"
+	log := &requestLog{attempts: map[string]int{}, queries: map[string]url.Values{}, history: map[string][]url.Values{}}
+	client, closeServer := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != path {
+			http.NotFound(w, r)
+			return
+		}
+		log.record(r)
+		if r.URL.Query().Get("include_played_free_games") == "false" {
+			if purchasedStatus != 0 {
+				http.Error(w, "purchased unavailable", purchasedStatus)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(purchased))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(full))
+	})
+	return client, log, closeServer
+}
+
+func TestGetOwnedGamesMarksPurchasedFromSecondList(t *testing.T) {
+	const path = "/IPlayerService/GetOwnedGames/v0001/"
+	full := `{"response":{"game_count":3,"games":[{"appid":10,"name":"Bought","playtime_forever":1},{"appid":20,"name":"Played Free","playtime_forever":2},{"appid":30,"name":"Bought Too","playtime_forever":3}]}}`
+	purchased := `{"response":{"game_count":2,"games":[{"appid":30,"name":"Bought Too"},{"appid":10,"name":"Bought"}]}}`
+	client, log, closeServer := testOwnedClient(t, full, purchased, 0)
+	defer closeServer()
+
+	games, err := client.GetOwnedGames(context.Background(), testSteamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(games) != 3 {
+		t.Fatalf("games = %#v, want the full list of 3", games)
+	}
+	wantPurchased := map[int64]bool{10: true, 20: false, 30: true}
+	for _, g := range games {
+		if g.Purchased != wantPurchased[g.AppID] {
+			t.Fatalf("game %d Purchased = %v, want %v", g.AppID, g.Purchased, wantPurchased[g.AppID])
+		}
+	}
+	queries := log.queryHistory(path)
+	if len(queries) != 3 {
+		t.Fatalf("requests = %d, want 3 (full, purchased, vetted)", len(queries))
+	}
+	if queries[0].Get("include_played_free_games") != "true" || queries[1].Get("include_played_free_games") != "false" {
+		t.Fatalf("include_played_free_games = %q then %q, want true then false",
+			queries[0].Get("include_played_free_games"), queries[1].Get("include_played_free_games"))
+	}
+}
+
+func TestGetOwnedGamesPurchasedListFailureFailsCall(t *testing.T) {
+	full := `{"response":{"game_count":1,"games":[{"appid":10,"name":"Bought","playtime_forever":1}]}}`
+	client, log, closeServer := testOwnedClient(t, full, "", http.StatusNotFound)
+	defer closeServer()
+
+	games, err := client.GetOwnedGames(context.Background(), testSteamID)
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.Code != http.StatusNotFound {
+		t.Fatalf("err = %#v, want *HTTPStatusError 404 from the purchased list", err)
+	}
+	if games != nil {
+		t.Fatalf("games = %#v, want nil when the call fails", games)
+	}
+	if n := len(log.queryHistory("/IPlayerService/GetOwnedGames/v0001/")); n != 2 {
+		t.Fatalf("requests = %d, want 2 (full then purchased, not retried on 404)", n)
+	}
+}
+
+func TestGetOwnedGamesFullListFailureSkipsPurchasedList(t *testing.T) {
+	client, log, closeServer := testOwnedClient(t, `{"response":{}}`, `{"response":{}}`, 0)
+	defer closeServer()
+
+	if _, err := client.GetOwnedGames(context.Background(), testSteamID); err == nil || !strings.Contains(err.Error(), "private") {
+		t.Fatalf("err = %v, want privacy error from the full list", err)
+	}
+	if n := len(log.queryHistory("/IPlayerService/GetOwnedGames/v0001/")); n != 1 {
+		t.Fatalf("requests = %d, want 1 (purchased list skipped after full-list failure)", n)
+	}
+}
+
+func TestGetOwnedGamesSkipUnvettedAppsParam(t *testing.T) {
+	const path = "/IPlayerService/GetOwnedGames/v0001/"
+	full := `{"response":{"game_count":1,"games":[{"appid":10,"name":"Game","playtime_forever":1}]}}`
+	// Default (skip=false): full, purchased and vetted requests; the vetted one is the only skip=true request.
+	// SkipUnvettedApps set: only the full and purchased requests, both with skip=true, and no vetted request.
+	tests := []struct {
+		skip     bool
+		wantSkip []string
+	}{
+		{skip: false, wantSkip: []string{"false", "false", "true"}},
+		{skip: true, wantSkip: []string{"true", "true"}},
+	}
+	for _, tc := range tests {
+		client, log, closeServer := testOwnedClient(t, full, full, 0)
+		client.SkipUnvettedApps = tc.skip
+		if _, err := client.GetOwnedGames(context.Background(), testSteamID); err != nil {
+			t.Fatal(err)
+		}
+		queries := log.queryHistory(path)
+		if len(queries) != len(tc.wantSkip) {
+			t.Fatalf("skip=%v requests = %d, want %d", tc.skip, len(queries), len(tc.wantSkip))
+		}
+		for i, query := range queries {
+			if got := query.Get("skip_unvetted_apps"); got != tc.wantSkip[i] {
+				t.Fatalf("skip=%v request %d skip_unvetted_apps = %q, want %q", tc.skip, i, got, tc.wantSkip[i])
+			}
+		}
+		closeServer()
+	}
+}
+
+// With ExcludePlayedFreeGames the full list is requested as purchased only, so no purchased-list request is made
+// and every game is Purchased. The vetted request still runs, with the same include_played_free_games=false.
+// testOwnedClient serves include_played_free_games=false from its purchased body, so that body carries the library here.
+func TestGetOwnedGamesExcludePlayedFreeGamesSkipsPurchasedRequest(t *testing.T) {
+	const path = "/IPlayerService/GetOwnedGames/v0001/"
+	library := `{"response":{"game_count":2,"games":[{"appid":10,"name":"Bought","playtime_forever":1},{"appid":30,"name":"Bought Too","playtime_forever":3}]}}`
+	client, log, closeServer := testOwnedClient(t, `{"response":{}}`, library, 0)
+	defer closeServer()
+	client.ExcludePlayedFreeGames = true
+
+	games, err := client.GetOwnedGames(context.Background(), testSteamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(games) != 2 {
+		t.Fatalf("games = %#v, want 2", games)
+	}
+	for _, g := range games {
+		if !g.Purchased || g.Unvetted {
+			t.Fatalf("game %d Purchased=%v Unvetted=%v, want true and false", g.AppID, g.Purchased, g.Unvetted)
+		}
+	}
+	queries := log.queryHistory(path)
+	if len(queries) != 2 {
+		t.Fatalf("requests = %d, want 2 (full library and vetted list, no purchased-list request)", len(queries))
+	}
+	for i, query := range queries {
+		if got := query.Get("include_played_free_games"); got != "false" {
+			t.Fatalf("request %d include_played_free_games = %q, want false", i, got)
+		}
+	}
+	if got := queries[1].Get("skip_unvetted_apps"); got != "true" {
+		t.Fatalf("vetted request skip_unvetted_apps = %q, want true", got)
+	}
+}
+
+// With ExcludePlayedFreeGames the full list is the purchased list, but the vetted list still decides Unvetted: a game
+// missing from it is Unvetted while still Purchased, and only the full and vetted requests run.
+func TestGetOwnedGamesExcludePlayedFreeGamesMarksUnvettedMissingFromVettedList(t *testing.T) {
+	const path = "/IPlayerService/GetOwnedGames/v0001/"
+	library := `{"response":{"game_count":2,"games":[{"appid":10,"name":"Bought","playtime_forever":1},{"appid":30,"name":"Bought Unvetted","playtime_forever":3}]}}`
+	vetted := `{"response":{"game_count":1,"games":[{"appid":10,"name":"Bought"}]}}`
+	client, log, closeServer := testOwnedRouteClient(t, func(q url.Values) (int, string) {
+		if q.Get("skip_unvetted_apps") == "true" {
+			return 0, vetted
+		}
+		return 0, library
+	})
+	defer closeServer()
+	client.ExcludePlayedFreeGames = true
+
+	games, err := client.GetOwnedGames(context.Background(), testSteamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantUnvetted := map[int64]bool{10: false, 30: true}
+	if len(games) != 2 {
+		t.Fatalf("games = %#v, want 2", games)
+	}
+	for _, g := range games {
+		if !g.Purchased {
+			t.Fatalf("game %d Purchased = false, want true", g.AppID)
+		}
+		if g.Unvetted != wantUnvetted[g.AppID] {
+			t.Fatalf("game %d Unvetted = %v, want %v", g.AppID, g.Unvetted, wantUnvetted[g.AppID])
+		}
+	}
+	queries := log.queryHistory(path)
+	if len(queries) != 2 {
+		t.Fatalf("requests = %d, want 2 (full library and vetted list)", len(queries))
+	}
+	for i, query := range queries {
+		if got := query.Get("include_played_free_games"); got != "false" {
+			t.Fatalf("request %d include_played_free_games = %q, want false", i, got)
+		}
+	}
+}
+
+// testOwnedRouteClient answers each GetOwnedGames request with route(query): a non-zero status is an HTTP error,
+// otherwise the body is served. It returns the request log like testOwnedClient.
+func testOwnedRouteClient(t *testing.T, route func(q url.Values) (int, string)) (*Client, *requestLog, func()) {
+	t.Helper()
+	const path = "/IPlayerService/GetOwnedGames/v0001/"
+	log := &requestLog{attempts: map[string]int{}, queries: map[string]url.Values{}, history: map[string][]url.Values{}}
+	client, closeServer := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != path {
+			http.NotFound(w, r)
+			return
+		}
+		log.record(r)
+		status, body := route(r.URL.Query())
+		if status != 0 {
+			http.Error(w, "owned games unavailable", status)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	})
+	return client, log, closeServer
+}
+
+// The vetted list (skip_unvetted_apps=true) marks Unvetted: an app in it is vetted, one missing from it is unvetted,
+// and a played-free app can be vetted too.
+func TestGetOwnedGamesMarksVettedFromThirdList(t *testing.T) {
+	const path = "/IPlayerService/GetOwnedGames/v0001/"
+	full := `{"response":{"game_count":3,"games":[{"appid":10,"name":"Bought","playtime_forever":1},{"appid":20,"name":"Played Free Vetted","playtime_forever":2},{"appid":30,"name":"Unvetted","playtime_forever":3}]}}`
+	purchased := `{"response":{"game_count":1,"games":[{"appid":10,"name":"Bought"}]}}`
+	vetted := `{"response":{"game_count":2,"games":[{"appid":10,"name":"Bought"},{"appid":20,"name":"Played Free Vetted"}]}}`
+	client, log, closeServer := testOwnedRouteClient(t, func(q url.Values) (int, string) {
+		switch {
+		case q.Get("skip_unvetted_apps") == "true":
+			return 0, vetted
+		case q.Get("include_played_free_games") == "false":
+			return 0, purchased
+		default:
+			return 0, full
+		}
+	})
+	defer closeServer()
+
+	games, err := client.GetOwnedGames(context.Background(), testSteamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantUnvetted := map[int64]bool{10: false, 20: false, 30: true}
+	if len(games) != 3 {
+		t.Fatalf("games = %#v, want the full list of 3", games)
+	}
+	for _, g := range games {
+		if g.Unvetted != wantUnvetted[g.AppID] {
+			t.Fatalf("game %d Unvetted = %v, want %v", g.AppID, g.Unvetted, wantUnvetted[g.AppID])
+		}
+	}
+	queries := log.queryHistory(path)
+	if len(queries) != 3 {
+		t.Fatalf("requests = %d, want 3", len(queries))
+	}
+	if queries[2].Get("skip_unvetted_apps") != "true" || queries[2].Get("include_played_free_games") != "true" {
+		t.Fatalf("vetted request query = %v, want skip_unvetted_apps=true and include_played_free_games=true", queries[2])
+	}
+}
+
+// With SkipUnvettedApps the library already excludes unvetted apps, so no game is Unvetted without a vetted request.
+func TestGetOwnedGamesSkipUnvettedAppsMarksAllVetted(t *testing.T) {
+	full := `{"response":{"game_count":2,"games":[{"appid":10,"name":"One","playtime_forever":1},{"appid":20,"name":"Two","playtime_forever":2}]}}`
+	client, log, closeServer := testOwnedClient(t, full, full, 0)
+	defer closeServer()
+	client.SkipUnvettedApps = true
+
+	games, err := client.GetOwnedGames(context.Background(), testSteamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range games {
+		if g.Unvetted {
+			t.Fatalf("game %d Unvetted = true, want false when SkipUnvettedApps is set", g.AppID)
+		}
+	}
+	if n := len(log.queryHistory("/IPlayerService/GetOwnedGames/v0001/")); n != 2 {
+		t.Fatalf("requests = %d, want 2 (no vetted-list request)", n)
+	}
+}
+
+// The vetted list is validated like the other lists. A bare response or an incomplete list is an error, and so is
+// an HTTP failure, which is not retried on 404. An explicit empty list (game_count 0) is a valid answer: every game
+// is then unvetted. A non-empty vetted list marks only the games it lists as vetted.
+func TestGetOwnedGamesVettedListValidation(t *testing.T) {
+	full := `{"response":{"game_count":1,"games":[{"appid":10,"name":"Game","playtime_forever":1}]}}`
+	tests := []struct {
+		name         string
+		status       int
+		vetted       string
+		wantErr      string
+		wantUnvetted bool // Unvetted for game 10 when no error
+	}{
+		{name: "count zero and empty list marks every game unvetted", vetted: `{"response":{"game_count":0,"games":[]}}`, wantUnvetted: true},
+		{name: "count zero without games key marks every game unvetted", vetted: `{"response":{"game_count":0}}`, wantUnvetted: true},
+		{name: "bare response is unavailable", vetted: `{"response":{}}`, wantErr: "vetted games list unavailable"},
+		{name: "count positive and empty list is incomplete", vetted: `{"response":{"game_count":1,"games":[]}}`, wantErr: "vetted games response was incomplete"},
+		{name: "http 404 fails the call", status: http.StatusNotFound, wantErr: "returned 404 Not Found"},
+		{name: "listed game is vetted", vetted: `{"response":{"game_count":1,"games":[{"appid":10,"name":"Game"}]}}`, wantUnvetted: false},
+		{name: "unlisted game is unvetted", vetted: `{"response":{"game_count":1,"games":[{"appid":99,"name":"Other"}]}}`, wantUnvetted: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client, log, closeServer := testOwnedRouteClient(t, func(q url.Values) (int, string) {
+				if q.Get("skip_unvetted_apps") == "true" {
+					return tc.status, tc.vetted
+				}
+				return 0, full
+			})
+			defer closeServer()
+
+			games, err := client.GetOwnedGames(context.Background(), testSteamID)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want text %q", err, tc.wantErr)
+				}
+				if games != nil {
+					t.Fatalf("games = %#v, want nil when the call fails", games)
+				}
+				if n := len(log.queryHistory("/IPlayerService/GetOwnedGames/v0001/")); n != 3 {
+					t.Fatalf("requests = %d, want 3 (full, purchased, then vetted failure)", n)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want no error for a valid empty vetted list", err)
+			}
+			if len(games) != 1 || games[0].Unvetted != tc.wantUnvetted {
+				t.Fatalf("games = %#v, want one game with Unvetted=%v", games, tc.wantUnvetted)
+			}
+		})
+	}
+}
+
+// The purchased list is validated like the full list. An explicit empty list (game_count 0) is valid; a bare
+// `{"response":{}}` or an incomplete list is an error, so a glitch cannot read as "no purchases" and clear
+// every purchased flag.
+func TestGetOwnedGamesPurchasedListEmptiness(t *testing.T) {
+	full := `{"response":{"game_count":1,"games":[{"appid":10,"name":"Played Free","playtime_forever":1}]}}`
+	tests := []struct {
+		name      string
+		purchased string
+		wantErr   string
+	}{
+		{name: "count zero and empty list is a valid empty list", purchased: `{"response":{"game_count":0,"games":[]}}`},
+		{name: "count zero without games key is a valid empty list", purchased: `{"response":{"game_count":0}}`},
+		{name: "bare response is unavailable", purchased: `{"response":{}}`, wantErr: "purchased games list unavailable"},
+		{name: "count positive and empty list is incomplete", purchased: `{"response":{"game_count":2,"games":[]}}`, wantErr: "purchased games response was incomplete"},
+		{name: "count positive without games key is incomplete", purchased: `{"response":{"game_count":1}}`, wantErr: "purchased games response was incomplete"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client, _, closeServer := testOwnedClient(t, full, tc.purchased, 0)
+			defer closeServer()
+
+			games, err := client.GetOwnedGames(context.Background(), testSteamID)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want no error for a valid empty purchased list", err)
+			}
+			if len(games) != 1 || games[0].Purchased {
+				t.Fatalf("games = %#v, want one game not purchased", games)
+			}
+		})
+	}
+}
+
+func TestGetOwnedGamesPurchasedListRetriesTransientStatus(t *testing.T) {
+	const path = "/IPlayerService/GetOwnedGames/v0001/"
+	var purchasedAttempts atomic.Int32
+	full := `{"response":{"game_count":1,"games":[{"appid":10,"name":"Bought","playtime_forever":1}]}}`
+	purchased := `{"response":{"game_count":1,"games":[{"appid":10,"name":"Bought"}]}}`
+	client, closeServer := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != path {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("include_played_free_games") == "false" {
+			if purchasedAttempts.Add(1) == 1 {
+				http.Error(w, "try later", http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = w.Write([]byte(purchased))
+			return
+		}
+		_, _ = w.Write([]byte(full))
+	})
+	defer closeServer()
+
+	games, err := client.GetOwnedGames(context.Background(), testSteamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if purchasedAttempts.Load() != 2 || len(games) != 1 || !games[0].Purchased {
+		t.Fatalf("purchased attempts=%d games=%#v, want retry then purchased game", purchasedAttempts.Load(), games)
 	}
 }
 
@@ -149,7 +562,8 @@ func TestGetOwnedGamesRetriesTransientSteamStatuses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if attempts.Load() != 3 || len(games) != 1 || games[0].Name != "Recovered" {
+	// Full list: two 503s then success (3 requests). Purchased list: one success (4th request). Vetted list: one success (5th).
+	if attempts.Load() != 5 || len(games) != 1 || games[0].Name != "Recovered" {
 		t.Fatalf("attempts=%d games=%#v, want retry then recovered game", attempts.Load(), games)
 	}
 }
@@ -168,7 +582,8 @@ type fixtureResponse struct {
 type requestLog struct {
 	mu       sync.Mutex
 	attempts map[string]int
-	queries  map[string]url.Values
+	queries  map[string]url.Values   // query of the latest request per path
+	history  map[string][]url.Values // queries of every request per path, in order
 }
 
 func (l *requestLog) record(r *http.Request) {
@@ -176,6 +591,14 @@ func (l *requestLog) record(r *http.Request) {
 	defer l.mu.Unlock()
 	l.attempts[r.URL.Path]++
 	l.queries[r.URL.Path] = r.URL.Query()
+	l.history[r.URL.Path] = append(l.history[r.URL.Path], r.URL.Query())
+}
+
+// queryHistory returns the query of every request to path, in arrival order.
+func (l *requestLog) queryHistory(path string) []url.Values {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]url.Values(nil), l.history[path]...)
 }
 
 func (l *requestLog) attemptCount(path string) int {
@@ -202,7 +625,7 @@ func newTestServer(t *testing.T, handler http.HandlerFunc) (*Client, func()) {
 
 func testSetClient(t *testing.T, responses map[string]fixtureResponse) (*Client, *requestLog, func()) {
 	t.Helper()
-	log := &requestLog{attempts: map[string]int{}, queries: map[string]url.Values{}}
+	log := &requestLog{attempts: map[string]int{}, queries: map[string]url.Values{}, history: map[string][]url.Values{}}
 	client, closeServer := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		log.record(r)
 		resp, ok := responses[r.URL.Path]
@@ -922,8 +1345,9 @@ func TestTransportErrorsAreRetried(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if hits.Load() != 2 || len(games) != 1 || games[0].Name != "Back" {
-			t.Fatalf("hits=%d games=%#v, want 2 attempts and game Back", hits.Load(), games)
+		// Full list: one hang-up then success (2 requests). Purchased list and vetted list: one request each.
+		if hits.Load() != 4 || len(games) != 1 || games[0].Name != "Back" {
+			t.Fatalf("hits=%d games=%#v, want 4 requests and game Back", hits.Load(), games)
 		}
 	})
 	t.Run("hang up on every attempt gives up after four", func(t *testing.T) {

@@ -103,6 +103,9 @@ describe('App dashboard views', () => {
     await user.click(screen.getByRole('button', {name: 'Completed'}))
     expect(await screen.findByRole('heading', {name: 'Portal'})).toBeInTheDocument()
     expect(screen.queryByRole('heading', {name: 'Hades'})).not.toBeInTheDocument()
+    expect(screen.getByRole('button', {name: 'Completed'})).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('button', {name: 'Not completed'})).not.toHaveAttribute('aria-current')
+    expect(screen.getByRole('button', {name: 'Sync errors'})).not.toHaveAttribute('aria-current')
 
     await user.click(screen.getByRole('button', {name: 'Sync errors'}))
     expect(await screen.findByRole('heading', {name: 'Broken Game'})).toBeInTheDocument()
@@ -341,7 +344,8 @@ describe('App dashboard views', () => {
           game({appid: 25, name: 'Flagged DLC Set', groupId: 2, dlcAppId: 4173841, tags: ['missing_achievements_in_dlc'], missingAchievementsInDLC: true}),
           game({appid: 26, name: 'Progress Game', tags: ['in_progress']}),
           game({appid: 27, name: 'Almost Game', tags: ['almost_there']}),
-          game({appid: 28, name: 'New Achievements Game', tags: ['new_achievements_added']})
+          game({appid: 28, name: 'New Achievements Game', tags: ['new_achievements_added']}),
+          game({appid: 29, name: 'Unvetted Game', unvetted: true, tags: []})
         ]
       }))
     })
@@ -349,7 +353,44 @@ describe('App dashboard views', () => {
     render(App)
 
     const panel = await screen.findByLabelText('Filter not completed games by tag')
-    expect(chipLabels(panel)).toEqual(['All', 'New achievements added', 'Almost there', 'In progress', 'Untouched', 'Not owned', 'Achievements in DLC', 'No achievements', 'Set', 'DLC', 'Missing cover art', 'Sync error'])
+    expect(chipLabels(panel)).toEqual(['All', 'New achievements added', 'Almost there', 'In progress', 'Untouched', 'Unvetted', 'No achievements', 'Set', 'DLC', 'Not owned', 'Achievements in DLC', 'Missing cover art', 'Sync error'])
+  })
+
+  test('shows the Unvetted tag with hover text on unvetted cards and filters both views on it', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState({
+        suggestions: [
+          game({appid: 50, name: 'Fresh Game', unvetted: true, tags: ['in_progress'], unlockedAchievements: 2, completionPercent: 20, playtimeForever: 10}),
+          game({appid: 51, name: 'Old Game', tags: ['in_progress'], unlockedAchievements: 2, completionPercent: 20, playtimeForever: 10})
+        ],
+        completed: [
+          game({appid: 52, name: 'Fresh Done', unvetted: true, tags: ['completed'], isCompleted: true, completionPercent: 100, unlockedAchievements: 5, totalAchievements: 5}),
+          game({appid: 53, name: 'Old Done', tags: ['completed'], isCompleted: true, completionPercent: 100, unlockedAchievements: 5, totalAchievements: 5})
+        ]
+      }))
+    })
+    const user = userEvent.setup()
+
+    render(App)
+
+    const freshCard = (await screen.findByRole('heading', {name: 'Fresh Game'})).closest('article')
+    expect(within(freshCard).getByText('Unvetted')).toHaveAttribute('title', 'New Steam app that Steam has not vetted yet')
+    expect(within(screen.getByRole('heading', {name: 'Old Game'}).closest('article')).queryByText('Unvetted')).not.toBeInTheDocument()
+
+    const panel = await screen.findByLabelText('Filter not completed games by tag')
+    await user.click(within(panel).getByRole('button', {name: /^Unvetted\s+1$/}))
+    expect(screen.getByRole('heading', {name: 'Fresh Game'})).toBeInTheDocument()
+    expect(screen.queryByRole('heading', {name: 'Old Game'})).not.toBeInTheDocument()
+    await user.click(within(panel).getByRole('button', {name: 'Clear tag filter'}))
+
+    await user.click(screen.getByRole('button', {name: 'Completed'}))
+    const donePanel = await screen.findByLabelText('Filter completed games by tag')
+    expect(chipLabels(donePanel)).toEqual(['All', 'Unvetted'])
+    const doneCard = (await screen.findByRole('heading', {name: 'Fresh Done'})).closest('article')
+    expect(within(doneCard).getByText('Unvetted')).toBeInTheDocument()
+    await user.click(within(donePanel).getByRole('button', {name: /^Unvetted\s+1$/}))
+    expect(screen.getByRole('heading', {name: 'Fresh Done'})).toBeInTheDocument()
+    expect(screen.queryByRole('heading', {name: 'Old Done'})).not.toBeInTheDocument()
   })
 
   test('gives the derived Set and DLC card tags their hover text', async () => {
@@ -892,6 +933,87 @@ describe('App clear-data confirmation', () => {
 
     expect(clear).toHaveBeenCalledOnce()
     await waitFor(() => expect(screen.getByRole('heading', {name: 'Connect your profile'})).toBeInTheDocument())
+  })
+})
+
+describe('App library sync settings', () => {
+  function settingsState(settings) {
+    return {...dashboardState(), settings}
+  }
+
+  test('saves toggled library settings and shows the returned state', async () => {
+    const setSettings = vi.fn(async (includeUnvettedApps, includePlayedFreeGames) => settingsState({includeUnvettedApps, includePlayedFreeGames}))
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => settingsState({includeUnvettedApps: true, includePlayedFreeGames: true})),
+      SetLibrarySettings: setSettings
+    })
+    const user = userEvent.setup()
+
+    render(App)
+    await user.click(await screen.findByRole('button', {name: 'Settings'}))
+    const unvetted = screen.getByRole('switch', {name: 'Include unvetted apps'})
+    const playedFree = screen.getByRole('switch', {name: 'Include played free games'})
+    expect(unvetted).toBeChecked()
+    expect(playedFree).toBeChecked()
+
+    await user.click(unvetted)
+
+    expect(setSettings).toHaveBeenLastCalledWith(false, true)
+    await waitFor(() => expect(unvetted).not.toBeChecked())
+    expect(playedFree).toBeChecked()
+
+    await user.click(playedFree)
+
+    expect(setSettings).toHaveBeenLastCalledWith(false, false)
+    await waitFor(() => expect(playedFree).not.toBeChecked())
+    expect(setSettings).toHaveBeenCalledTimes(2)
+    // Settings never start a sync, so the sync button stays idle.
+    expect(screen.getByRole('button', {name: 'Sync now'})).toBeEnabled()
+  })
+
+  test('ignores toggle clicks while the save is in flight', async () => {
+    let resolveSave
+    const setSettings = vi.fn(() => new Promise((resolve) => {
+      resolveSave = resolve
+    }))
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState()), SetLibrarySettings: setSettings})
+    const user = userEvent.setup()
+
+    render(App)
+    await user.click(await screen.findByRole('button', {name: 'Settings'}))
+    await user.click(screen.getByRole('switch', {name: 'Include unvetted apps'}))
+
+    const unvetted = screen.getByRole('switch', {name: 'Include unvetted apps'})
+    const playedFree = screen.getByRole('switch', {name: 'Include played free games'})
+    // Never `disabled`: that would dim the switch and drop focus mid-click.
+    expect(unvetted).toBeEnabled()
+    expect(unvetted).toHaveAttribute('aria-busy', 'true')
+    expect(playedFree).toHaveAttribute('aria-busy', 'true')
+
+    await user.click(playedFree)
+    expect(playedFree).toBeChecked()
+    expect(setSettings).toHaveBeenCalledTimes(1)
+
+    resolveSave(settingsState({includeUnvettedApps: false, includePlayedFreeGames: true}))
+    await waitFor(() => expect(unvetted).toHaveAttribute('aria-busy', 'false'))
+    expect(unvetted).not.toBeChecked()
+  })
+
+  test('shows the error and keeps the stored setting when saving fails', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState()),
+      SetLibrarySettings: rejecting()
+    })
+    const user = userEvent.setup()
+
+    render(App)
+    await user.click(await screen.findByRole('button', {name: 'Settings'}))
+    const unvetted = screen.getByRole('switch', {name: 'Include unvetted apps'})
+    await user.click(unvetted)
+
+    expect(await screen.findByText(failureMessage)).toBeInTheDocument()
+    await waitFor(() => expect(unvetted).toBeChecked())
+    expect(screen.getByRole('switch', {name: 'Include unvetted apps'})).toHaveAttribute('aria-busy', 'false')
   })
 })
 

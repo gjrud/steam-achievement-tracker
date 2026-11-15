@@ -234,7 +234,69 @@ var migrations = []migration{
 	{version: 8, name: "profile_scoped_not_owned_flags", sql: profileScopedNotOwnedFlagsSQL},
 	{version: 9, name: "achievement_sets", sql: achievementSetsSQL},
 	{version: 10, name: "dlc_not_owned_sets", sql: dlcNotOwnedSetsSQL},
+	{version: 11, name: "purchased_games", sql: purchasedGamesSQL},
+	{version: 12, name: "profile_owned_games", sql: profileOwnedGamesSQL},
+	{version: 13, name: "profile_library_settings", sql: profileLibrarySettingsSQL},
+	{version: 14, name: "profile_owned_games_vetted", sql: profileOwnedGamesVettedSQL},
 }
+
+// profileOwnedGamesVettedSQL records per profile whether the app is in Steam's vetted list (vetted=1). An unvetted
+// app (vetted=0) is one the library returns only when unvetted apps are included. Rows from before this migration
+// default to 1 (vetted) until the next owned-games sync sets the flag.
+const profileOwnedGamesVettedSQL = `
+ALTER TABLE profile_owned_games ADD COLUMN vetted integer not null default 1;
+`
+
+// profileLibrarySettingsSQL stores the library sync options per profile. A profile without a row uses the
+// defaults (both on), so no backfill is needed. Rows are removed with their profile (see repository.ClearProfileData).
+const profileLibrarySettingsSQL = `
+CREATE TABLE IF NOT EXISTS profile_library_settings(
+  profile_id integer primary key,
+  include_unvetted_apps integer not null default 1,
+  include_played_free_games integer not null default 1,
+  updated_at text not null,
+  foreign key(profile_id) references profiles(id)
+);
+`
+
+// purchasedGamesSQL records whether the game is in the account's purchased list. Rows from before this
+// migration default to 0 (not known to be purchased) until the next owned-games sync sets the flag.
+const purchasedGamesSQL = `
+ALTER TABLE games ADD COLUMN purchased integer not null default 0;
+`
+
+// profileOwnedGamesSQL moves the per-account game facts out of the global games table and into
+// profile_owned_games, keyed by (profile_id, appid): playtime_forever and the purchased flag. Two profiles
+// that own the same app therefore keep their own playtime and purchased state, and syncing one profile never
+// changes the other. Pure games facts (name, achievements, cover) stay in games.
+//
+// Backfill: every (profile_id, appid) entry gets the legacy games.playtime_forever and games.purchased values.
+// The global purchased flag was last written by whichever profile synced, so it is copied to every profile
+// that has the game; the next owned-games sync for each profile sets the real per-profile value.
+//
+// Legacy columns: games.playtime_forever and games.purchased are no longer read or written by app code after
+// this migration. They stay in place (SQLite drop-column is risky). Inserts into games may still take the
+// column defaults, which is harmless.
+//
+// Views and triggers: none exist in the schema, so nothing else depends on the legacy columns. Older
+// migrations (3-10) still mention games.playtime_forever, but they have already run and are not re-executed.
+const profileOwnedGamesSQL = `
+CREATE TABLE IF NOT EXISTS profile_owned_games(
+  profile_id integer not null,
+  appid integer not null,
+  playtime_forever integer not null default 0,
+  purchased integer not null default 0,
+  updated_at text not null,
+  primary key(profile_id, appid),
+  foreign key(profile_id) references profiles(id),
+  foreign key(appid) references games(appid)
+);
+
+INSERT OR IGNORE INTO profile_owned_games(profile_id, appid, playtime_forever, purchased, updated_at)
+SELECT pg.profile_id, pg.appid, coalesce(max(g.playtime_forever), 0), coalesce(max(g.purchased), 0), datetime('now')
+FROM profile_games pg LEFT JOIN games g ON g.appid=pg.appid
+GROUP BY pg.profile_id, pg.appid;
+`
 
 // dlcNotOwnedSetsSQL adds the per-entry DLC ownership fact (sets of DLC the profile does not own are now
 // entries too). Completed entries no longer carry the derived new-achievements and DLC-missing issue tags,

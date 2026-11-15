@@ -1,7 +1,7 @@
-// Filter chip order, shared by the Not completed and Completed views and by the tags on every card. Follows the
-// Not completed groups (candidates, not owned, flagged DLC, no achievements), then the derived set/dlc tags and
-// issue tags.
-export const suggestionTagOptions = ['new_achievements_added', 'almost_there', 'in_progress', 'untouched', 'dlc_not_owned', 'missing_achievements_in_dlc', 'no_achievements', 'set', 'dlc', 'missing_cover_art', 'sync_warning']
+// Filter chip order, shared by the Not completed and Completed views and by the tags on every card. The progress tags
+// come first, then the neutral-toned tags, adjacent after untouched (unvetted, no_achievements, set, dlc); the
+// danger-toned tags follow (dlc_not_owned, missing_achievements_in_dlc, missing_cover_art, sync_warning).
+export const suggestionTagOptions = ['new_achievements_added', 'almost_there', 'in_progress', 'untouched', 'unvetted', 'no_achievements', 'set', 'dlc', 'dlc_not_owned', 'missing_achievements_in_dlc', 'missing_cover_art', 'sync_warning']
 
 // Issue tags that describe an incomplete entry. Completed cards never show them, even if a stored tag is present.
 const incompleteOnlyTags = ['new_achievements_added', 'missing_achievements_in_dlc']
@@ -15,13 +15,14 @@ function tagRank(tag) {
 }
 
 // gameTags lists the tags shown on a card and used for filtering. 'set' is derived for every non-base achievement
-// set (groupId != 0) and 'dlc' from dlcAppId, so both are filterable like any other tag. The result is de-duplicated
+// set (groupId != 0), 'dlc' from dlcAppId and 'unvetted' from game.unvetted, so all are filterable like any other tag. The result is de-duplicated
 // and sorted by tagRank, so card tags appear in the same order as the filter chips.
 export function gameTags(game) {
   const stored = Array.isArray(game?.tags) ? game.tags : []
   const derived = []
   if (typeof game?.groupId === 'number' && game.groupId !== 0) derived.push('set')
   if (game?.dlcAppId) derived.push('dlc')
+  if (game?.unvetted === true) derived.push('unvetted')
   const tags = [...new Set([...derived, ...stored])]
   const visible = game?.isCompleted ? tags.filter((tag) => !incompleteOnlyTags.includes(tag)) : tags
   return visible.sort((a, b) => tagRank(a) - tagRank(b))
@@ -37,6 +38,7 @@ export function tagLabel(tag) {
     case 'completed': return 'Completed'
     case 'set': return 'Set'
     case 'dlc': return 'DLC'
+    case 'unvetted': return 'Unvetted'
     case 'dlc_not_owned': return 'Not owned'
     case 'missing_achievements_in_dlc': return 'Achievements in DLC'
     case 'missing_cover_art': return 'Missing cover art'
@@ -49,6 +51,7 @@ export function tagDescription(tag) {
   switch (tag) {
     case 'set': return 'Additional achievement set of this game'
     case 'dlc': return 'Achievement set from DLC'
+    case 'unvetted': return 'New Steam app that Steam has not vetted yet'
     case 'dlc_not_owned': return 'You do not own the DLC for this achievement set.'
     case 'missing_achievements_in_dlc': return 'Remaining achievements belong to DLC or content you do not plan to count. Set manually from the card menu.'
     default: return ''
@@ -66,6 +69,7 @@ export function tagTone(tag) {
     case 'missing_cover_art':
     case 'sync_warning': return 'danger'
     case 'untouched':
+    case 'unvetted':
     case 'no_achievements':
     case 'set':
     case 'dlc': return 'neutral'
@@ -79,8 +83,4 @@ export function toneClass(tone) {
 
 export function tagCountFromGames(games, tag) {
   return (games || []).filter((game) => gameTags(game).includes(tag)).length
-}
-
-export function suggestionTagCount(games, tag) {
-  return tagCountFromGames(games, tag)
 }

@@ -8,6 +8,7 @@
     MarkGamePreviouslyCompleted,
     RetryAPIKey,
     SaveProfile,
+    SetLibrarySettings,
     SyncNow,
     ToggleGameMissingAchievementsInDLC,
     ValidateProfile
@@ -27,7 +28,6 @@
   } from './lib/game.js'
   import {matchesViewFilters, matchesSearchQuery, sortByTitle} from './lib/filter.js'
   import {gameTags, suggestionTagOptions, tagLabel, tagTone, toneClass, tagCountFromGames} from './lib/tag.js'
-  import {syncDetails, syncTitle} from './lib/sync.js'
   import {showDisabledReasonLabel} from './lib/disabled.js'
 
   let state = null
@@ -51,6 +51,7 @@
   let contextMenuEl = null
   let gameActionLoading = false
   let clearingData = false
+  let savingSettings = false
   let clearConfirmOpen = false
   let clearConfirmInput = ''
   const menuMargin = 12
@@ -163,6 +164,32 @@
         error = formatMessage(err)
         schedulePolling()
       }
+    }
+  }
+
+  // Settings only change what the next sync gathers; this does not start a sync.
+  async function saveLibrarySettings(includeUnvettedApps, includePlayedFreeGames) {
+    if (savingSettings) return
+    // Stop the sync poll first: a tick during the save would bump stateRequestToken and drop this result.
+    // schedulePolling() below restarts it if the sync is still running.
+    stopPolling()
+    const token = ++stateRequestToken
+    savingSettings = true
+    error = ''
+    pollError = false
+    try {
+      const nextState = await SetLibrarySettings(includeUnvettedApps, includePlayedFreeGames)
+      if (token === stateRequestToken) {
+        state = nextState
+        schedulePolling()
+      }
+    } catch (err) {
+      if (token === stateRequestToken) {
+        error = formatMessage(err)
+        schedulePolling()
+      }
+    } finally {
+      savingSettings = false
     }
   }
 
@@ -307,7 +334,6 @@
   $: tagFilterCounts = Object.fromEntries(suggestionTagOptions.map((tag) => [tag, tagCountFromGames(tagFilterGames, tag)]))
   $: visibleTagFilterOptions = suggestionTagOptions.filter((tag) => tagFilterCounts[tag] > 0)
   $: if (activeTagFilter && !tagFilterCounts[activeTagFilter]) activeTagFilter = ''
-  $: syncCardTone = syncIsRunning ? 'info' : latestSyncRun?.status === 'partial' || latestSyncRun?.status === 'failed' ? 'warn' : ''
   $: filteredSuggestions = suggestions.filter((game) => matchesViewFilters(game, normalizedViewSearch, activeTagFilter))
   $: filteredCompleted = completed.filter((game) => matchesViewFilters(game, normalizedViewSearch, activeTagFilter))
   $: filteredWarnings = warningGames.filter((game) => matchesSearchQuery(game, normalizedViewSearch))
@@ -347,7 +373,6 @@
     {summary}
     {latestSyncRun}
     {syncIsRunning}
-    {syncCardTone}
     {activeView}
     {viewSearch}
     {activeTagFilter}
@@ -362,7 +387,9 @@
     {viewFiltered}
     {gameActionLoading}
     {clearingData}
+    {savingSettings}
     onSyncNow={syncNow}
+    onSetLibrarySettings={saveLibrarySettings}
     onActiveViewChange={changeView}
     onViewSearch={(value) => (viewSearch = value)}
     onActiveTagFilter={(value) => (activeTagFilter = value)}
@@ -375,8 +402,6 @@
     gameTitle={gameTitle}
     gameWarning={gameWarning}
     formatPlaytime={formatPlaytime}
-    syncTitle={syncTitle}
-    syncDetails={syncDetails}
     integer={integer}
     pct={pct}
     cardProgress={cardProgress}

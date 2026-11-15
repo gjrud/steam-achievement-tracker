@@ -2,7 +2,9 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -18,12 +20,15 @@ func TestOpenAndMigrateFreshDB(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 10)
+	assertUserVersion(t, conn, 14)
 	assertTable(t, conn, "schema_migrations")
 	assertTable(t, conn, "profile_game_flags")
 	assertTable(t, conn, "profile_game_tags")
 	assertTable(t, conn, "game_sets")
 	assertTable(t, conn, "cover_images")
+	assertCount(t, conn, `select count(*) from pragma_table_info('games') where name='purchased' and dflt_value='0' and "notnull"=1`, 1)
+	assertTable(t, conn, "profile_owned_games")
+	assertTable(t, conn, "profile_library_settings")
 	assertMigration(t, conn, 1)
 	assertMigration(t, conn, 2)
 	assertMigration(t, conn, 3)
@@ -34,6 +39,9 @@ func TestOpenAndMigrateFreshDB(t *testing.T) {
 	assertMigration(t, conn, 8)
 	assertMigration(t, conn, 9)
 	assertMigration(t, conn, 10)
+	assertMigration(t, conn, 11)
+	assertMigration(t, conn, 12)
+	assertMigration(t, conn, 13)
 }
 
 func TestOpenAndMigrateLegacyV1DB(t *testing.T) {
@@ -55,7 +63,7 @@ func TestOpenAndMigrateLegacyV1DB(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 10)
+	assertUserVersion(t, conn, 14)
 	assertTable(t, conn, "schema_migrations")
 	assertTable(t, conn, "profile_game_flags")
 	assertTable(t, conn, "profile_game_tags")
@@ -69,6 +77,8 @@ func TestOpenAndMigrateLegacyV1DB(t *testing.T) {
 	assertMigration(t, conn, 8)
 	assertMigration(t, conn, 9)
 	assertMigration(t, conn, 10)
+	assertMigration(t, conn, 11)
+	assertMigration(t, conn, 12)
 	entries, err := filepath.Glob(filepath.Join(paths.Backups, "*.db"))
 	if err != nil {
 		t.Fatalf("glob backups: %v", err)
@@ -101,7 +111,7 @@ func TestOpenAndMigrateLegacyV1BackupContainsOriginalData(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 10)
+	assertUserVersion(t, conn, 14)
 	assertCount(t, conn, `select count(*) from profiles where steam_id64='11111111111111111' and display_name='Legacy User'`, 1)
 	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=42 and total_achievements=10 and unlocked_achievements=7`, 1)
 
@@ -133,7 +143,7 @@ func TestMigrationV8ScopesGlobalDisabledToLatestSyncProfile(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 10)
+	assertUserVersion(t, conn, 14)
 	assertCount(t, conn, `select count(*) from profile_game_flags where profile_id=1 and appid=50 and disabled=1 and disabled_reason='not_owned'`, 1)
 	assertCount(t, conn, `select count(*) from profile_game_flags where profile_id=2 and appid=50 and disabled=1`, 0)
 	assertCount(t, conn, `select count(*) from games where appid=50 and disabled=0 and disabled_reason is null`, 1)
@@ -207,9 +217,11 @@ func TestMigrationV9RebuildsPopulatedV8DB(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 10)
+	assertUserVersion(t, conn, 14)
 	assertMigration(t, conn, 9)
 	assertMigration(t, conn, 10)
+	assertMigration(t, conn, 11)
+	assertMigration(t, conn, 12)
 	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=42 and groupid=0 and total_achievements=10 and unlocked_achievements=7 and suggestion_score=61.2`, 1)
 	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=43 and groupid=0 and is_completed=1`, 1)
 	assertCount(t, conn, `select count(*) from profile_game_flags where profile_id=1 and appid=42 and groupid=0 and manual_was_completed=1 and missing_achievements_in_dlc=1`, 1)
@@ -262,8 +274,10 @@ func TestMigrationV10AddsDLCNotOwnedAndPrunesCompletedIssueTags(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 10)
+	assertUserVersion(t, conn, 14)
 	assertMigration(t, conn, 10)
+	assertMigration(t, conn, 11)
+	assertMigration(t, conn, 12)
 	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=42 and groupid=0 and total_achievements=10 and unlocked_achievements=7 and is_completed=0 and was_completed=1`, 1)
 	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=42 and groupid=1 and total_achievements=4`, 1)
 	assertCount(t, conn, `select count(*) from profile_games where profile_id=1 and appid=43 and groupid=0 and is_completed=1 and newly_incomplete=1`, 1)
@@ -274,6 +288,152 @@ func TestMigrationV10AddsDLCNotOwnedAndPrunesCompletedIssueTags(t *testing.T) {
 	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=43 and groupid=0 and tag='missing_cover_art'`, 1)
 	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=43 and tag='new_achievements_added'`, 0)
 	assertCount(t, conn, `select count(*) from profile_game_tags where profile_id=1 and appid=43 and tag='missing_achievements_in_dlc'`, 0)
+}
+
+func TestMigrationV11AddsPurchasedColumnDefaultingToZero(t *testing.T) {
+	paths := testPaths(t)
+	seedUpgradeDatabase(t, paths.DB, 10, "")
+
+	conn, err := OpenAndMigrate(paths)
+	if err != nil {
+		t.Fatalf("OpenAndMigrate() error = %v", err)
+	}
+	defer conn.Close()
+
+	assertUserVersion(t, conn, 14)
+	assertMigration(t, conn, 11)
+	assertCount(t, conn, `select count(*) from pragma_table_info('games') where name='purchased' and dflt_value='0' and "notnull"=1`, 1)
+	// Games seeded before the migration (appid 42 and 43) keep the default; v12 copies it per profile.
+	assertCount(t, conn, `select count(*) from games where purchased=0`, 2)
+}
+
+// A v10 database (no games.purchased) upgraded through v11 and v12: each profile entry gets its own
+// profile_owned_games row with the legacy playtime and purchased=0 until the next sync.
+func TestMigrationV12BackfillsPlaytimePerProfileFromV10(t *testing.T) {
+	paths := testPaths(t)
+	seedUpgradeDatabase(t, paths.DB, 10, "")
+
+	conn, err := OpenAndMigrate(paths)
+	if err != nil {
+		t.Fatalf("OpenAndMigrate() error = %v", err)
+	}
+	defer conn.Close()
+
+	assertUserVersion(t, conn, 14)
+	assertMigration(t, conn, 12)
+	assertCount(t, conn, `select count(*) from profile_owned_games`, 3)
+	assertCount(t, conn, `select count(*) from profile_owned_games where profile_id=1 and appid=42 and playtime_forever=90 and purchased=0`, 1)
+	assertCount(t, conn, `select count(*) from profile_owned_games where profile_id=2 and appid=42 and playtime_forever=90 and purchased=0`, 1)
+	assertCount(t, conn, `select count(*) from profile_owned_games where profile_id=1 and appid=43 and playtime_forever=30 and purchased=0`, 1)
+}
+
+// A v11 database whose games.purchased flags were set by the old global sync: v12 copies the legacy global
+// purchased flag to every profile that has the game, even a profile that did not buy it, until that profile's
+// next sync corrects it.
+func TestMigrationV12BackfillsPurchasedFromV11Database(t *testing.T) {
+	paths := testPaths(t)
+	seedUpgradeDatabase(t, paths.DB, 11, `UPDATE games SET purchased=1 WHERE appid=42;`)
+
+	conn, err := OpenAndMigrate(paths)
+	if err != nil {
+		t.Fatalf("OpenAndMigrate() error = %v", err)
+	}
+	defer conn.Close()
+
+	assertUserVersion(t, conn, 14)
+	assertMigration(t, conn, 12)
+	assertCount(t, conn, `select count(*) from profile_owned_games`, 3)
+	assertCount(t, conn, `select count(*) from profile_owned_games where profile_id=1 and appid=42 and playtime_forever=90 and purchased=1`, 1)
+	assertCount(t, conn, `select count(*) from profile_owned_games where profile_id=2 and appid=42 and playtime_forever=90 and purchased=1`, 1)
+	assertCount(t, conn, `select count(*) from profile_owned_games where profile_id=1 and appid=43 and playtime_forever=30 and purchased=0`, 1)
+	// The legacy columns stay in place (not dropped), but the app no longer reads them.
+	assertCount(t, conn, `select count(*) from pragma_table_info('games') where name in ('playtime_forever','purchased')`, 2)
+}
+
+// A v12 database upgraded to v13: profile_library_settings exists, starts empty (no backfill), defaults both
+// flags on for a new row, and rejects rows for profiles that do not exist.
+func TestMigrationV13AddsProfileLibrarySettingsFromV12(t *testing.T) {
+	paths := testPaths(t)
+	seedUpgradeDatabase(t, paths.DB, 12, "")
+
+	conn, err := OpenAndMigrate(paths)
+	if err != nil {
+		t.Fatalf("OpenAndMigrate() error = %v", err)
+	}
+	defer conn.Close()
+
+	assertUserVersion(t, conn, 14)
+	assertMigration(t, conn, 13)
+	assertCount(t, conn, `select count(*) from profile_library_settings`, 0)
+	if _, err := conn.Exec(`insert into profile_library_settings(profile_id, updated_at) values(1, '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("insert default library settings: %v", err)
+	}
+	assertCount(t, conn, `select count(*) from profile_library_settings where profile_id=1 and include_unvetted_apps=1 and include_played_free_games=1`, 1)
+	if _, err := conn.Exec(`insert into profile_library_settings(profile_id, updated_at) values(999, '2026-01-01T00:00:00Z')`); err == nil {
+		t.Fatal("insert library settings for missing profile succeeded, want foreign key failure")
+	}
+}
+
+// A v13 database upgraded to v14: existing profile_owned_games rows default to vetted=1 (until the next sync),
+// and a new row without an explicit vetted value also defaults to 1.
+func TestMigrationV14AddsVettedDefaultingToOneFromV13(t *testing.T) {
+	paths := testPaths(t)
+	seedUpgradeDatabase(t, paths.DB, 13, `
+		INSERT INTO profile_owned_games(profile_id, appid, playtime_forever, purchased, updated_at) VALUES
+			(1, 42, 90, 0, '2026-01-02T00:00:00Z'),
+			(2, 42, 90, 1, '2026-01-02T00:00:00Z'),
+			(1, 43, 30, 0, '2026-01-02T00:00:00Z');
+	`)
+
+	conn, err := OpenAndMigrate(paths)
+	if err != nil {
+		t.Fatalf("OpenAndMigrate() error = %v", err)
+	}
+	defer conn.Close()
+
+	assertUserVersion(t, conn, 14)
+	assertMigration(t, conn, 14)
+	assertCount(t, conn, `select count(*) from pragma_table_info('profile_owned_games') where name='vetted' and dflt_value='1' and "notnull"=1`, 1)
+	assertCount(t, conn, `select count(*) from profile_owned_games`, 3)
+	assertCount(t, conn, `select count(*) from profile_owned_games where vetted=1`, 3)
+	if _, err := conn.Exec(`insert into profile_owned_games(profile_id, appid, updated_at) values(2, 43, '2026-01-03T00:00:00Z')`); err != nil {
+		t.Fatalf("insert owned game without vetted: %v", err)
+	}
+}
+
+// seedUpgradeDatabase writes a populated schema at the given version (real migrations 1..version) with two
+// profiles: profile 1 owns games 42 and 43, profile 2 owns game 42 only. extraSQL runs last. OpenAndMigrate
+// then upgrades the file to the current schema.
+func seedUpgradeDatabase(t *testing.T, path string, version int, extraSQL string) {
+	t.Helper()
+	legacy := openRawDB(t, path)
+	applyMigrationsUpTo(t, legacy, version)
+	rows := make([]string, 0, version)
+	for v := 1; v <= version; v++ {
+		rows = append(rows, fmt.Sprintf("(%d,'m%d','2026-01-01T00:00:00Z')", v, v))
+	}
+	script := `
+		CREATE TABLE IF NOT EXISTS schema_migrations(version integer primary key, name text not null, applied_at text not null);
+		INSERT INTO schema_migrations(version, name, applied_at) VALUES ` + strings.Join(rows, ",") + `;
+		PRAGMA user_version = ` + fmt.Sprint(version) + `;
+		INSERT INTO profiles(id, steam_id64, display_name, created_at, updated_at) VALUES
+			(1, '11111111111111111', 'User One', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+			(2, '22222222222222222', 'User Two', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+		INSERT INTO settings(key, value) VALUES('active_profile_id', '1');
+		INSERT INTO games(appid, name, playtime_forever, has_achievements, achievement_status, created_at, updated_at) VALUES
+			(42, 'Shared Game', 90, 1, 'ok', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+			(43, 'Solo Game', 30, 1, 'ok', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+		INSERT INTO profile_games(profile_id, appid, groupid, total_achievements, unlocked_achievements, completion_percent, is_completed, was_completed, newly_incomplete, last_synced_at) VALUES
+			(1, 42, 0, 10, 7, 70, 0, 1, 0, '2026-01-02T00:00:00Z'),
+			(1, 43, 0, 4, 4, 100, 1, 1, 1, '2026-01-02T00:00:00Z'),
+			(2, 42, 0, 10, 2, 20, 0, 0, 0, '2026-01-02T00:00:00Z');
+	` + extraSQL
+	if _, err := legacy.Exec(script); err != nil {
+		t.Fatalf("seed v%d db: %v", version, err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close v%d db: %v", version, err)
+	}
 }
 
 // seedV9Database writes a populated schema at version 9 (real migrations 1..9) with an
