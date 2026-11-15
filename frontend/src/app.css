@@ -348,12 +348,11 @@
     font-size: 1em;
   }
 
-  /* Sync band: full-bleed footer of the profile card. The card's tone-* class sets --c, --fg, --bg and --bd. */
+  /* Sync band: full-bleed footer of the profile card. The card's tone-* class sets --c (icon) and --fg (headline);
+     warn, fail and run also set --bg and --bd for the band fill and its top border. */
   .profile-card.tone-ok {
     --c: #22c55e;
-    --fg: #9df4b8;
-    --bg: rgba(34, 197, 94, 0.14);
-    --bd: rgba(34, 197, 94, 0.45);
+    --fg: #d3e4f2;
   }
 
   .profile-card.tone-run {
@@ -380,8 +379,6 @@
   .profile-card.tone-none {
     --c: #8ea7be;
     --fg: #b9cfe2;
-    --bg: rgba(148, 163, 184, 0.12);
-    --bd: rgba(148, 163, 184, 0.35);
   }
 
   .profile-card > .profile-avatar,
@@ -395,12 +392,12 @@
     grid-column: 1 / -1;
     align-self: stretch;
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     row-gap: 0.12em;
     min-width: 0;
     margin: 0 -1em;
     padding: 0.65em 1em 0.7em;
     border-top: 1px solid #22344a;
-    color: #d3e4f2;
   }
 
   .profile-card.tone-warn .sync-band,
@@ -414,14 +411,11 @@
     display: flex;
     align-items: center;
     gap: 0.5em;
+    min-width: 0;
     margin: 0;
     color: var(--fg);
     font-size: 0.95em;
     font-weight: 700;
-  }
-
-  .profile-card.tone-ok .sync-headline {
-    color: #d3e4f2;
   }
 
   .sync-headline .ico {
@@ -429,6 +423,14 @@
     height: 1em;
     flex: none;
     color: var(--c);
+  }
+
+  /* One line: a long headline ends in an ellipsis instead of wrapping and making the card taller. */
+  .sync-headline > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .sync-headline .spin {
@@ -441,7 +443,11 @@
     }
   }
 
+  /* One line, never wrapped: the counts shrink and end in an ellipsis, while the separator and the time keep their
+     full width. */
   .sync-meta {
+    display: flex;
+    min-width: 0;
     margin: 0;
     color: #8aa4bd;
     font-size: 0.88em;
@@ -454,7 +460,16 @@
     color: #b4c9dc;
   }
 
+  .sync-meta .sync-detail {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .sync-meta .sync-sep,
   .sync-meta time {
+    flex: none;
     white-space: nowrap;
   }
 

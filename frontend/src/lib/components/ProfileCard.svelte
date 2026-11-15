@@ -38,7 +38,7 @@
       <span>{band.headline}</span>
     </p>
     {#if band.detail || band.time}
-      <p class="sync-meta">{band.detail}{#if band.detail && band.time}{' · '}{/if}{#if band.time}<time datetime={band.time.iso} title={band.time.title}>{band.time.text}</time>{/if}</p>
+      <p class="sync-meta">{#if band.detail}<span class="sync-detail">{band.detail}</span>{/if}{#if band.detail && band.time}<span class="sync-sep" aria-hidden="true">&nbsp;·&nbsp;</span><span class="sr-only">{', '}</span>{/if}{#if band.time}<time datetime={band.time.iso} title={band.time.title}>{band.time.text}</time>{/if}</p>
     {/if}
     <p class="sr-only" role="status">{band.announce}</p>
   </div>

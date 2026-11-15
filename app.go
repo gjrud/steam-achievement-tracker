@@ -23,6 +23,9 @@ import (
 	"github.com/gjrud/steam-achievement-tracker/internal/syncer"
 )
 
+// errSyncAlreadyInProgress is startSync's error for a forced start while a sync is running.
+var errSyncAlreadyInProgress = errors.New("sync already in progress")
+
 type App struct {
 	ctx    context.Context
 	mu     sync.Mutex
@@ -37,7 +40,15 @@ type App struct {
 	apiKeyError    string
 	syncInProgress bool
 	syncCancel     context.CancelFunc
-	syncWG         sync.WaitGroup
+	// syncProfileID, syncBaselineRunID and syncBaselineKnown describe the current sync. syncBaselineRunID is the
+	// profile's latest sync run id when the sync started, valid only while syncBaselineKnown is set. A later run of
+	// the same profile with a higher id is the current sync's own run.
+	syncProfileID     int64
+	syncBaselineRunID int64
+	syncBaselineKnown bool
+	syncWG            sync.WaitGroup
+	// steamBaseURL overrides the Steam API base URL of sync clients when non-empty. Tests only; production leaves it empty.
+	steamBaseURL string
 }
 
 type AppState struct {
@@ -71,7 +82,7 @@ func (a *App) startup(ctx context.Context) {
 	}
 	state, err := a.GetAppState()
 	if err == nil && state.APIKeyPresent && state.ProfileExists {
-		a.startSync(false)
+		logStartSyncError(a.startSync(false))
 	}
 }
 
@@ -136,6 +147,9 @@ func (a *App) GetAppState() (AppState, error) {
 				syncInProgress = false
 				a.mu.Unlock()
 			}
+			// A live sync writes its run's final status before its goroutine clears the flag, so the run can already
+			// be final here. The sync state is re-read under the lock by syncStillRunning, after the reads above.
+			syncInProgress = a.syncStillRunning(syncInProgress, p.ID, d.LatestSyncRun)
 		}
 	}
 	state := a.baseState(profile, dashboard)
@@ -204,7 +218,7 @@ func (a *App) SaveProfile(preview ProfilePreview) (AppState, error) {
 	if _, err := repo.SaveProfile(preview.SteamID64, preview.DisplayName, preview.AvatarURL); err != nil {
 		return AppState{}, err
 	}
-	a.startSync(true)
+	logStartSyncError(a.startSync(true))
 	return a.GetAppState()
 }
 
@@ -407,23 +421,17 @@ func (a *App) startSync(force bool) error {
 	if a.syncInProgress {
 		a.mu.Unlock()
 		cancel()
-		return errors.New("sync already in progress")
+		return errSyncAlreadyInProgress
 	}
 	repo := a.repo
 	key := a.steamAPIKey
 	paths := a.paths
+	baseURL := a.steamBaseURL
 	a.syncInProgress = true
 	a.syncCancel = cancel
 	a.syncWG.Add(1)
 	a.mu.Unlock()
-	done := func() {
-		cancel()
-		a.mu.Lock()
-		a.syncCancel = nil
-		a.syncInProgress = false
-		a.mu.Unlock()
-		a.syncWG.Done()
-	}
+	done := func() { a.endSync(cancel) }
 	if repo == nil {
 		done()
 		return errors.New("database is not initialized")
@@ -446,6 +454,26 @@ func (a *App) startSync(force bool) error {
 		done()
 		return err
 	}
+	if baseURL != "" {
+		client.BaseURL = baseURL
+	}
+	// The baseline is read before the goroutine starts, so no run of this sync exists yet: it is the run that was
+	// latest at start. If it cannot be read, the sync does not start and the error is returned. StartSyncRun would
+	// very likely fail too, and a sync started without a baseline could not tell its own run from an older one.
+	latest, err := repo.LatestSyncRun(profile.ID)
+	if err != nil {
+		done()
+		return err
+	}
+	var baselineRunID int64
+	if latest != nil {
+		baselineRunID = latest.ID
+	}
+	a.mu.Lock()
+	a.syncProfileID = profile.ID
+	a.syncBaselineRunID = baselineRunID
+	a.syncBaselineKnown = true
+	a.mu.Unlock()
 	go func(p repository.Profile) {
 		defer done()
 		service := syncer.Service{Repo: repo, Steam: client, Images: images.New(paths)}
@@ -454,6 +482,49 @@ func (a *App) startSync(force bool) error {
 		}
 	}(*profile)
 	return nil
+}
+
+// endSync ends the current sync: it cancels the sync context, clears the flag, cancel func and baseline, and releases
+// syncWG. startSync's done and the sync goroutine both end here.
+func (a *App) endSync(cancel context.CancelFunc) {
+	cancel()
+	a.mu.Lock()
+	a.syncCancel = nil
+	a.syncInProgress = false
+	a.syncProfileID = 0
+	a.syncBaselineRunID = 0
+	a.syncBaselineKnown = false
+	a.mu.Unlock()
+	a.syncWG.Done()
+}
+
+// syncStillRunning decides whether GetAppState reports a sync as running. snapshot is the flag as read before the
+// database reads, profileID the active profile and latest its latest sync run. The sync is over when the flag has
+// been cleared since the snapshot, or when its own run (a run of its profile above the baseline) has a final status.
+// The flag and cancel func are left for the sync goroutine to clear. Only the flag is re-read, under the lock. The
+// baseline is only set while the flag and cancel func are set (startSync sets it after them, endSync clears all three
+// together), so it needs no separate liveness check.
+func (a *App) syncStillRunning(snapshot bool, profileID int64, latest *repository.SyncRun) bool {
+	if !snapshot || latest == nil || latest.Status == "running" {
+		return snapshot
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ended := !a.syncInProgress
+	own := a.syncBaselineKnown && a.syncProfileID == profileID && latest.ID > a.syncBaselineRunID
+	if ended || own {
+		return false
+	}
+	return true
+}
+
+// logStartSyncError logs a startSync error for a caller that does not return it. A missing API key and a sync that is
+// already in progress are expected outcomes and are not logged.
+func logStartSyncError(err error) {
+	if err == nil || errors.Is(err, keyring.ErrMissing) || errors.Is(err, errSyncAlreadyInProgress) {
+		return
+	}
+	log.Printf("start sync: %v", err)
 }
 
 func (a *App) cancelSyncAndWait() {

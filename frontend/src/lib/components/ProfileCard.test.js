@@ -40,6 +40,18 @@ function renderCard(props = {}) {
 const card = () => document.querySelector('.profile-card')
 const band = () => document.querySelector('.sync-band')
 const status = () => screen.getByRole('status')
+const meta = () => band().querySelector('.sync-meta')
+
+// textWithout returns el's text with the parts matching selector removed, whitespace collapsed.
+function textWithout(el, selector) {
+  const copy = el.cloneNode(true)
+  copy.querySelectorAll(selector).forEach((node) => node.remove())
+  return copy.textContent.replace(/\s+/g, ' ').trim()
+}
+// visibleMeta is the meta line as sighted users read it: the screen-reader-only pause is left out.
+const visibleMeta = (el) => textWithout(el, '.sr-only')
+// spokenMeta is the meta line as a screen reader speaks it: aria-hidden parts are left out.
+const spokenMeta = (el) => textWithout(el, '[aria-hidden="true"]')
 
 describe('ProfileCard', () => {
   test('shows the display name and a fallback letter when there is no avatar', () => {
@@ -77,7 +89,7 @@ describe('ProfileCard', () => {
 
     expect(card()).toHaveClass('tone-ok')
     expect(screen.getByText('All games synced')).toBeInTheDocument()
-    expect(band()).toHaveTextContent('6 / 6 games · 2 hours ago')
+    expect(visibleMeta(meta())).toBe('6 / 6 games · 2 hours ago')
     expect(status()).toHaveTextContent('Last sync: All games synced')
   })
 
@@ -102,7 +114,7 @@ describe('ProfileCard', () => {
 
     expect(card()).toHaveClass('tone-warn')
     expect(screen.getByText('Partial sync · 3 failed')).toBeInTheDocument()
-    expect(band()).toHaveTextContent('3 / 6 games synced · 2 hours ago')
+    expect(visibleMeta(meta())).toBe('3 / 6 games synced · 2 hours ago')
     expect(status()).toHaveTextContent('Last sync: Partial sync, 3 failed')
   })
 
@@ -112,7 +124,7 @@ describe('ProfileCard', () => {
     expect(card()).toHaveClass('tone-fail')
     expect(card()).not.toHaveClass('tone-warn')
     expect(screen.getByText('Sync failed · 6 errors')).toBeInTheDocument()
-    expect(band()).toHaveTextContent('0 / 6 games synced · 2 hours ago')
+    expect(visibleMeta(meta())).toBe('0 / 6 games synced · 2 hours ago')
   })
 
   test('shows a failed sync without a count when nothing is recorded as failed', () => {
@@ -128,7 +140,7 @@ describe('ProfileCard', () => {
     expect(card()).not.toHaveClass('tone-ok')
     expect(screen.getByText('Sync canceled')).toBeInTheDocument()
     expect(screen.queryByText('All games synced')).not.toBeInTheDocument()
-    expect(band()).toHaveTextContent('4 / 6 games synced · 2 hours ago')
+    expect(visibleMeta(meta())).toBe('4 / 6 games synced · 2 hours ago')
   })
 
   test('shows running progress with a spinner that is hidden from assistive tech', () => {
@@ -142,6 +154,16 @@ describe('ProfileCard', () => {
     expect(status()).toHaveTextContent('Current sync: Sync running')
   })
 
+  test('shows Sync running with no counts while the run total is not known yet', () => {
+    renderCard({syncIsRunning: true, latestSyncRun: {...runningRun, gamesSynced: 0, gamesTotal: 0}})
+
+    expect(card()).toHaveClass('tone-run')
+    expect(band().querySelector('.sync-headline')).toHaveTextContent(/^Sync running$/)
+    expect(meta().querySelector('.sync-detail')).toBeNull()
+    expect(visibleMeta(meta())).toBe('Started 2 hours ago')
+    expect(status()).toHaveTextContent('Current sync: Sync running')
+  })
+
   test('says a sync is starting before its run record arrives, with no time', () => {
     renderCard({syncIsRunning: true, latestSyncRun: null})
 
@@ -149,7 +171,7 @@ describe('ProfileCard', () => {
     expect(screen.getByText('Sync starting')).toBeInTheDocument()
     expect(band()).toHaveTextContent('Starting sync…')
     expect(band().querySelector('time')).toBeNull()
-    expect(status()).toHaveTextContent('Current sync: Sync starting')
+    expect(status()).toHaveTextContent('Current sync: Sync running')
   })
 
   test('shows starting, not the previous finished run, when Sync now is pressed', () => {
@@ -161,7 +183,51 @@ describe('ProfileCard', () => {
     expect(band()).not.toHaveTextContent('All games synced')
     expect(band()).not.toHaveTextContent('2 hours ago')
     expect(band().querySelector('time')).toBeNull()
-    expect(status()).toHaveTextContent('Current sync: Sync starting')
+    expect(status()).toHaveTextContent('Current sync: Sync running')
+  })
+
+  test('puts the counts and the time in separate elements, joined by a visible separator and a spoken pause, when both exist', () => {
+    renderCard()
+
+    const line = meta()
+    expect(line.querySelector('.sync-detail')).toHaveTextContent('6 / 6 games')
+    expect(line.querySelector('.sync-detail')).not.toContainElement(line.querySelector('time'))
+    expect(line.querySelector('.sync-sep')).toHaveTextContent('·')
+    expect(line.querySelector('.sync-sep')).toHaveAttribute('aria-hidden', 'true')
+    expect(line.querySelector('time')).toHaveTextContent('2 hours ago')
+    expect(line.querySelector('.sync-sep').nextElementSibling).toBe(line.querySelector('.sr-only'))
+    expect(line.querySelector('.sr-only').textContent).toBe(', ')
+    expect(line.querySelector('.sr-only').nextElementSibling).toBe(line.querySelector('time'))
+    expect(line.querySelectorAll('.sr-only')).toHaveLength(1)
+    expect(spokenMeta(line)).toBe('6 / 6 games, 2 hours ago')
+  })
+
+  test('shows only the time, with no separator and no spoken pause, when a run has no counts', () => {
+    renderCard({latestSyncRun: {...finishedRun, gamesSynced: 0, gamesTotal: 0}})
+
+    const line = meta()
+    expect(line.querySelector('.sync-detail')).toBeNull()
+    expect(line.querySelector('.sync-sep')).toBeNull()
+    expect(line.querySelector('.sr-only')).toBeNull()
+    expect(line.querySelector('time')).toHaveTextContent('2 hours ago')
+    expect(spokenMeta(line)).toBe('2 hours ago')
+  })
+
+  test('shows only the counts, with no separator and no spoken pause, when the run date cannot be read', () => {
+    renderCard({latestSyncRun: {...finishedRun, finishedAt: 'not a date', startedAt: 'not a date'}})
+
+    const line = meta()
+    expect(line.querySelector('.sync-detail')).toHaveTextContent('6 / 6 games')
+    expect(line.querySelector('.sync-sep')).toBeNull()
+    expect(line.querySelector('.sr-only')).toBeNull()
+    expect(line.querySelector('time')).toBeNull()
+    expect(spokenMeta(line)).toBe('6 / 6 games')
+  })
+
+  test('leaves out the meta line entirely when there are neither counts nor a time', () => {
+    renderCard({latestSyncRun: {...finishedRun, gamesSynced: 0, gamesTotal: 0, finishedAt: 'not a date', startedAt: 'not a date'}})
+
+    expect(band().querySelector('.sync-meta')).toBeNull()
   })
 
   test('says no sync has run yet when there is no run record, with no time', () => {

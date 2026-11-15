@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -429,6 +433,332 @@ func TestGetAppStateStaleSyncFlag(t *testing.T) {
 	app.mu.Unlock()
 	if got {
 		t.Fatal("app.syncInProgress = true after a finished run, want stale flag cleared")
+	}
+}
+
+// setLiveSync stands in for startSync's bookkeeping for a sync that is still running: flag, cancel func, profile and
+// baseline are set together, as startSync sets them, but no sync goroutine exists and syncWG is left alone.
+func setLiveSync(app *App, profileID int64, baselineKnown bool, baselineRunID int64) {
+	_, cancel := context.WithCancel(context.Background())
+	app.mu.Lock()
+	app.syncInProgress = true
+	app.syncCancel = cancel
+	app.syncProfileID = profileID
+	app.syncBaselineKnown = baselineKnown
+	app.syncBaselineRunID = baselineRunID
+	app.mu.Unlock()
+}
+
+// waitForLatestSyncRun polls until the profile's latest sync run has status and returns it. It fails after 5 seconds.
+func waitForLatestSyncRun(t *testing.T, app *App, profileID int64, status string) repository.SyncRun {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		run, err := app.repo.LatestSyncRun(profileID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run != nil && run.Status == status {
+			return *run
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("latest sync run = %+v, want status %q", run, status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// recordSyncRun inserts a sync run for profileID. A status other than "running" is written as the run's final status.
+func recordSyncRun(t *testing.T, app *App, profileID int64, status string) int64 {
+	t.Helper()
+	id, err := app.repo.StartSyncRun(profileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != "running" {
+		if err := app.repo.FinishSyncRun(id, status, 1, 1, 0, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return id
+}
+
+// TestGetAppStateSyncInProgressFollowsOwnRun checks that a live sync is reported over as soon as its own run (an id
+// above the baseline, of the same profile) has a final status. The flag and cancel func stay set for the sync
+// goroutine to clear.
+func TestGetAppStateSyncInProgressFollowsOwnRun(t *testing.T) {
+	tests := []struct {
+		name           string
+		priorRun       bool   // a finished run exists before the sync starts
+		baselineKnown  bool   // the baseline was recorded when the sync started
+		ownRun         string // status of the sync's own run; "" when its run row was never inserted
+		otherProfile   bool   // the sync belongs to a profile other than the active one
+		wantInProgress bool
+	}{
+		{name: "own run succeeded", priorRun: true, baselineKnown: true, ownRun: "success"},
+		{name: "own run partial", priorRun: true, baselineKnown: true, ownRun: "partial"},
+		{name: "own run failed", priorRun: true, baselineKnown: true, ownRun: "failed"},
+		{name: "own run canceled", priorRun: true, baselineKnown: true, ownRun: "canceled"},
+		{name: "own run succeeded with no earlier run", baselineKnown: true, ownRun: "success"},
+		{name: "own run still running", priorRun: true, baselineKnown: true, ownRun: "running", wantInProgress: true},
+		{name: "own run not inserted yet", priorRun: true, baselineKnown: true, wantInProgress: true},
+		{name: "first run not inserted yet", baselineKnown: true, wantInProgress: true},
+		{name: "baseline not recorded yet", priorRun: true, ownRun: "success", wantInProgress: true},
+		{name: "sync profile differs from active profile", priorRun: true, baselineKnown: true, ownRun: "success", otherProfile: true, wantInProgress: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := newTestApp(t)
+			profile := saveTestProfile(t, app)
+			var baselineRunID int64
+			if tt.priorRun {
+				baselineRunID = recordSyncRun(t, app, profile.ID, "success")
+			}
+			syncProfileID := profile.ID
+			if tt.otherProfile {
+				syncProfileID = profile.ID + 1 // no such profile: the active profile's runs must not match this sync
+			}
+			setLiveSync(app, syncProfileID, tt.baselineKnown, baselineRunID)
+			if tt.ownRun != "" {
+				recordSyncRun(t, app, profile.ID, tt.ownRun)
+			}
+
+			state, err := app.GetAppState()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.SyncInProgress != tt.wantInProgress {
+				t.Fatalf("state.SyncInProgress = %v, want %v", state.SyncInProgress, tt.wantInProgress)
+			}
+			app.mu.Lock()
+			flag, cancel := app.syncInProgress, app.syncCancel
+			app.mu.Unlock()
+			if !flag || cancel == nil {
+				t.Fatal("GetAppState cleared the live sync's flag or cancel func, want the sync goroutine to own them")
+			}
+		})
+	}
+}
+
+// TestSyncStillRunningDecision table-tests the locked re-check behind GetAppState. snapshot is the flag as GetAppState
+// read it before the database reads; the sync state is set up (or left cleared) before the call, as if a sync
+// goroutine had changed it meanwhile.
+func TestSyncStillRunningDecision(t *testing.T) {
+	finished := &repository.SyncRun{ID: 5, Status: "success"}
+	tests := []struct {
+		name          string
+		snapshot      bool
+		liveSync      bool // the sync's flag and cancel func are set now
+		syncProfileID int64
+		baselineKnown bool
+		baselineRunID int64
+		latest        *repository.SyncRun
+		want          bool
+	}{
+		{name: "flag cleared since the snapshot", snapshot: true, latest: finished, want: false},
+		{name: "snapshot already clear", snapshot: false, latest: finished, want: false},
+		{name: "own run finished", snapshot: true, liveSync: true, syncProfileID: 1, baselineKnown: true, baselineRunID: 4, latest: finished, want: false},
+		{name: "new sync started meanwhile, baseline at its run", snapshot: true, liveSync: true, syncProfileID: 1, baselineKnown: true, baselineRunID: 5, latest: finished, want: true},
+		{name: "other profile's sync", snapshot: true, liveSync: true, syncProfileID: 2, baselineKnown: true, baselineRunID: 4, latest: finished, want: true},
+		{name: "own run still running", snapshot: true, liveSync: true, syncProfileID: 1, baselineKnown: true, baselineRunID: 4, latest: &repository.SyncRun{ID: 5, Status: "running"}, want: true},
+		{name: "baseline unknown", snapshot: true, liveSync: true, syncProfileID: 1, baselineKnown: false, baselineRunID: 0, latest: finished, want: true},
+		{name: "no latest run", snapshot: true, liveSync: true, syncProfileID: 1, baselineKnown: true, baselineRunID: 4, latest: nil, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := &App{}
+			if tt.liveSync {
+				setLiveSync(app, tt.syncProfileID, tt.baselineKnown, tt.baselineRunID)
+			}
+			if got := app.syncStillRunning(tt.snapshot, 1, tt.latest); got != tt.want {
+				t.Fatalf("syncStillRunning = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLogStartSyncErrorFilter checks which startSync errors reach the log when a caller discards them. A missing key
+// and an already-running sync are expected and stay out of the log.
+func TestLogStartSyncErrorFilter(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	tests := []struct {
+		name    string
+		err     error
+		wantLog bool
+	}{
+		{name: "nil", err: nil, wantLog: false},
+		{name: "missing key", err: keyring.ErrMissing, wantLog: false},
+		{name: "wrapped missing key", err: fmt.Errorf("start: %w", keyring.ErrMissing), wantLog: false},
+		{name: "already in progress", err: errSyncAlreadyInProgress, wantLog: false},
+		{name: "unreadable baseline", err: errors.New("no such table: sync_runs"), wantLog: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf.Reset()
+			logStartSyncError(tt.err)
+			if !tt.wantLog {
+				if buf.Len() != 0 {
+					t.Fatalf("logged %q, want nothing", buf.String())
+				}
+				return
+			}
+			if want := "start sync: " + tt.err.Error(); !strings.Contains(buf.String(), want) {
+				t.Fatalf("log = %q, want it to contain %q", buf.String(), want)
+			}
+		})
+	}
+}
+
+// A finished run of another profile can have an id above this sync's baseline, because run ids are shared by all
+// profiles. While that profile is active the sync must still read as in progress.
+func TestGetAppStateIgnoresFinishedRunOfOtherActiveProfile(t *testing.T) {
+	app := newTestApp(t)
+	profileA := saveTestProfile(t, app)
+	baseline := recordSyncRun(t, app, profileA.ID, "success")
+	setLiveSync(app, profileA.ID, true, baseline)
+
+	// SaveProfile makes profile B active. Its own post-save sync is refused because a sync is already live.
+	state, err := app.SaveProfile(ProfilePreview{SteamID64: "76561198000000002", DisplayName: "Other"})
+	if err != nil {
+		t.Fatalf("SaveProfile: %v", err)
+	}
+	if state.Profile == nil || state.Profile.ID == profileA.ID {
+		t.Fatalf("active profile = %+v, want profile B", state.Profile)
+	}
+	recordSyncRun(t, app, state.Profile.ID, "success")
+
+	state, err = app.GetAppState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.SyncInProgress {
+		t.Fatal("SyncInProgress = false while profile A's sync is live and profile B's run finished, want true")
+	}
+}
+
+// TestStartSyncRecordsBaselineAndFollowsItsOwnRun runs the real startSync against a Steam stub. The stub holds every
+// request until the test releases it, then answers with a 403, which is not retried, so the sync run fails.
+func TestStartSyncRecordsBaselineAndFollowsItsOwnRun(t *testing.T) {
+	app := newTestApp(t)
+	profile := saveTestProfile(t, app)
+	prior := recordSyncRun(t, app, profile.ID, "success")
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	t.Cleanup(server.Close)
+	t.Cleanup(unblock) // runs before server.Close, so a failed test cannot hang on the held request
+	app.mu.Lock()
+	app.steamAPIKey = "fixture-steam-key"
+	app.steamBaseURL = server.URL
+	app.mu.Unlock()
+
+	if err := app.startSync(true); err != nil {
+		t.Fatalf("startSync: %v", err)
+	}
+	app.mu.Lock()
+	known, runID, profileID := app.syncBaselineKnown, app.syncBaselineRunID, app.syncProfileID
+	app.mu.Unlock()
+	if !known || runID != prior || profileID != profile.ID {
+		t.Fatalf("baseline after startSync = known %v run %d profile %d, want known, run %d, profile %d",
+			known, runID, profileID, prior, profile.ID)
+	}
+
+	waitForLatestSyncRun(t, app, profile.ID, "running")
+	state, err := app.GetAppState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.SyncInProgress {
+		t.Fatal("SyncInProgress = false while the sync's run is running, want true")
+	}
+
+	unblock()
+	waitForSyncWG(t, app)
+	assertIdleSync(t, app)
+	app.mu.Lock()
+	known, runID, profileID = app.syncBaselineKnown, app.syncBaselineRunID, app.syncProfileID
+	app.mu.Unlock()
+	if known || runID != 0 || profileID != 0 {
+		t.Fatalf("baseline after sync end = known %v run %d profile %d, want cleared", known, runID, profileID)
+	}
+	state, err = app.GetAppState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SyncInProgress {
+		t.Fatal("SyncInProgress = true after the sync ended, want false")
+	}
+	final, err := app.repo.LatestSyncRun(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final == nil || final.Status != "failed" || final.ID <= prior {
+		t.Fatalf("latest sync run = %+v, want a failed run newer than %d", final, prior)
+	}
+}
+
+// TestStartSyncFailsWhenBaselineCannotBeRead checks that a sync does not start when the profile's latest run cannot
+// be read. The sync_runs table is renamed away through a second connection. Only the baseline read touches that
+// table before a goroutine starts, so only that read fails.
+func TestStartSyncFailsWhenBaselineCannotBeRead(t *testing.T) {
+	app := newTestApp(t)
+	saveTestProfile(t, app)
+	app.mu.Lock()
+	app.steamAPIKey = "fixture-steam-key"
+	// Safety net: an unreachable address, so a regression that starts the sync cannot reach the real Steam API.
+	app.steamBaseURL = "http://127.0.0.1:1"
+	app.mu.Unlock()
+
+	db, err := sql.Open("sqlite3", "file:"+app.paths.DB+"?_busy_timeout=5000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(`ALTER TABLE sync_runs RENAME TO sync_runs_unreadable`); err != nil {
+		t.Fatal(err)
+	}
+
+	err = app.startSync(true)
+	if err == nil || !strings.Contains(err.Error(), "sync_runs") {
+		t.Fatalf("startSync err = %v, want the unreadable sync_runs error", err)
+	}
+	assertIdleSync(t, app)
+	app.mu.Lock()
+	known, runID, profileID := app.syncBaselineKnown, app.syncBaselineRunID, app.syncProfileID
+	app.mu.Unlock()
+	if known || runID != 0 || profileID != 0 {
+		t.Fatalf("baseline after failed start = known %v run %d profile %d, want cleared", known, runID, profileID)
+	}
+}
+
+// TestStartSyncFailureResetsSyncBaseline checks that the done path of a failed start leaves no baseline behind.
+func TestStartSyncFailureResetsSyncBaseline(t *testing.T) {
+	app := &App{ctx: context.Background()}
+	app.mu.Lock()
+	app.syncProfileID = 7
+	app.syncBaselineRunID = 7
+	app.syncBaselineKnown = true
+	app.mu.Unlock()
+
+	// No database, so startSync fails through done().
+	if err := app.startSync(true); err == nil || !strings.Contains(err.Error(), "database is not initialized") {
+		t.Fatalf("startSync err = %v, want database-not-initialized", err)
+	}
+	assertIdleSync(t, app)
+	app.mu.Lock()
+	known, runID, profileID := app.syncBaselineKnown, app.syncBaselineRunID, app.syncProfileID
+	app.mu.Unlock()
+	if known || runID != 0 || profileID != 0 {
+		t.Fatalf("sync baseline = known %v run %d profile %d after failed start, want cleared", known, runID, profileID)
 	}
 }
 

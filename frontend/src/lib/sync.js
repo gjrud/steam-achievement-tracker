@@ -1,16 +1,5 @@
 import {formatDateTime, formatRelativeTime, integer} from './format.js'
 
-export function statusLabel(status) {
-  switch (status) {
-    case 'running': return 'Sync running'
-    case 'success': return 'Success'
-    case 'partial': return 'Partial sync'
-    case 'failed': return 'Failed'
-    case 'canceled': return 'Canceled'
-    default: return status || ''
-  }
-}
-
 // timeOf returns the datetime, absolute title and relative text for the profile card's time element, or null when
 // the time is missing or unparseable, so the band never writes an invalid datetime attribute.
 function timeOf(iso, now, prefix = '') {
@@ -35,8 +24,10 @@ function countsOf(run, suffix) {
 //   tone: ok | run | warn | fail | none (drives colour)
 //   icon: check | spin | clock | warn | stop (drives the glyph; canceled and unknown statuses get stop, not clock)
 //   headline: the status line; detail: the second line's text before the time (may be empty)
-//   time: null or {iso, title, text}; a finished run is dated by its finish time, a running one by its start time
+//   time: null or {iso, title, text}; a finished run is dated by its finish time, or its start time when the finish
+//   time is missing or unparseable; a running one by its start time
 //   announce: short screen-reader summary. It changes only on a state transition, never with counts or time.
+//   "Sync starting" and "Sync running" share one announce, so starting a sync is announced once.
 export function syncBand(run, running = false, now = Date.now()) {
   if (run?.status === 'running') {
     return {
@@ -49,7 +40,7 @@ export function syncBand(run, running = false, now = Date.now()) {
     }
   }
   if (running) {
-    return {tone: 'run', icon: 'spin', headline: 'Sync starting', detail: 'Starting sync…', time: null, announce: 'Current sync: Sync starting'}
+    return {tone: 'run', icon: 'spin', headline: 'Sync starting', detail: 'Starting sync…', time: null, announce: 'Current sync: Sync running'}
   }
   if (!run) {
     return {
@@ -63,7 +54,7 @@ export function syncBand(run, running = false, now = Date.now()) {
   }
 
   const failed = Number(run.gamesFailed) || 0
-  const time = timeOf(run.finishedAt || run.startedAt, now)
+  const time = timeOf(run.finishedAt, now) ?? timeOf(run.startedAt, now)
   switch (run.status) {
     case 'success':
       return {tone: 'ok', icon: 'check', headline: 'All games synced', detail: countsOf(run, 'games'), time, announce: 'Last sync: All games synced'}
@@ -80,7 +71,7 @@ export function syncBand(run, running = false, now = Date.now()) {
     case 'canceled':
       return {tone: 'none', icon: 'stop', headline: 'Sync canceled', detail: countsOf(run, 'games synced'), time, announce: 'Last sync: Sync canceled'}
     default: {
-      const label = statusLabel(run.status) || 'Unknown'
+      const label = run.status || 'Unknown'
       return {tone: 'none', icon: 'stop', headline: label, detail: countsOf(run, 'games synced'), time, announce: `Last sync: ${label}`}
     }
   }

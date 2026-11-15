@@ -1,6 +1,6 @@
 import {describe, expect, test} from 'vitest'
 import {formatDateTime, integer} from './format.js'
-import {statusLabel, syncBand} from './sync.js'
+import {syncBand} from './sync.js'
 
 const startedAt = '2026-05-22T10:00:00Z'
 const finishedAt = '2026-05-22T10:05:00Z'
@@ -9,24 +9,6 @@ const HOUR = 60 * MINUTE
 // Two hours after the run finished, so its time reads "2 hours ago".
 const NOW = Date.parse(finishedAt) + 2 * HOUR
 const run = {status: 'success', startedAt, finishedAt, gamesSynced: 1243, gamesTotal: 1243, gamesFailed: 0}
-
-describe('statusLabel', () => {
-  test.each([
-    ['running', 'Sync running'],
-    ['success', 'Success'],
-    ['partial', 'Partial sync'],
-    ['failed', 'Failed'],
-    ['canceled', 'Canceled']
-  ])('labels %s runs as %s', (status, label) => {
-    expect(statusLabel(status)).toBe(label)
-  })
-
-  test('passes unknown statuses through and blanks missing ones', () => {
-    expect(statusLabel('weird')).toBe('weird')
-    expect(statusLabel('')).toBe('')
-    expect(statusLabel(undefined)).toBe('')
-  })
-})
 
 describe('syncBand', () => {
   test.each([
@@ -152,6 +134,20 @@ describe('syncBand', () => {
     expect(later.announce).toBe(first.announce)
   })
 
+  test('says a running sync is running with no counts until its total is known', () => {
+    const now = Date.parse(startedAt) + 2 * MINUTE
+    const running = {...run, status: 'running', finishedAt: '', gamesSynced: 0, gamesTotal: 0}
+
+    expect(syncBand(running, true, now)).toEqual({
+      tone: 'run',
+      icon: 'spin',
+      headline: 'Sync running',
+      detail: '',
+      time: {iso: startedAt, title: formatDateTime(startedAt), text: 'Started 2 min ago'},
+      announce: 'Current sync: Sync running'
+    })
+  })
+
   test('says a sync is starting before its run record arrives, with no time', () => {
     expect(syncBand(null, true, NOW)).toEqual({
       tone: 'run',
@@ -159,7 +155,7 @@ describe('syncBand', () => {
       headline: 'Sync starting',
       detail: 'Starting sync…',
       time: null,
-      announce: 'Current sync: Sync starting'
+      announce: 'Current sync: Sync running'
     })
   })
 
@@ -170,8 +166,17 @@ describe('syncBand', () => {
       headline: 'Sync starting',
       detail: 'Starting sync…',
       time: null,
-      announce: 'Current sync: Sync starting'
+      announce: 'Current sync: Sync running'
     })
+  })
+
+  test('announces starting and running syncs with the same text, so the handoff between them is silent', () => {
+    const starting = syncBand(null, true, NOW)
+    const running = syncBand({...run, status: 'running', finishedAt: '', gamesSynced: 0}, true, NOW)
+
+    expect(starting.headline).not.toBe(running.headline)
+    expect(starting.announce).toBe(running.announce)
+    expect(running.announce).toBe('Current sync: Sync running')
   })
 
   test('says no sync has run yet without a run record, with no time', () => {
@@ -193,13 +198,27 @@ describe('syncBand', () => {
     })
   })
 
-  test('gives no time when the run date cannot be parsed, so the band never writes a bad datetime', () => {
+  test('falls back to the start time when the finish time cannot be parsed', () => {
+    expect(syncBand({...run, finishedAt: 'not a date'}, false, NOW).time).toEqual({
+      iso: startedAt,
+      title: formatDateTime(startedAt),
+      text: '2 hours ago'
+    })
+  })
+
+  test('gives no time when neither run date can be parsed, so the band never writes a bad datetime', () => {
     expect(syncBand({...run, finishedAt: 'not a date', startedAt: 'not a date'}, false, NOW).time).toBeNull()
-    expect(syncBand({...run, finishedAt: 'not a date'}, false, NOW).time).toBeNull()
+    expect(syncBand({...run, finishedAt: '', startedAt: 'not a date'}, false, NOW).time).toBeNull()
     expect(syncBand({...run, status: 'running', finishedAt: '', startedAt: 'nope'}, true, NOW).time).toBeNull()
   })
 
-  test('labels a run with an empty status as Unknown', () => {
+  test('shows an unknown status as its raw text, and an empty status as Unknown', () => {
+    expect(syncBand({...run, status: 'weird'}, false, NOW)).toMatchObject({
+      tone: 'none',
+      icon: 'stop',
+      headline: 'weird',
+      announce: 'Last sync: weird'
+    })
     expect(syncBand({...run, status: ''}, false, NOW)).toMatchObject({tone: 'none', icon: 'stop', headline: 'Unknown'})
   })
 })

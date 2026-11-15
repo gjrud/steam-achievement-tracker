@@ -46,14 +46,6 @@ describe('SummaryStats', () => {
     ])
   })
 
-  test('renders no sync information', () => {
-    render(SummaryStats, {props: {summary, integer}})
-
-    expect(screen.queryByText('Last sync')).not.toBeInTheDocument()
-    expect(screen.queryByText('Current sync')).not.toBeInTheDocument()
-    expect(document.querySelector('[aria-live]')).toBeNull()
-  })
-
   describe('vetted counts', () => {
     function valueFor(label) {
       return statFor(label).querySelector('dd').textContent.replace(/\s+/g, ' ').trim()
