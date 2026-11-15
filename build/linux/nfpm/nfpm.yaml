@@ -1,0 +1,52 @@
+# Feel free to remove those if you don't want/need to use them.
+# Make sure to check the documentation at https://nfpm.goreleaser.com
+#
+# The lines below are called `modelines`. See `:help modeline`
+
+name: "steam-achievement-tracker"
+arch: ${GOARCH}
+platform: "linux"
+version: ${VERSION}
+section: "games"
+priority: "extra"
+maintainer: ${GIT_COMMITTER_NAME} <${GIT_COMMITTER_EMAIL}>
+description: "Track Steam achievement progress for your public library"
+vendor: "gjrud"
+homepage: "https://github.com/gjrud/steam-achievement-tracker"
+license: "MIT"
+release: "1"
+
+contents:
+  - src: "./bin/steam-achievement-tracker"
+    dst: "/usr/local/bin/steam-achievement-tracker"
+  # Icon= in the .desktop file is the bare name "steam-achievement-tracker"; the icon theme resolves it from hicolor.
+  # The SVG scales to any size; the 1024x1024 PNG is the fallback for consumers without SVG support.
+  - src: "./build/appicon.svg"
+    dst: "/usr/share/icons/hicolor/scalable/apps/steam-achievement-tracker.svg"
+  - src: "./build/appicon.png"
+    dst: "/usr/share/icons/hicolor/1024x1024/apps/steam-achievement-tracker.png"
+  - src: "./build/linux/steam-achievement-tracker.desktop"
+    dst: "/usr/share/applications/steam-achievement-tracker.desktop"
+
+# Default dependencies for the GTK4 + WebKitGTK 6.0 stack (Ubuntu 24.04+ / Debian 13+)
+depends:
+  - libgtk-4-1
+  - libwebkitgtk-6.0-4
+
+# Distribution-specific overrides for different package formats
+overrides:
+  # RPM packages for Fedora / RHEL / AlmaLinux / Rocky Linux
+  rpm:
+    depends:
+      - gtk4
+      - webkitgtk6.0
+
+  # Arch Linux packages
+  archlinux:
+    depends:
+      - gtk4
+      - webkitgtk-6.0
+
+# scripts section to ensure desktop database is updated after install
+scripts:
+  postinstall: "./build/linux/nfpm/scripts/postinstall.sh"

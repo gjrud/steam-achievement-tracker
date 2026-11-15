@@ -26,15 +26,16 @@ export function __resetWailsMocks() {
   handlers = {...defaultHandlers}
 }
 
-export const ClearActiveUserData = (...args) => handlers.ClearActiveUserData(...args)
+// Parameter lists mirror the generated bindings exactly; the drift test compares argument counts.
+export const ClearActiveUserData = () => handlers.ClearActiveUserData()
 // Game actions take (appID, groupID): groupID selects one achievement set of the game.
 export const DisableGame = (appID, groupID) => handlers.DisableGame(appID, groupID)
 export const EnableGame = (appID, groupID) => handlers.EnableGame(appID, groupID)
-export const GetAppState = (...args) => handlers.GetAppState(...args)
+export const GetAppState = () => handlers.GetAppState()
 export const MarkGamePreviouslyCompleted = (appID, groupID) => handlers.MarkGamePreviouslyCompleted(appID, groupID)
-export const RetryAPIKey = (...args) => handlers.RetryAPIKey(...args)
-export const SaveProfile = (...args) => handlers.SaveProfile(...args)
+export const RetryAPIKey = () => handlers.RetryAPIKey()
+export const SaveProfile = (preview) => handlers.SaveProfile(preview)
 export const SetLibrarySettings = (includeUnvettedApps, includePlayedFreeGames) => handlers.SetLibrarySettings(includeUnvettedApps, includePlayedFreeGames)
-export const SyncNow = (...args) => handlers.SyncNow(...args)
+export const SyncNow = () => handlers.SyncNow()
 export const ToggleGameMissingAchievementsInDLC = (appID, groupID) => handlers.ToggleGameMissingAchievementsInDLC(appID, groupID)
-export const ValidateProfile = (...args) => handlers.ValidateProfile(...args)
+export const ValidateProfile = (input) => handlers.ValidateProfile(input)

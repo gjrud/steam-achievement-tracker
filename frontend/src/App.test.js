@@ -712,10 +712,7 @@ describe('App Wails call failures', () => {
 
   test('clears the error once the next action succeeds', async () => {
     __setWailsMocks({
-      // Later polls report syncing so a stalled runner cannot flip the button back to idle.
-      GetAppState: vi.fn()
-        .mockResolvedValueOnce(dashboardState())
-        .mockResolvedValue(syncingState(0)),
+      GetAppState: vi.fn(async () => dashboardState()),
       SyncNow: vi.fn()
         .mockRejectedValueOnce(new Error(failureMessage))
         .mockResolvedValueOnce(syncingState(0))

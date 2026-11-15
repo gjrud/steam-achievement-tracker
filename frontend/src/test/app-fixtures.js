@@ -1,8 +1,14 @@
 import {fireEvent, screen} from '@testing-library/svelte'
 import {tick} from 'svelte'
 import {vi} from 'vitest'
+import {__emitWailsEvent} from './wails-runtime-mock.js'
 
 export const failureMessage = 'Wails call failed'
+
+// emitSyncChanged plays the backend's sync:changed event. The app refetches GetAppState on each one.
+export function emitSyncChanged() {
+  __emitWailsEvent('sync:changed')
+}
 
 // settle flushes pending promises and Svelte updates without advancing fake time.
 // Each pass drains microtasks (advanceTimersByTimeAsync(0)) and one Svelte tick. Three passes are

@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,11 +19,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gjrud/steam-achievement-tracker/internal/appdata"
 	"github.com/gjrud/steam-achievement-tracker/internal/config"
 	"github.com/gjrud/steam-achievement-tracker/internal/keyring"
 	"github.com/gjrud/steam-achievement-tracker/internal/logging"
 	"github.com/gjrud/steam-achievement-tracker/internal/repository"
+	"github.com/gjrud/steam-achievement-tracker/internal/steam"
 	zk "github.com/zalando/go-keyring"
 )
 
@@ -37,11 +38,11 @@ func openTestApp(t *testing.T) *App {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	t.Cleanup(logging.Fallback)
-	app := &App{ctx: context.Background()}
+	app := NewApp()
 	if err := app.ensureInitialized(); err != nil {
 		t.Fatalf("ensureInitialized: %v", err)
 	}
-	t.Cleanup(func() { app.shutdown(context.Background()) })
+	t.Cleanup(func() { _ = app.ServiceShutdown() })
 	return app
 }
 
@@ -160,7 +161,7 @@ func assertIdleSync(t *testing.T, app *App) {
 func TestStartSyncSingleFlightGuards(t *testing.T) {
 	// syncInProgress is set by hand: a real running sync would need Steam. The start/finish/reset cycle
 	// is covered by TestStartSyncLifecycleResetsAfterGuardFailure.
-	app := &App{ctx: context.Background(), syncInProgress: true}
+	app := &App{syncInProgress: true}
 
 	if err := app.startSync(false); err != nil {
 		t.Fatalf("non-forced startSync err = %v, want nil", err)
@@ -176,7 +177,7 @@ func TestStartSyncSingleFlightGuards(t *testing.T) {
 
 func TestStartSyncLifecycleResetsAfterGuardFailure(t *testing.T) {
 	t.Run("no database", func(t *testing.T) {
-		app := &App{ctx: context.Background()}
+		app := &App{}
 		err := app.startSync(true)
 		if err == nil || !strings.Contains(err.Error(), "database is not initialized") {
 			t.Fatalf("startSync err = %v, want database-not-initialized", err)
@@ -812,7 +813,7 @@ func TestStartSyncFailsWhenBaselineCannotBeRead(t *testing.T) {
 
 // TestStartSyncFailureResetsSyncBaseline checks that the done path of a failed start leaves no baseline behind.
 func TestStartSyncFailureResetsSyncBaseline(t *testing.T) {
-	app := &App{ctx: context.Background()}
+	app := &App{}
 	app.mu.Lock()
 	app.syncProfileID = 7
 	app.syncBaselineRunID = 7
@@ -966,7 +967,7 @@ func TestInitFailureIsReportedAndBlocksActions(t *testing.T) {
 	t.Setenv("HOME", blocked)
 	t.Cleanup(logging.Fallback)
 	zk.MockInit()
-	app := &App{ctx: context.Background()}
+	app := &App{}
 
 	state, err := app.GetAppState()
 	if err != nil {
@@ -1157,85 +1158,6 @@ func TestMarkGamePreviouslyCompletedUnknownSetLeavesNoFlag(t *testing.T) {
 	}
 }
 
-func TestAssetHandlerRejectsNonPositiveAppIDEvenWhenFileExists(t *testing.T) {
-	root := t.TempDir()
-	// Files exist for every id, so a 404 can only come from the appid check and not from a missing file.
-	for _, id := range []string{"0", "-5", "1"} {
-		dir := filepath.Join(root, id)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "library_600x900.jpg"), []byte("cover-"+id), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	app := &App{paths: appdata.Paths{GameImages: root}}
-	handler := app.assetHandler()
-
-	tests := []struct {
-		id     string
-		status int
-	}{
-		{"0", http.StatusNotFound},
-		{"-5", http.StatusNotFound},
-		{"1", http.StatusOK},
-	}
-	for _, tt := range tests {
-		req := httptest.NewRequest(http.MethodGet, "/game-covers/"+tt.id+"/library_600x900.jpg", nil)
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-		if rec.Code != tt.status {
-			t.Fatalf("appid %s status = %d, want %d", tt.id, rec.Code, tt.status)
-		}
-	}
-}
-
-// TestAssetHandlerReadsPathsSafelyWhileInitializing races ensureInitialized against assetHandler requests.
-// It only detects a regression (unlocked read of a.paths) under `go test -race`; without the race detector
-// the unsynchronized read usually passes silently.
-func TestAssetHandlerReadsPathsSafelyWhileInitializing(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Cleanup(logging.Fallback)
-	zk.MockInit()
-	app := &App{ctx: context.Background()}
-	handler := app.assetHandler()
-
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		<-start
-		if err := app.ensureInitialized(); err != nil {
-			t.Errorf("ensureInitialized: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		<-start
-		for i := 0; i < 200; i++ {
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/game-covers/10/library_600x900.jpg", nil))
-		}
-	}()
-	close(start)
-	wg.Wait()
-	t.Cleanup(func() { app.shutdown(context.Background()) })
-
-	coverDir := filepath.Join(app.paths.GameImages, "10")
-	if err := os.MkdirAll(coverDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(coverDir, "library_600x900.jpg"), []byte("after-init"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/game-covers/10/library_600x900.jpg", nil))
-	if rec.Code != http.StatusOK || rec.Body.String() != "after-init" {
-		t.Fatalf("after init status = %d body = %q, want 200 with cover bytes", rec.Code, rec.Body.String())
-	}
-}
-
 func TestRemoveCachedGameImagesOnlyRequestedDirs(t *testing.T) {
 	root := t.TempDir()
 	for _, appID := range []string{"10", "20", "30"} {
@@ -1262,73 +1184,226 @@ func TestRemoveCachedGameImagesOnlyRequestedDirs(t *testing.T) {
 	}
 }
 
-// TestAssetHandlerServesCoverKinds covers every happy-path cover route: a cached
-// per-game cover plus the hero, main and header fallbacks for DLC image apps.
-// Each case writes one file under <GameImages>/<appID>/<file> and asserts the
-// handler returns 200 with exactly those bytes.
-func TestAssetHandlerServesCoverKinds(t *testing.T) {
-	tests := []struct {
-		kind  string
-		appID string
-		file  string
-		body  string
-	}{
-		{kind: "cached", appID: "123", file: "library_600x900.jpg", body: "cover-bytes"},
-		{kind: "hero", appID: "4173830", file: "hero_capsule.jpg", body: "hero-bytes"},
-		{kind: "main", appID: "4173830", file: "main_capsule.jpg", body: "main-bytes"},
-		{kind: "header", appID: "4173830", file: "header.jpg", body: "header-bytes"},
+// steamStubRequest is one request received by a steamStub.
+type steamStubRequest struct {
+	path  string
+	query url.Values
+}
+
+// newSteamStub starts a fake Steam API that answers each request with respond and records the requests it gets. The
+// server is closed at test end. Tests point app.steamBaseURL at it, so no real network is touched. The returned func
+// reports the requests received so far.
+func newSteamStub(t *testing.T, respond func(w http.ResponseWriter, r *http.Request)) (*httptest.Server, func() []steamStubRequest) {
+	t.Helper()
+	var mu sync.Mutex
+	var reqs []steamStubRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		reqs = append(reqs, steamStubRequest{path: r.URL.Path, query: r.URL.Query()})
+		mu.Unlock()
+		respond(w, r)
+	}))
+	t.Cleanup(server.Close)
+	received := func() []steamStubRequest {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]steamStubRequest(nil), reqs...)
 	}
-	for _, tt := range tests {
-		t.Run(tt.kind, func(t *testing.T) {
-			imagesDir := filepath.Join(t.TempDir(), "cache", "images", "games")
-			coverPath := filepath.Join(imagesDir, tt.appID, tt.file)
-			if err := os.MkdirAll(filepath.Dir(coverPath), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(coverPath, []byte(tt.body), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			app := &App{paths: appdata.Paths{GameImages: imagesDir}}
+	return server, received
+}
 
-			req := httptest.NewRequest(http.MethodGet, "/game-covers/"+tt.appID+"/"+tt.file, nil)
-			rec := httptest.NewRecorder()
-			app.assetHandler().ServeHTTP(rec, req)
+// forbidSteam rejects a request with a non-retryable 403, so the call fails at once.
+func forbidSteam(w http.ResponseWriter, r *http.Request) {
+	http.Error(w, "forbidden", http.StatusForbidden)
+}
 
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-			}
-			if got := rec.Body.String(); got != tt.body {
-				t.Fatalf("body = %q, want %q", got, tt.body)
-			}
-		})
+func setSteamBaseURL(app *App, baseURL string) {
+	app.mu.Lock()
+	app.steamBaseURL = baseURL
+	app.mu.Unlock()
+}
+
+// The Steam base URL override reaches ValidateProfile: a 17-digit SteamID64 needs only the player summary request.
+func TestValidateProfileWithSteamIDMakesOnlySummaryRequest(t *testing.T) {
+	app := newTestAppWithKey(t, "fixture-steam-key")
+	stub, received := newSteamStub(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"response":{"players":[{"steamid":%q,"personaname":"Tester","avatarfull":"https://avatars.example/full.jpg","avatarmedium":"https://avatars.example/medium.jpg"}]}}`, testSteamID)
+	})
+	setSteamBaseURL(app, stub.URL)
+
+	preview, err := app.ValidateProfile(testSteamID)
+	if err != nil {
+		t.Fatalf("ValidateProfile: %v", err)
+	}
+	want := ProfilePreview{SteamID64: testSteamID, DisplayName: "Tester", AvatarURL: "https://avatars.example/full.jpg"}
+	if preview != want {
+		t.Fatalf("preview = %+v, want %+v", preview, want)
+	}
+	reqs := received()
+	if len(reqs) != 1 || reqs[0].path != "/ISteamUser/GetPlayerSummaries/v2/" {
+		t.Fatalf("Steam requests = %+v, want one GetPlayerSummaries request", reqs)
+	}
+	if reqs[0].query.Get("steamids") != testSteamID || reqs[0].query.Get("key") != "fixture-steam-key" {
+		t.Fatalf("summary query = %v, want steamids %s and the API key", reqs[0].query, testSteamID)
 	}
 }
 
-func TestAssetHandlerRejectsInvalidCoverRoutes(t *testing.T) {
-	app := &App{paths: appdata.Paths{GameImages: t.TempDir()}}
-	tests := []struct {
-		method string
-		path   string
-	}{
-		{http.MethodPost, "/game-covers/123/library_600x900.jpg"},
-		{http.MethodGet, "/game-covers/not-an-id/library_600x900.jpg"},
-		{http.MethodGet, "/game-covers/0/library_600x900.jpg"},
-		{http.MethodGet, "/game-covers/-5/library_600x900.jpg"},
-		{http.MethodGet, "/game-covers/123/other.jpg"},
-		{http.MethodGet, "/game-covers/123/header.png"},
-		{http.MethodGet, "/game-covers/123/../library_600x900.jpg"},
-		{http.MethodGet, "/game-covers/123/nested/library_600x900.jpg"},
-		{http.MethodGet, "/game-covers/123/hero_capsule.png"},
-		{http.MethodGet, "/game-covers/123/main_capsule.png"},
-		{http.MethodGet, "/game-covers/123/main_capsule.jpg.tmp"},
-		{http.MethodGet, "/other/123/library_600x900.jpg"},
-	}
-	for _, tt := range tests {
-		req := httptest.NewRequest(tt.method, tt.path, nil)
-		rec := httptest.NewRecorder()
-		app.assetHandler().ServeHTTP(rec, req)
-		if rec.Code != http.StatusNotFound {
-			t.Fatalf("%s %s status = %d, want %d", tt.method, tt.path, rec.Code, http.StatusNotFound)
+// A vanity name is resolved to a SteamID64 first, then the summary of that ID is fetched. Without a full avatar the
+// medium avatar is used.
+func TestValidateProfileVanityNameResolvesThenFetchesSummary(t *testing.T) {
+	const resolved = "76561198000000009"
+	app := newTestAppWithKey(t, "fixture-steam-key")
+	stub, received := newSteamStub(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ISteamUser/ResolveVanityURL/v1/":
+			fmt.Fprintf(w, `{"response":{"success":1,"steamid":%q}}`, resolved)
+		case "/ISteamUser/GetPlayerSummaries/v2/":
+			fmt.Fprintf(w, `{"response":{"players":[{"steamid":%q,"personaname":"Vanity Tester","avatarmedium":"https://avatars.example/medium.jpg"}]}}`, resolved)
+		default:
+			http.NotFound(w, r)
 		}
+	})
+	setSteamBaseURL(app, stub.URL)
+
+	preview, err := app.ValidateProfile("vanity-tester")
+	if err != nil {
+		t.Fatalf("ValidateProfile: %v", err)
+	}
+	want := ProfilePreview{SteamID64: resolved, DisplayName: "Vanity Tester", AvatarURL: "https://avatars.example/medium.jpg"}
+	if preview != want {
+		t.Fatalf("preview = %+v, want %+v", preview, want)
+	}
+	reqs := received()
+	if len(reqs) != 2 || reqs[0].path != "/ISteamUser/ResolveVanityURL/v1/" || reqs[1].path != "/ISteamUser/GetPlayerSummaries/v2/" {
+		t.Fatalf("Steam requests = %+v, want ResolveVanityURL then GetPlayerSummaries", reqs)
+	}
+	if reqs[0].query.Get("vanityurl") != "vanity-tester" {
+		t.Fatalf("resolve query = %v, want vanityurl vanity-tester", reqs[0].query)
+	}
+	if reqs[1].query.Get("steamids") != resolved {
+		t.Fatalf("summary query = %v, want steamids %s", reqs[1].query, resolved)
+	}
+}
+
+func TestValidateProfileWithoutKeyReturnsErrMissing(t *testing.T) {
+	app := newTestApp(t)
+	stub, received := newSteamStub(t, forbidSteam)
+	setSteamBaseURL(app, stub.URL)
+
+	if _, err := app.ValidateProfile(testSteamID); !errors.Is(err, keyring.ErrMissing) {
+		t.Fatalf("ValidateProfile err = %v, want ErrMissing", err)
+	}
+	if reqs := received(); len(reqs) != 0 {
+		t.Fatalf("Steam requests = %+v without a key, want none", reqs)
+	}
+}
+
+// A Steam HTTP error is returned to the caller as the steam package's HTTPStatusError.
+func TestValidateProfileSteamHTTPErrorPropagates(t *testing.T) {
+	app := newTestAppWithKey(t, "fixture-steam-key")
+	stub, _ := newSteamStub(t, forbidSteam)
+	setSteamBaseURL(app, stub.URL)
+
+	_, err := app.ValidateProfile(testSteamID)
+	var statusErr *steam.HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.Code != http.StatusForbidden {
+		t.Fatalf("ValidateProfile err = %v, want HTTPStatusError with code 403", err)
+	}
+}
+
+// Blank input fails before any Steam request is made.
+func TestValidateProfileEmptyInputErrors(t *testing.T) {
+	app := newTestAppWithKey(t, "fixture-steam-key")
+	stub, received := newSteamStub(t, forbidSteam)
+	setSteamBaseURL(app, stub.URL)
+
+	for _, input := range []string{"", "   "} {
+		if _, err := app.ValidateProfile(input); err == nil || !strings.Contains(err.Error(), "profile input is required") {
+			t.Fatalf("ValidateProfile(%q) err = %v, want profile-input-required", input, err)
+		}
+	}
+	if reqs := received(); len(reqs) != 0 {
+		t.Fatalf("Steam requests = %+v for blank input, want none", reqs)
+	}
+}
+
+func TestValidateProfileReportsPlayerNotFound(t *testing.T) {
+	app := newTestAppWithKey(t, "fixture-steam-key")
+	stub, _ := newSteamStub(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"response":{"players":[]}}`)
+	})
+	setSteamBaseURL(app, stub.URL)
+
+	if _, err := app.ValidateProfile(testSteamID); err == nil || !strings.Contains(err.Error(), "Steam profile not found") {
+		t.Fatalf("ValidateProfile err = %v, want Steam profile not found", err)
+	}
+}
+
+func TestSyncNowWithoutKeyReturnsErrMissing(t *testing.T) {
+	app := newTestApp(t)
+	saveTestProfile(t, app)
+
+	if _, err := app.SyncNow(); !errors.Is(err, keyring.ErrMissing) {
+		t.Fatalf("SyncNow err = %v, want ErrMissing", err)
+	}
+	assertIdleSync(t, app)
+}
+
+// With a key but no profile saved, SyncNow passes the key check and startSync fails on the missing profile.
+func TestSyncNowWithoutActiveProfileErrors(t *testing.T) {
+	app := newTestAppWithKey(t, "fixture-steam-key")
+
+	if _, err := app.SyncNow(); err == nil || !strings.Contains(err.Error(), "no active profile") {
+		t.Fatalf("SyncNow err = %v, want no-active-profile", err)
+	}
+	assertIdleSync(t, app)
+}
+
+// TestSyncNowStartsSyncAndRejectsSecondStart runs SyncNow against a Steam stub that holds its first request. The first
+// call starts the sync and returns state with it in progress; a second call while it runs gets
+// errSyncAlreadyInProgress. Releasing the stub fails the sync at its first call, as in
+// TestStartSyncRecordsBaselineAndFollowsItsOwnRun.
+func TestSyncNowStartsSyncAndRejectsSecondStart(t *testing.T) {
+	app := newTestApp(t)
+	profile := saveTestProfile(t, app)
+	if err := zk.Set(testKeyringService, testKeyringUser, "fixture-steam-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	stub, received := newSteamStub(t, func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		forbidSteam(w, r)
+	})
+	// Cleanups run in reverse order, so this unblock runs before the stub's server.Close and a failed test cannot hang.
+	t.Cleanup(unblock)
+	setSteamBaseURL(app, stub.URL)
+
+	state, err := app.SyncNow()
+	if err != nil {
+		t.Fatalf("SyncNow: %v", err)
+	}
+	if !state.SyncInProgress || state.Profile == nil || state.Profile.ID != profile.ID {
+		t.Fatalf("SyncNow state = in progress %v profile %+v, want the active profile syncing", state.SyncInProgress, state.Profile)
+	}
+	if _, err := app.SyncNow(); !errors.Is(err, errSyncAlreadyInProgress) {
+		t.Fatalf("second SyncNow err = %v, want errSyncAlreadyInProgress", err)
+	}
+
+	unblock()
+	waitForSyncWG(t, app)
+	assertIdleSync(t, app)
+	reqs := received()
+	if len(reqs) == 0 || reqs[0].query.Get("key") != "fixture-steam-key" {
+		t.Fatalf("Steam requests = %+v, want the sync's request carrying the API key", reqs)
+	}
+	final, err := app.repo.LatestSyncRun(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final == nil || final.Status != "failed" {
+		t.Fatalf("latest sync run = %+v, want failed", final)
 	}
 }

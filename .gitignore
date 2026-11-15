@@ -8,11 +8,19 @@
 *.out
 coverage.out
 
-# Wails v2 build/generated artifacts
+# Wails v3 build/generated artifacts
 /steam-achievement-tracker
+/bin/
 build/bin/
+build/linux/*.desktop
+build/linux/appimage/build/
+build/linux/appimage/*.AppDir/
+build/linux/appimage/*.AppImage
+build/linux/appimage/linuxdeploy*
+.task/
+.wails/
 frontend/dist/
-frontend/wailsjs/
+frontend/bindings/
 package.json.md5
 frontend/package.json.md5
 

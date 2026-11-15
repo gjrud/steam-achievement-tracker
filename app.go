@@ -5,11 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/gjrud/steam-achievement-tracker/internal/appdata"
@@ -21,15 +19,30 @@ import (
 	"github.com/gjrud/steam-achievement-tracker/internal/repository"
 	"github.com/gjrud/steam-achievement-tracker/internal/steam"
 	"github.com/gjrud/steam-achievement-tracker/internal/syncer"
+	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 // errSyncAlreadyInProgress is startSync's error for a forced start while a sync is running.
 var errSyncAlreadyInProgress = errors.New("sync already in progress")
 
+// errShuttingDown is startSync's error once ServiceShutdown has cancelled the lifetime context. Wails shuts services
+// down before it closes the windows, so the frontend can still call in while the repository is being closed.
+var errShuttingDown = errors.New("shutting down")
+
+// syncChangedEvent is the Wails event emitted whenever sync state changes. It carries no payload: the frontend
+// refetches GetAppState when it arrives.
+const syncChangedEvent = "sync:changed"
+
 type App struct {
-	ctx    context.Context
-	mu     sync.Mutex
-	initMu sync.Mutex
+	// lifeCtx is the service lifetime context, created by NewApp and cancelled by ServiceShutdown. Sync and Steam
+	// request contexts derive from it through context(). lifeCancel is its cancel func.
+	lifeCtx    context.Context
+	lifeCancel context.CancelFunc
+	mu         sync.Mutex
+	initMu     sync.Mutex
+	// emit delivers named Wails events to the frontend. Set once by main through setEventEmitter; nil in tests.
+	// It is read under mu and called only after mu is released.
+	emit func(name string)
 
 	initialized    bool
 	initError      string
@@ -72,21 +85,36 @@ type ProfilePreview struct {
 	AvatarURL   string `json:"avatarUrl"`
 }
 
-func NewApp() *App { return &App{} }
+// NewApp returns the backend service with its lifetime context set. Wails v3 services are plain structs: there is no
+// runtime context to receive, so the lifetime context is owned here and cancelled by ServiceShutdown.
+func NewApp() *App {
+	lifeCtx, lifeCancel := context.WithCancel(context.Background())
+	return &App{lifeCtx: lifeCtx, lifeCancel: lifeCancel}
+}
 
-func (a *App) startup(ctx context.Context) {
-	a.ctx = ctx
+// ServiceStartup is the Wails v3 service startup hook. Wails calls it before the first window opens. Its name is
+// reserved by the binding engine, so the frontend never sees it as a bound method. Init failures are not returned:
+// they surface to the UI through AppState.InitError, so the app still starts.
+func (a *App) ServiceStartup(_ context.Context, _ application.ServiceOptions) error {
 	if err := a.ensureInitialized(); err != nil {
 		log.Printf("startup init: %v", err)
-		return
+		return nil
 	}
 	state, err := a.GetAppState()
 	if err == nil && state.APIKeyPresent && state.ProfileExists {
 		logStartSyncError(a.startSync(false))
 	}
+	return nil
 }
 
-func (a *App) shutdown(ctx context.Context) {
+// ServiceShutdown is the Wails v3 service shutdown hook. Wails calls it during application shutdown; windows may
+// still be open, so calls from the frontend can still arrive. Its name is reserved by the binding engine, so the
+// frontend never sees it as a bound method. It cancels the lifetime context, stops any running sync, waits for it,
+// and closes the database.
+func (a *App) ServiceShutdown() error {
+	if a.lifeCancel != nil {
+		a.lifeCancel()
+	}
 	a.mu.Lock()
 	cancel := a.syncCancel
 	a.mu.Unlock()
@@ -101,6 +129,7 @@ func (a *App) shutdown(ctx context.Context) {
 	if repo != nil {
 		_ = repo.Close()
 	}
+	return nil
 }
 
 func (a *App) GetAppState() (AppState, error) {
@@ -181,7 +210,11 @@ func (a *App) ValidateProfile(input string) (ProfilePreview, error) {
 	if err != nil {
 		return ProfilePreview{}, err
 	}
+	a.mu.Lock()
+	baseURL := a.steamBaseURL
+	a.mu.Unlock()
 	client := steam.New(key)
+	applySteamBaseURL(client, baseURL)
 	steamID64, err := client.ResolveProfileInput(a.context(), input)
 	if err != nil {
 		return ProfilePreview{}, err
@@ -407,6 +440,13 @@ func (a *App) requireAPIKey() (string, error) {
 func (a *App) startSync(force bool) error {
 	syncCtx, cancel := context.WithCancel(a.context())
 	a.mu.Lock()
+	// ServiceShutdown cancels the lifetime context before it reads syncCancel under a.mu, so a start that passes this
+	// check registers its cancel func and WaitGroup entry before shutdown looks at them.
+	if a.context().Err() != nil {
+		a.mu.Unlock()
+		cancel()
+		return errShuttingDown
+	}
 	if a.syncInProgress && !force {
 		a.mu.Unlock()
 		cancel()
@@ -425,6 +465,8 @@ func (a *App) startSync(force bool) error {
 	a.syncCancel = cancel
 	a.syncWG.Add(1)
 	a.mu.Unlock()
+	a.emitSyncChanged()
+	// done ends the sync on every path, including the early exits below. endSync emits the final event.
 	done := func() { a.endSync(cancel) }
 	if repo == nil {
 		done()
@@ -448,9 +490,7 @@ func (a *App) startSync(force bool) error {
 		done()
 		return err
 	}
-	if baseURL != "" {
-		client.BaseURL = baseURL
-	}
+	applySteamBaseURL(client, baseURL)
 	// The baseline is read before the goroutine starts, so no run of this sync exists yet: it is the run that was
 	// latest at start. If it cannot be read, the sync does not start and the error is returned. StartSyncRun would
 	// very likely fail too, and a sync started without a baseline could not tell its own run from an older one.
@@ -470,7 +510,7 @@ func (a *App) startSync(force bool) error {
 	a.mu.Unlock()
 	go func(p repository.Profile) {
 		defer done()
-		service := syncer.Service{Repo: repo, Steam: client, Images: images.New(paths)}
+		service := syncer.Service{Repo: repo, Steam: client, Images: images.New(paths), OnChange: a.emitSyncChanged}
 		if _, err := service.FullSync(syncCtx, p); err != nil {
 			log.Printf("full sync failed: %v", err)
 		}
@@ -478,8 +518,10 @@ func (a *App) startSync(force bool) error {
 	return nil
 }
 
-// endSync ends the current sync: it cancels the sync context, clears the flag, cancel func and baseline, and releases
-// syncWG. startSync's done and the sync goroutine both end here.
+// endSync ends the current sync: it cancels the sync context, clears the flag, cancel func and baseline, emits the
+// final sync:changed event, and releases syncWG. startSync's done and the sync goroutine both end here. The event
+// comes after the flag clear, so the frontend's refetch reads syncInProgress=false. It is emitted before syncWG is
+// released, so ServiceShutdown's wait covers it. The emit runs outside a.mu.
 func (a *App) endSync(cancel context.CancelFunc) {
 	cancel()
 	a.mu.Lock()
@@ -489,6 +531,7 @@ func (a *App) endSync(cancel context.CancelFunc) {
 	a.syncBaselineRunID = 0
 	a.syncBaselineKnown = false
 	a.mu.Unlock()
+	a.emitSyncChanged()
 	a.syncWG.Done()
 }
 
@@ -545,10 +588,10 @@ func (a *App) normalizeStaleRun(repo *repository.Repository, profileID int64, d 
 	d.LatestSyncRun = &failed
 }
 
-// logStartSyncError logs a startSync error for a caller that does not return it. A missing API key and a sync that is
-// already in progress are expected outcomes and are not logged.
+// logStartSyncError logs a startSync error for a caller that does not return it. A missing API key, a sync that is
+// already in progress, and a start during shutdown are expected outcomes and are not logged.
 func logStartSyncError(err error) {
-	if err == nil || errors.Is(err, keyring.ErrMissing) || errors.Is(err, errSyncAlreadyInProgress) {
+	if err == nil || errors.Is(err, keyring.ErrMissing) || errors.Is(err, errSyncAlreadyInProgress) || errors.Is(err, errShuttingDown) {
 		return
 	}
 	log.Printf("start sync: %v", err)
@@ -561,6 +604,24 @@ func (a *App) cancelSyncAndWait() {
 	if cancel != nil {
 		cancel()
 		a.syncWG.Wait()
+	}
+}
+
+// setEventEmitter sets the function that delivers Wails events. main calls it once, after application.New. It is
+// unexported: exported App methods are bound to the frontend. Without an emitter, events are dropped.
+func (a *App) setEventEmitter(emit func(name string)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.emit = emit
+}
+
+// emitSyncChanged tells the frontend that sync state changed. It is nil-safe and never holds a.mu while it emits.
+func (a *App) emitSyncChanged() {
+	a.mu.Lock()
+	emit := a.emit
+	a.mu.Unlock()
+	if emit != nil {
+		emit(syncChangedEvent)
 	}
 }
 
@@ -604,9 +665,19 @@ func newSteamClient(key string, s repository.LibrarySettings) *steam.Client {
 	return client
 }
 
+// applySteamBaseURL points client at baseURL when it is non-empty. Sync and profile validation both call it with
+// App.steamBaseURL, which only tests set; production leaves it empty and the client keeps its default base URL.
+func applySteamBaseURL(client *steam.Client, baseURL string) {
+	if baseURL != "" {
+		client.BaseURL = baseURL
+	}
+}
+
+// context returns the service lifetime context, the parent of sync and Steam request contexts. It is nil-safe: an App
+// built as a literal (tests) has no lifetime context and gets context.Background().
 func (a *App) context() context.Context {
-	if a.ctx != nil {
-		return a.ctx
+	if a.lifeCtx != nil {
+		return a.lifeCtx
 	}
 	return context.Background()
 }
@@ -624,41 +695,4 @@ func removeCachedGameImages(root string, appIDs []int64) error {
 		}
 	}
 	return nil
-}
-
-// servableCoverFile reports whether name is a cover file the image cache writes.
-func servableCoverFile(name string) bool {
-	return name == images.LibraryFileName || name == images.HeroFileName || name == images.HeaderFileName || name == images.MainFileName
-}
-
-func (a *App) assetHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/game-covers/") {
-			http.NotFound(w, r)
-			return
-		}
-		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/game-covers/"), "/")
-		if len(parts) != 2 || !servableCoverFile(parts[1]) {
-			http.NotFound(w, r)
-			return
-		}
-		appid, err := strconv.ParseInt(parts[0], 10, 64)
-		if err != nil || appid <= 0 {
-			http.NotFound(w, r)
-			return
-		}
-		a.mu.Lock()
-		paths := a.paths
-		a.mu.Unlock()
-		if paths.GameImages == "" {
-			resolved, err := appdata.Resolve()
-			if err != nil {
-				http.NotFound(w, r)
-				return
-			}
-			paths = resolved
-		}
-		path := filepath.Join(paths.GameImages, strconv.FormatInt(appid, 10), parts[1])
-		http.ServeFile(w, r, path)
-	})
 }

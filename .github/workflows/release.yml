@@ -1,0 +1,185 @@
+name: Release
+
+# Pushing a version tag (vX.Y.Z or vX.Y.Z-suffix) publishes a GitHub release with
+# AppImage, deb, rpm and Arch packages, a source archive and SHA256SUMS.
+# The tagged commit must already be on main: merge first, then tag main.
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # Explicit bash runs with -eo pipefail, so a failing script in a pipe fails the step.
+    shell: bash
+
+env:
+  # Keep in sync with the wails version in go.mod and ci.yml.
+  WAILS_VERSION: v3.1.0
+
+jobs:
+  # Gate: a tag push has no branch context, so check it by ancestry.
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Tag is a valid version
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' is not vMAJOR.MINOR.PATCH[-prerelease]."
+            exit 1
+          fi
+
+      - name: Tagged commit is on main
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag '$GITHUB_REF_NAME' ($GITHUB_SHA) is not on main. Merge the PR, then tag main."
+            exit 1
+          fi
+
+  test:
+    needs: verify
+    uses: ./.github/workflows/ci.yml
+
+  package:
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # nfpm.yaml expands these. VERSION comes from the tag (no 'v' prefix).
+      GOARCH: amd64
+      GIT_COMMITTER_NAME: ${{ github.repository_owner }}
+      GIT_COMMITTER_EMAIL: ${{ github.repository_owner }}@users.noreply.github.com
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # CGO deps for Wails v3 on Linux (GTK4 + WebKitGTK 6.0) and go-sqlite3.
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
+
+      - name: Set version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Package (AppImage, deb, rpm, Arch)
+        run: wails3 package
+
+      # Packaging runs `go mod tidy`; the release must be built from the tagged module files.
+      - name: Module files unchanged by the build
+        run: git diff --exit-code -- go.mod go.sum
+
+      - name: Check all four packages exist
+        run: |
+          shopt -s nullglob
+          for pattern in 'bin/*.AppImage' 'bin/*.deb' 'bin/*.rpm' 'bin/*.pkg.tar.zst'; do
+            files=($pattern)
+            if (( ${#files[@]} != 1 )); then
+              echo "::error::expected exactly one file matching $pattern, found ${#files[@]}"
+              ls -la bin
+              exit 1
+            fi
+          done
+
+      # An empty or stale VERSION does not make packaging fail, so check the result.
+      # Debian writes a pre-release '-' as '~' and appends the nfpm release '-1'.
+      - name: Package version matches the tag
+        run: |
+          want="${VERSION/-/\~}-1"
+          got="$(dpkg-deb -f bin/*.deb Version)"
+          if [[ "$got" != "$want" ]]; then
+            echo "::error::deb version '$got' does not match tag version '$want'"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-packages
+          path: |
+            bin/*.AppImage
+            bin/*.deb
+            bin/*.rpm
+            bin/*.pkg.tar.zst
+          if-no-files-found: error
+
+  release:
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the release
+      id-token: write # build provenance attestation
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # Full history + tags for the changelog and the source archive.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-packages
+          path: dist
+
+      - name: Source archive
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          git archive --format=tar.gz \
+            --prefix="steam-achievement-tracker-${version}/" \
+            -o "dist/steam-achievement-tracker-${version}-source.tar.gz" \
+            "$GITHUB_REF_NAME"
+
+      - name: Checksums
+        run: |
+          (cd dist && sha256sum -- * > ../SHA256SUMS)
+          mv SHA256SUMS dist/
+          cat dist/SHA256SUMS
+
+      - name: Changelog
+        run: bash .github/scripts/changelog.sh "$GITHUB_REF_NAME" | tee notes.md
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*
+
+      - name: Publish release
+        run: |
+          flags=()
+          # vX.Y.Z-rc.1 and similar are marked as pre-releases.
+          [[ "$GITHUB_REF_NAME" == *-* ]] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            --verify-tag \
+            "${flags[@]}"

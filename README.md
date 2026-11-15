@@ -6,7 +6,7 @@
 
 Steam Achievement Tracker is a Linux desktop app for tracking Steam achievement completion from real Steam data. It syncs a public Steam profile, stores progress locally, highlights games worth finishing next, and keeps sync warnings visible instead of silently losing old data.
 
-This app was born for personal use and was entirely vibecoded. I have entry-level knowledge of Go, which I often usen for personal or work related cli tools, but the Svelte/JavaScript frontend is far outside my own area of expertise.
+This app was born for personal use and was entirely vibecoded. I have entry-level knowledge of Go, which I often use for personal or work related cli tools, but the Svelte/JavaScript frontend is far outside my own area of expertise.
 
 ## Features
 
@@ -24,35 +24,59 @@ This app was born for personal use and was entirely vibecoded. I have entry-leve
 - **Profile-scoped data clear** that removes the active profile, tracked games, owned-game playtime and purchase status, achievements, sync history, manual flags, and cached covers while keeping the Secret Service key and logs.
 - **Local SQLite storage** with migration backups, WAL mode, and app-local log rotation.
 
+## Tech stack
+
+| Layer | Technology |
+| --- | --- |
+| Desktop shell | [Wails v3](https://v3.wails.io) (`v3.1.0`), Linux only: GTK4 + WebKitGTK 6.0 through CGO |
+| Backend | Go 1.26; exported `App` methods are bound to the frontend as a Wails service |
+| Local storage | SQLite through `github.com/mattn/go-sqlite3` (CGO; SQLite is compiled in, no system SQLite library needed), WAL mode |
+| Secrets | Linux Secret Service through `github.com/zalando/go-keyring` (D-Bus) |
+| Logging | Standard `log` with `gopkg.in/natefinch/lumberjack.v2` rotation; the Wails `slog` logger is bridged into it (`wailslog.go`) |
+| Frontend | Svelte 5 + Vite 8, talking to Go through generated Wails bindings and `@wailsio/runtime` `3.1.0` |
+| Frontend tests | Vitest 5, Testing Library, jsdom |
+| Build and packaging | Wails v3 CLI over [Task](https://taskfile.dev) (`Taskfile.yml`, `build/`), nfpm for deb/rpm/Arch packages, AppImage through linuxdeploy |
+
+### Wails v3 architecture
+
+The app follows the Wails v3 service model instead of the v2 `wails.Run` layout:
+
+- `main.go` creates the application with `application.New`, registers services, opens the window with `app.Window.NewWithOptions`, then calls `app.Run`.
+- `App` (`app.go`) is a plain Go struct registered with `application.NewService`. It holds no Wails runtime context. It owns its own lifetime context, which `ServiceShutdown` cancels, and it initializes and shuts down through the `ServiceStartup` and `ServiceShutdown` hooks (never bound to the frontend).
+- `CoverService` (`covers.go`) implements `http.Handler` and is mounted at `/game-covers` through the service `Route` option. It serves cached covers from the app data directory. The embedded frontend assets and the `wails3 dev` proxy handle everything else.
+- Wails's own logger (`slog`) is bridged to the standard `log` package (`wailslog.go`) at warning level, so framework warnings and errors (including failed bound calls) end up in `app.log` together with the app's own log lines once logging is initialized. They use `slog` text format (`time=... level=... msg=...`).
+- Sync progress is pushed, not polled. The backend emits the custom Wails event `sync:changed` (no payload; `app.Event.Emit`, wired in `main.go` through the unexported `setEventEmitter`) when a sync starts, after each game's progress write, after the run's final status write, and once more after the sync flag clears. The frontend subscribes with `Events.On('sync:changed')` from `@wailsio/runtime` before its first state read and refetches `GetAppState` on each event. Refreshes never overlap, wait for any user action in flight, and coalesce bursts of events into one extra read. If a refresh fails while a sync is still shown as running, the frontend retries every 2 seconds until a read succeeds, so the **Syncing…** button cannot stay stuck; no timers run otherwise.
+- Frontend code imports the generated bindings from `frontend/bindings/` and does not use any v2 `wailsjs` runtime.
+
 ## Requirements
 
 ### Compiled version
 
 - Linux desktop session.
-- GTK/WebKit runtime libraries compatible with the build. This project uses Wails with the `webkit2_41` build tag, so release builds target GTK3 + WebKit2GTK 4.1 + libsoup 3 runtime libraries.
+- GTK4 and WebKitGTK 6.0 runtime libraries compatible with the build. This project uses Wails v3 on Linux, which renders through GTK4 + WebKitGTK 6.0.
 - Linux Secret Service provider, such as GNOME Keyring or another compatible keyring service.
 - `secret-tool` from libsecret tools to store the Steam Web API key.
 - Steam Web API key.
 - Network access to Steam Web API and Steam static asset hosts.
 - Public Steam profile game details for the profile being tracked.
 
-Package names differ by distribution. On Debian/Ubuntu-style systems, look for packages similar to `libgtk-3-0`, `libwebkit2gtk-4.1-0`, `libsoup-3.0-0`, `gnome-keyring`, and `libsecret-tools`.
+Package names differ by distribution. On Debian/Ubuntu-style systems, look for packages similar to `libgtk-4-1`, `libwebkitgtk-6.0-4`, `gnome-keyring`, and `libsecret-tools`.
 
 ### Development version
 
 - Go 1.26.2 or newer.
-- Node.js frontend tooling required by Wails.
-- Wails v2 CLI. Example:
+- Node.js 22.22.2+ (22.x), 24.15+ (24.x), or 26+, with npm, for the frontend tooling used by the Wails build tasks. Vite 8 alone needs 20.19+ or 22.12+; the test tooling (Vitest 5, jsdom 31) sets the stricter floor. CI uses Node 22.
+- Wails v3 CLI (`wails3`). Example:
 
   ```sh
-  go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.1
+  go install github.com/wailsapp/wails/v3/cmd/wails3@v3.1.0
   ```
 
-- Linux build dependencies for Wails and CGO: C compiler, `pkg-config`, GTK3 development headers, WebKit2GTK 4.1 development headers, and libsoup 3 development headers.
-- SQLite CGO support through `github.com/mattn/go-sqlite3` dependencies, normally covered by the compiler and system SQLite/CGO toolchain.
+- Linux build dependencies for Wails and CGO: C compiler, `pkg-config`, GTK4 development headers, and WebKitGTK 6.0 development headers. On Debian/Ubuntu-style systems: `build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev`.
+- CGO for `github.com/mattn/go-sqlite3`. It compiles its own bundled SQLite, so only the C compiler is needed, not a system SQLite library.
 - Same Secret Service, Steam Web API key, network, and public profile requirements as the compiled version for real sync testing.
 
-Use `wails doctor` to check local Wails dependencies.
+Use `wails3 doctor` to check local Wails dependencies.
 
 ## Install
 
@@ -60,36 +84,19 @@ Use `wails doctor` to check local Wails dependencies.
 
 Install GTK/WebKit runtime libraries, a Secret Service provider, and `secret-tool` for your distribution.
 
-### 2. Install the app binary and desktop icon
+### 2. Install the app
 
-Download the release artifact for Linux, then install the executable and Linux desktop metadata:
+Download the Linux package for your distribution (deb, rpm, or Arch) or the AppImage from the [GitHub Releases](https://github.com/gjrud/steam-achievement-tracker/releases) page. Each release lists `SHA256SUMS` for the files. The packages install the binary, the `.desktop` entry, and the hicolor app icons (`scalable` SVG and 1024x1024 PNG). The desktop shell takes the window and taskbar icon from that entry, because GTK4 has no API to set it from the app.
 
-```sh
-./scripts/install-linux-user.sh install ./steam-achievement-tracker
-```
-
-If you build from source, the production binary is created at `build/bin/steam-achievement-tracker`; install it with:
+If you build from source, create the packages in `bin/` and install one with your package manager. `VERSION` sets the package version; always set it, because packaging without it silently produces a wrong version (see [Releasing](#releasing)):
 
 ```sh
-wails build
-./scripts/install-linux-user.sh install
+VERSION=0.0.0-dev wails3 package
 ```
 
-The script installs:
+A bare `bin/steam-achievement-tracker` from `wails3 build` runs fine but has no menu entry or icon until it is installed through a package.
 
-- `~/.local/bin/steam-achievement-tracker`
-- `~/.local/share/applications/steam-achievement-tracker.desktop`
-- hicolor app icons under `~/.local/share/icons/hicolor/`
-
-Launch from the app menu after install so the window manager can associate the window with the desktop icon.
-
-To uninstall the binary, desktop entry, and icons:
-
-```sh
-./scripts/install-linux-user.sh uninstall
-```
-
-Uninstall keeps `~/.steam-achievement-tracker` and the Secret Service API key.
+Uninstalling through the package manager keeps `~/.steam-achievement-tracker` and the Secret Service API key.
 
 ### 3. Store the Steam Web API key
 
@@ -116,25 +123,67 @@ If the API key is missing, the app opens to the key setup screen and shows the s
 
 ## Build & run
 
-Wails handles frontend dependency installation and frontend builds through the hooks in `wails.json`.
+Wails v3 runs the build through the root `Taskfile.yml` and `build/Taskfile.yml`. Frontend dependencies are installed with `npm ci` in `frontend/`, then the frontend is built and embedded.
 
 Run the desktop app in development mode from the repository root:
 
 ```sh
-wails dev
+wails3 dev
 ```
 
 Build the production app from the repository root:
 
 ```sh
-wails build
+wails3 build
 ```
 
 The production binary is written to:
 
 ```text
-build/bin/steam-achievement-tracker
+bin/steam-achievement-tracker
 ```
+
+Create Linux packages (AppImage, deb, rpm, and Arch) in `bin/`:
+
+```sh
+VERSION=0.0.0-dev wails3 package
+```
+
+The package version comes only from the `VERSION` environment variable, which `build/linux/nfpm/nfpm.yaml` expands (`version: ${VERSION}`). No version is stored in the repository. Without `VERSION`, packaging still succeeds but produces a wrong version (the deb shows `0.0.0~rc0-1`), so always set it. Use the version without the `v` prefix, for example `1.2.3` or `1.2.3-rc.1`.
+
+The deb, rpm, and Arch packages install the binary to `/usr/local/bin` and declare the GTK4 and WebKitGTK 6.0 runtime packages as dependencies (see `build/linux/nfpm/nfpm.yaml`). They do not depend on a Secret Service provider or `secret-tool`; install those separately. The AppImage step downloads `linuxdeploy`, so it needs network access. Use `wails3 task --list` to see every available task.
+
+### Releasing
+
+Releases are built by `.github/workflows/release.yml` when a version tag is pushed. The tag is the only place the version is written.
+
+1. Merge the work into `main`.
+2. Tag the tip of `main` and push the tag:
+
+   ```sh
+   git switch main && git pull
+   git tag -a v1.2.3 -m "v1.2.3"
+   git push origin v1.2.3
+   ```
+
+The tag must look like `vMAJOR.MINOR.PATCH`, optionally with a suffix (`v1.2.3-rc.1`). A suffix marks the release as a pre-release. The workflow then:
+
+1. Checks that the tagged commit is on `main`; otherwise nothing is published. The repository only allows squash merges, so a tag on a PR-branch commit can never pass: tag the squashed commit on `main` instead. Tags are immutable, so after a rejected tag either use the next version or follow the bad-tag procedure below.
+2. Runs the same checks as `ci.yml`.
+3. Runs `wails3 package` on Ubuntu 24.04, using the tag without its `v` as `VERSION`, and checks that the AppImage, deb, rpm, and Arch packages exist that the deb version matches the tag, and that the build did not change `go.mod` or `go.sum`.
+4. Publishes a GitHub release with the four packages, a source archive, `SHA256SUMS`, build provenance attestations, and a changelog of every non-merge commit since the previous release, grouped by conventional-commit type. A final release lists changes since the previous final release; pre-release tags are skipped.
+
+Tags matching `v*` are protected by repository rulesets: only admins can create them, and they cannot be moved or deleted. To fix a bad tag, disable the *Release tags: immutable* ruleset in the repository settings, delete the release if one was published (`gh release delete vX.Y.Z --yes`) and the tag, re-push the tag, then re-enable the ruleset. Pushing a tag that already has a release fails at the publish step. Pushing more than three tags at once triggers no workflow runs. The Arch package of a pre-release gets the same version as the final release (nfpm drops the suffix there), so do not rely on pacman upgrading from a pre-release.
+
+### Generated bindings
+
+The Go methods on `*App` are bound to the frontend. After adding, removing, or changing an exported `App` method, regenerate the JavaScript bindings from the repository root:
+
+```sh
+wails3 generate bindings
+```
+
+This writes `frontend/bindings/` (git-ignored). The frontend imports `frontend/bindings/github.com/gjrud/steam-achievement-tracker/app.js`. Do not edit those files by hand. `wails3 dev` and `wails3 build` regenerate them automatically.
 
 ## Testing
 
@@ -162,7 +211,7 @@ cd ..
 go test ./...
 ```
 
-Run the Go tests with the race detector (several tests, such as the asset handler and sync cancellation, only catch regressions under `-race`):
+Run the Go tests with the race detector (several tests, such as the cover service and sync cancellation, only catch regressions under `-race`):
 
 ```sh
 go test -race ./...
@@ -170,16 +219,17 @@ go test -race ./...
 
 ### Test suite layout
 
-- Go tests drive package APIs against real SQLite and a real image cache; only Steam HTTP endpoints are faked. `app_test.go` covers the Wails-bound orchestration with `HOME` set to a temp dir and the `go-keyring` mock backend.
+- Go tests drive package APIs against real SQLite and a real image cache; only Steam HTTP endpoints are faked. `app_test.go` covers the Wails-bound orchestration with `HOME` set to a temp dir and the `go-keyring` mock backend; `service_lifecycle_test.go` covers the service startup/shutdown hooks and lifetime context, `covers_test.go` the `/game-covers` service, and `wailslog_test.go` the Wails-to-`log` bridge.
 - Tests that need real retry paths without sleeping use `steam.Client.SetRetryBackoff`.
-- Frontend tests (vitest) cover sync polling with fake timers, error banners for rejected Wails calls, keyboard/modal flows, and a drift check between `frontend/src/test/wails-app-mock.js` and the generated `frontend/wailsjs` bindings (skipped when the bindings are absent; regenerate with `wails generate module`).
+- Frontend tests (vitest) cover event-driven sync refresh (a mocked `@wailsio/runtime` in `frontend/src/test/wails-runtime-mock.js`, fake timers for the failure retry), error banners for rejected Wails calls, keyboard/modal flows, and a drift check between `frontend/src/test/wails-app-mock.js` and the generated `frontend/bindings`. The check compares every mock export and argument count with the generated bindings in both directions, and rejects rest parameters in the mock. It also asserts that the `syncChangedEvent` name in `app.go` and `App.svelte` match. The bindings checks are skipped locally when the bindings are absent (regenerate with `wails3 generate bindings`), but fail when the `CI` environment variable is `1` or `true`, so CI cannot pass without them.
+- `ValidateProfile` and `SyncNow` are tested offline: `App.steamBaseURL` (tests only) points both the profile lookup and the sync at an `httptest` Steam stub.
 - `go test ./internal/repository -run '^$' -bench BenchmarkDashboard -benchmem` times the dashboard read on a generated synthetic library (about 425 entries). It is a local diagnostic with no threshold. The dashboard loads the profile's cards once and filters them into the four lists (suggestions, completed, warnings, disabled).
 - Frontend tests also cover the incremental card grid (`frontend/src/App.incremental.test.js`) with a controllable `IntersectionObserver` stub and a ~120-card fixture.
 - There is no coverage threshold. Coverage numbers overstate safety at the orchestration and async-UI boundaries, so use mutation testing as a diagnostic instead.
 
 ### Mutation testing
 
-[gremlins](https://github.com/go-gremlins/gremlins) is configured in `.gremlins.yaml` (2 workers, timeout coefficient 20, `frontend/`, `wailsjs`, and `main.go` excluded). Run it per package, because whole-module runs report false timeouts:
+[gremlins](https://github.com/go-gremlins/gremlins) is configured in `.gremlins.yaml` (2 workers, timeout coefficient 20, `frontend/`, `bindings`, and `main.go` excluded). Run it per package, because whole-module runs report false timeouts:
 
 ```sh
 gremlins unleash ./internal/<pkg> -o tmp/gremlins/<pkg>.json
@@ -210,7 +260,7 @@ Click **Validate**. The app resolves the profile and shows the Steam display nam
 
 ### Sync achievements
 
-Sync starts after saving a profile and again on app startup when a profile and API key exist. Use **Sync now** to start a manual refresh; the button changes to **Syncing…** while a sync is running. A sync counts as running until its run's final status is recorded, so on the next refresh the button returns to **Sync now** and the band shows the result. If a sync ends but saving its final status fails, the stored run stays `running`; the app then reports that run as **Sync failed** instead of showing a spinner, without changing the stored row. The next app start marks the stored run `canceled`.
+Sync starts after saving a profile and again on app startup when a profile and API key exist. Use **Sync now** to start a manual refresh; the button changes to **Syncing…** while a sync is running. A sync counts as running until its run's final status is recorded, so on the next state refresh (triggered by the backend's `sync:changed` event) the button returns to **Sync now** and the band shows the result. If a sync ends but saving its final status fails, the stored run stays `running`; the app then reports that run as **Sync failed** instead of showing a spinner, without changing the stored row. The next app start marks the stored run `canceled`.
 
 Sync behavior:
 
@@ -382,8 +432,8 @@ All app-owned files live under `~/.steam-achievement-tracker` unless noted. Dire
 | `~/.steam-achievement-tracker/cache/images/games/<appid>/header.jpg` | Cover sync | Cached Steam header image, the fallback when neither the library nor the hero capsule is available. |
 | `~/.steam-achievement-tracker/cache/images/games/<appid>/main_capsule.jpg` | Cover sync | Cached Steam main capsule image, the last fallback when the library capsule, hero capsule and header are all unavailable. |
 | `~/.steam-achievement-tracker/logs/` | Logging initialization | Log directory. |
-| `~/.steam-achievement-tracker/logs/app.log` | Logging initialization | Current application log. |
-| `~/.steam-achievement-tracker/logs/app.log*` | Log rotation | Rotated logs; max size is 5 MB with up to 5 backups. |
+| `~/.steam-achievement-tracker/logs/app.log` | Logging initialization | Current application log: app messages plus Wails warnings and errors. |
+| `~/.steam-achievement-tracker/logs/app-*.log` | Log rotation | Rotated logs; max size is 5 MB with up to 5 backups. |
 | Secret Service item `service=steam-achievement-tracker`, `username=steam-web-api-key` | User via `secret-tool` | Steam Web API key. Stored outside the app data directory by the desktop keyring. |
 
 ### steam-achievement-tracker.db Schema
