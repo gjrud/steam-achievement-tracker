@@ -21,6 +21,10 @@ export default defineConfig(({mode}) => ({
           {
             find: '../bindings/github.com/gjrud/steam-achievement-tracker/app.js',
             replacement: fileURLToPath(new URL('./src/test/wails-app-mock.js', import.meta.url))
+          },
+          {
+            find: /^@wailsio\/runtime$/,
+            replacement: fileURLToPath(new URL('./src/test/wails-runtime-mock.js', import.meta.url))
           }
         ]
       : []

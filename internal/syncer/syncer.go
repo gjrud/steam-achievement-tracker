@@ -20,6 +20,17 @@ type Service struct {
 	Repo   *repository.Repository
 	Steam  *steam.Client
 	Images *images.Cache
+	// OnChange, when set, is called after every sync state write: run start, each progress write and the final
+	// status write, whether or not the write succeeded. It is called from the sync and worker goroutines, so it must
+	// be goroutine-safe. It is never called while a fullSyncRun lock is held.
+	OnChange func()
+}
+
+// changed reports a sync state change to OnChange. It is nil-safe.
+func (s *Service) changed() {
+	if s.OnChange != nil {
+		s.OnChange()
+	}
 }
 
 type Result struct {
@@ -43,6 +54,7 @@ func (s *Service) FullSync(ctx context.Context, profile repository.Profile) (Res
 	if err != nil {
 		return Result{}, err
 	}
+	s.changed()
 	run := &fullSyncRun{s: s, profile: profile, runID: runID, result: Result{Status: "success"}}
 
 	owned, err := s.prepareOwnedGames(ctx, profile)
@@ -169,6 +181,7 @@ func (r *fullSyncRun) updateProgress(total, synced, failed int) {
 	if err := r.s.Repo.UpdateSyncRunProgress(r.runID, total, synced, failed); err != nil {
 		log.Printf("update sync progress: %v", err)
 	}
+	r.s.changed()
 }
 
 func (r *fullSyncRun) finalize() {
@@ -200,6 +213,7 @@ func (r *fullSyncRun) finish() {
 	if err := r.s.Repo.FinishSyncRun(r.runID, r.result.Status, r.result.GamesTotal, r.result.GamesSynced, r.result.GamesFailed, r.result.Error); err != nil {
 		log.Printf("finish sync run: %v", err)
 	}
+	r.s.changed()
 }
 
 // syncGame syncs one game for the profile: every eligible achievement set becomes one entry.

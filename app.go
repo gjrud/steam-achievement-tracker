@@ -29,6 +29,10 @@ var errSyncAlreadyInProgress = errors.New("sync already in progress")
 // down before it closes the windows, so the frontend can still call in while the repository is being closed.
 var errShuttingDown = errors.New("shutting down")
 
+// syncChangedEvent is the Wails event emitted whenever sync state changes. It carries no payload: the frontend
+// refetches GetAppState when it arrives.
+const syncChangedEvent = "sync:changed"
+
 type App struct {
 	// lifeCtx is the service lifetime context, created by NewApp and cancelled by ServiceShutdown. Sync and Steam
 	// request contexts derive from it through context(). lifeCancel is its cancel func.
@@ -36,6 +40,9 @@ type App struct {
 	lifeCancel context.CancelFunc
 	mu         sync.Mutex
 	initMu     sync.Mutex
+	// emit delivers named Wails events to the frontend. Set once by main through setEventEmitter; nil in tests.
+	// It is read under mu and called only after mu is released.
+	emit func(name string)
 
 	initialized    bool
 	initError      string
@@ -454,6 +461,8 @@ func (a *App) startSync(force bool) error {
 	a.syncCancel = cancel
 	a.syncWG.Add(1)
 	a.mu.Unlock()
+	a.emitSyncChanged()
+	// done ends the sync on every path, including the early exits below. endSync emits the final event.
 	done := func() { a.endSync(cancel) }
 	if repo == nil {
 		done()
@@ -499,7 +508,7 @@ func (a *App) startSync(force bool) error {
 	a.mu.Unlock()
 	go func(p repository.Profile) {
 		defer done()
-		service := syncer.Service{Repo: repo, Steam: client, Images: images.New(paths)}
+		service := syncer.Service{Repo: repo, Steam: client, Images: images.New(paths), OnChange: a.emitSyncChanged}
 		if _, err := service.FullSync(syncCtx, p); err != nil {
 			log.Printf("full sync failed: %v", err)
 		}
@@ -507,8 +516,10 @@ func (a *App) startSync(force bool) error {
 	return nil
 }
 
-// endSync ends the current sync: it cancels the sync context, clears the flag, cancel func and baseline, and releases
-// syncWG. startSync's done and the sync goroutine both end here.
+// endSync ends the current sync: it cancels the sync context, clears the flag, cancel func and baseline, emits the
+// final sync:changed event, and releases syncWG. startSync's done and the sync goroutine both end here. The event
+// comes after the flag clear, so the frontend's refetch reads syncInProgress=false. It is emitted before syncWG is
+// released, so ServiceShutdown's wait covers it. The emit runs outside a.mu.
 func (a *App) endSync(cancel context.CancelFunc) {
 	cancel()
 	a.mu.Lock()
@@ -518,6 +529,7 @@ func (a *App) endSync(cancel context.CancelFunc) {
 	a.syncBaselineRunID = 0
 	a.syncBaselineKnown = false
 	a.mu.Unlock()
+	a.emitSyncChanged()
 	a.syncWG.Done()
 }
 
@@ -590,6 +602,24 @@ func (a *App) cancelSyncAndWait() {
 	if cancel != nil {
 		cancel()
 		a.syncWG.Wait()
+	}
+}
+
+// setEventEmitter sets the function that delivers Wails events. main calls it once, after application.New. It is
+// unexported: exported App methods are bound to the frontend. Without an emitter, events are dropped.
+func (a *App) setEventEmitter(emit func(name string)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.emit = emit
+}
+
+// emitSyncChanged tells the frontend that sync state changed. It is nil-safe and never holds a.mu while it emits.
+func (a *App) emitSyncChanged() {
+	a.mu.Lock()
+	emit := a.emit
+	a.mu.Unlock()
+	if emit != nil {
+		emit(syncChangedEvent)
 	}
 }
 

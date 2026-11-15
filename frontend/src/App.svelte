@@ -1,5 +1,6 @@
 <script>
   import {onMount, tick} from 'svelte'
+  import {Events} from '@wailsio/runtime'
   import {
     ClearActiveUserData,
     DisableGame,
@@ -33,9 +34,9 @@
   let state = null
   let loading = true
   let error = ''
-  // pollError is true only while `error` holds a background poll failure. Polls clear only that, so an action's
-  // error survives the polls that keep running while a sync is in progress.
-  let pollError = false
+  // refreshError is true only while `error` holds a failed state refresh. Refreshes clear only that, so an action's
+  // error survives the refreshes that run while a sync is in progress.
+  let refreshError = false
   let profileInput = ''
   let preview = null
   let validating = false
@@ -44,7 +45,13 @@
   let viewSearch = ''
   let activeTagFilter = ''
   let viewSearchInput = null
-  let pollHandle = null
+  let unsubscribeSyncEvents = null
+  let retryHandle = null
+  // refreshing: a GetAppState read is in flight. refreshQueued: a fresh read is owed; events set it, so a burst
+  // collapses into one read. busyActions: actions in flight; reads wait for them so their results land in order.
+  let refreshing = false
+  let refreshQueued = false
+  let busyActions = 0
   let mounted = false
   let stateRequestToken = 0
   let contextMenu = null
@@ -55,59 +62,127 @@
   let clearConfirmOpen = false
   let clearConfirmInput = ''
   const menuMargin = 12
+  // Wails event the Go backend emits (no payload) on sync start, after each game's progress write, after the final
+  // status write, and once more after the sync flag clears.
+  const syncChangedEvent = 'sync:changed'
+  const refreshRetryDelayMs = 2000
 
   onMount(() => {
     mounted = true
-    loadState({reschedule: true})
+    // Subscribe before the first read so a sync:changed emitted during that read is not missed.
+    unsubscribeSyncEvents = Events.On(syncChangedEvent, requestRefresh)
+    requestRefresh()
     return () => {
       mounted = false
-      stopPolling()
+      unsubscribeSyncEvents?.()
+      unsubscribeSyncEvents = null
+      clearRetry()
     }
   })
 
-  async function loadState(options = {}) {
+  // requestRefresh asks for a fresh GetAppState read. Reads never overlap and never run during an action; requests
+  // that arrive meanwhile collapse into a single read that runs once the current work finishes.
+  function requestRefresh() {
+    if (!mounted) return
+    clearRetry()
+    refreshQueued = true
+    drainRefreshes()
+  }
+
+  function drainRefreshes() {
+    if (!mounted || refreshing || busyActions > 0 || !refreshQueued) return
+    refreshQueued = false
+    refresh()
+  }
+
+  // refresh reads the app state once. A read that an action overtook is dropped and re-queued, so the state shown
+  // always comes from the newest read that finished.
+  async function refresh() {
+    refreshing = true
     const token = ++stateRequestToken
+    let retry = false
     try {
-      if (pollError) {
-        error = ''
-        pollError = false
-      }
       const nextState = await GetAppState()
-      if (token === stateRequestToken) state = nextState
-    } catch (err) {
-      if (token === stateRequestToken) {
-        error = formatMessage(err)
-        pollError = true
+      if (token !== stateRequestToken) {
+        refreshQueued = true
+        return
       }
+      state = nextState
+      clearRetry()
+      if (refreshError) {
+        error = ''
+        refreshError = false
+      }
+    } catch (err) {
+      if (token !== stateRequestToken) {
+        refreshQueued = true
+        return
+      }
+      error = formatMessage(err)
+      refreshError = true
+      // A failed read while a sync runs would otherwise leave the button on Syncing… with no event left to fix it.
+      retry = isSyncing(state)
     } finally {
+      refreshing = false
       if (token === stateRequestToken) loading = false
-      if (options.reschedule && token === stateRequestToken) schedulePolling()
+      if (retry) scheduleRetry()
+      drainRefreshes()
     }
   }
 
-  function schedulePolling() {
-    stopPolling()
+  // scheduleRetry arms one timer. If the retried read also fails while the sync still runs, it arms the next one.
+  function scheduleRetry() {
+    clearRetry()
     if (!mounted) return
-    const syncing = Boolean(state?.syncInProgress || state?.dashboard?.latestSyncRun?.status === 'running')
-    if (!syncing) return
-    pollHandle = setTimeout(() => loadState({reschedule: true}), 1000)
+    retryHandle = setTimeout(() => {
+      retryHandle = null
+      requestRefresh()
+    }, refreshRetryDelayMs)
+  }
+
+  function clearRetry() {
+    if (retryHandle) clearTimeout(retryHandle)
+    retryHandle = null
+  }
+
+  // beginAction takes over the request token (so an in-flight read is dropped), clears the banner, and holds reads
+  // until endAction. Every action must pair beginAction with endAction in finally. A pending failed-read retry is left
+  // armed: if the action fails, that retry still recovers the sync view.
+  function beginAction() {
+    busyActions++
+    error = ''
+    refreshError = false
+    return ++stateRequestToken
+  }
+
+  // applyActionState stores an action's result unless a newer request took over. Applying fresh state supersedes a
+  // failed read's pending retry, so the retry is cancelled. Returns whether the state was applied.
+  function applyActionState(token, nextState) {
+    if (token !== stateRequestToken) return false
+    state = nextState
+    clearRetry()
+    return true
+  }
+
+  function endAction() {
+    busyActions--
+    drainRefreshes()
+  }
+
+  // isSyncing reports whether a dashboard state shows a sync in progress, by the backend flag or the latest run.
+  function isSyncing(s) {
+    return Boolean(s?.syncInProgress || s?.dashboard?.latestSyncRun?.status === 'running')
   }
 
   async function retryKey() {
-    const token = ++stateRequestToken
+    const token = beginAction()
     try {
-      error = ''
-      pollError = false
       const nextState = await RetryAPIKey()
-      if (token === stateRequestToken) {
-        state = nextState
-        schedulePolling()
-      }
+      applyActionState(token, nextState)
     } catch (err) {
-      if (token === stateRequestToken) {
-        error = formatMessage(err)
-        schedulePolling()
-      }
+      if (token === stateRequestToken) error = formatMessage(err)
+    } finally {
+      endAction()
     }
   }
 
@@ -117,7 +192,7 @@
     validating = true
     preview = null
     error = ''
-    pollError = false
+    refreshError = false
     try {
       preview = await ValidateProfile(input)
     } catch (err) {
@@ -129,67 +204,44 @@
 
   async function saveProfile() {
     if (!preview) return
-    const token = ++stateRequestToken
     saving = true
-    error = ''
-    pollError = false
+    const token = beginAction()
     try {
       const nextState = await SaveProfile(preview)
-      if (token === stateRequestToken) {
-        state = nextState
-        schedulePolling()
-      }
+      applyActionState(token, nextState)
     } catch (err) {
-      if (token === stateRequestToken) {
-        error = formatMessage(err)
-        schedulePolling()
-      }
+      if (token === stateRequestToken) error = formatMessage(err)
     } finally {
       saving = false
+      endAction()
     }
   }
 
   async function syncNow() {
-    const token = ++stateRequestToken
-    error = ''
-    pollError = false
+    const token = beginAction()
     try {
       const nextState = await SyncNow()
-      if (token === stateRequestToken) {
-        state = nextState
-        schedulePolling()
-      }
+      applyActionState(token, nextState)
     } catch (err) {
-      if (token === stateRequestToken) {
-        error = formatMessage(err)
-        schedulePolling()
-      }
+      if (token === stateRequestToken) error = formatMessage(err)
+    } finally {
+      endAction()
     }
   }
 
   // Settings only change what the next sync gathers; this does not start a sync.
   async function saveLibrarySettings(includeUnvettedApps, includePlayedFreeGames) {
     if (savingSettings) return
-    // Stop the sync poll first: a tick during the save would bump stateRequestToken and drop this result.
-    // schedulePolling() below restarts it if the sync is still running.
-    stopPolling()
-    const token = ++stateRequestToken
     savingSettings = true
-    error = ''
-    pollError = false
+    const token = beginAction()
     try {
       const nextState = await SetLibrarySettings(includeUnvettedApps, includePlayedFreeGames)
-      if (token === stateRequestToken) {
-        state = nextState
-        schedulePolling()
-      }
+      applyActionState(token, nextState)
     } catch (err) {
-      if (token === stateRequestToken) {
-        error = formatMessage(err)
-        schedulePolling()
-      }
+      if (token === stateRequestToken) error = formatMessage(err)
     } finally {
       savingSettings = false
+      endAction()
     }
   }
 
@@ -214,31 +266,23 @@
   async function confirmClearActiveUserData() {
     if (clearingData || !state?.profile) return
     if (clearConfirmInput !== clearConfirmText) return
-    const token = ++stateRequestToken
     clearingData = true
-    error = ''
-    pollError = false
+    const token = beginAction()
     try {
-      stopPolling()
       const nextState = await ClearActiveUserData()
-      if (token === stateRequestToken) {
-        state = nextState
+      if (applyActionState(token, nextState)) {
         activeView = 'suggestions'
         activeTagFilter = ''
         profileInput = ''
         preview = null
         clearConfirmOpen = false
         clearConfirmInput = ''
-        schedulePolling()
       }
     } catch (err) {
-      if (token === stateRequestToken) {
-        error = formatMessage(err)
-        // stopPolling() ran before the call; restart it if the app is still syncing.
-        schedulePolling()
-      }
+      if (token === stateRequestToken) error = formatMessage(err)
     } finally {
       clearingData = false
+      endAction()
     }
   }
 
@@ -290,39 +334,27 @@
   async function runGameAction(action, selectedGame = contextMenu?.game) {
     if (!selectedGame || gameActionLoading) return
     const game = selectedGame
-    const token = ++stateRequestToken
     gameActionLoading = true
-    error = ''
-    pollError = false
+    const token = beginAction()
     try {
       let nextState
       if (action === 'previously-completed') nextState = await MarkGamePreviouslyCompleted(game.appid, game.groupId)
       else if (action === 'toggle-dlc') nextState = await ToggleGameMissingAchievementsInDLC(game.appid, game.groupId)
       else if (action === 'disable') nextState = await DisableGame(game.appid, game.groupId)
       else if (action === 'enable') nextState = await EnableGame(game.appid, game.groupId)
-      if (nextState && token === stateRequestToken) {
-        state = nextState
-        schedulePolling()
-      }
+      if (nextState) applyActionState(token, nextState)
     } catch (err) {
-      if (token === stateRequestToken) {
-        error = formatMessage(err)
-        schedulePolling()
-      }
+      if (token === stateRequestToken) error = formatMessage(err)
     } finally {
       gameActionLoading = false
       contextMenu = null
+      endAction()
     }
-  }
-
-  function stopPolling() {
-    if (pollHandle) clearTimeout(pollHandle)
-    pollHandle = null
   }
 
   $: dashboard = state?.dashboard || null
   $: latestSyncRun = dashboard?.latestSyncRun || null
-  $: syncIsRunning = Boolean(state?.syncInProgress || latestSyncRun?.status === 'running')
+  $: syncIsRunning = isSyncing(state)
   $: summary = dashboard?.summary || {}
   $: suggestions = dashboard?.suggestions || []
   $: completed = sortByTitle(dashboard?.completed || [])

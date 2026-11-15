@@ -46,6 +46,9 @@ func main() {
 		},
 	})
 
+	// Sync state events reach the frontend through the app's event bus. The backend has no other route to it.
+	backend.setEventEmitter(func(name string) { app.Event.Emit(name) })
+
 	app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:            "Steam Achievement Tracker",
 		Width:            1280,
