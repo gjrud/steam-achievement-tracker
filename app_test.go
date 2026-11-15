@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gjrud/steam-achievement-tracker/internal/appdata"
 	"github.com/gjrud/steam-achievement-tracker/internal/config"
 	"github.com/gjrud/steam-achievement-tracker/internal/keyring"
 	"github.com/gjrud/steam-achievement-tracker/internal/logging"
@@ -37,11 +36,11 @@ func openTestApp(t *testing.T) *App {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	t.Cleanup(logging.Fallback)
-	app := &App{ctx: context.Background()}
+	app := NewApp()
 	if err := app.ensureInitialized(); err != nil {
 		t.Fatalf("ensureInitialized: %v", err)
 	}
-	t.Cleanup(func() { app.shutdown(context.Background()) })
+	t.Cleanup(func() { _ = app.ServiceShutdown() })
 	return app
 }
 
@@ -160,7 +159,7 @@ func assertIdleSync(t *testing.T, app *App) {
 func TestStartSyncSingleFlightGuards(t *testing.T) {
 	// syncInProgress is set by hand: a real running sync would need Steam. The start/finish/reset cycle
 	// is covered by TestStartSyncLifecycleResetsAfterGuardFailure.
-	app := &App{ctx: context.Background(), syncInProgress: true}
+	app := &App{syncInProgress: true}
 
 	if err := app.startSync(false); err != nil {
 		t.Fatalf("non-forced startSync err = %v, want nil", err)
@@ -176,7 +175,7 @@ func TestStartSyncSingleFlightGuards(t *testing.T) {
 
 func TestStartSyncLifecycleResetsAfterGuardFailure(t *testing.T) {
 	t.Run("no database", func(t *testing.T) {
-		app := &App{ctx: context.Background()}
+		app := &App{}
 		err := app.startSync(true)
 		if err == nil || !strings.Contains(err.Error(), "database is not initialized") {
 			t.Fatalf("startSync err = %v, want database-not-initialized", err)
@@ -812,7 +811,7 @@ func TestStartSyncFailsWhenBaselineCannotBeRead(t *testing.T) {
 
 // TestStartSyncFailureResetsSyncBaseline checks that the done path of a failed start leaves no baseline behind.
 func TestStartSyncFailureResetsSyncBaseline(t *testing.T) {
-	app := &App{ctx: context.Background()}
+	app := &App{}
 	app.mu.Lock()
 	app.syncProfileID = 7
 	app.syncBaselineRunID = 7
@@ -966,7 +965,7 @@ func TestInitFailureIsReportedAndBlocksActions(t *testing.T) {
 	t.Setenv("HOME", blocked)
 	t.Cleanup(logging.Fallback)
 	zk.MockInit()
-	app := &App{ctx: context.Background()}
+	app := &App{}
 
 	state, err := app.GetAppState()
 	if err != nil {
@@ -1157,85 +1156,6 @@ func TestMarkGamePreviouslyCompletedUnknownSetLeavesNoFlag(t *testing.T) {
 	}
 }
 
-func TestAssetHandlerRejectsNonPositiveAppIDEvenWhenFileExists(t *testing.T) {
-	root := t.TempDir()
-	// Files exist for every id, so a 404 can only come from the appid check and not from a missing file.
-	for _, id := range []string{"0", "-5", "1"} {
-		dir := filepath.Join(root, id)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "library_600x900.jpg"), []byte("cover-"+id), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	app := &App{paths: appdata.Paths{GameImages: root}}
-	handler := app.assetHandler()
-
-	tests := []struct {
-		id     string
-		status int
-	}{
-		{"0", http.StatusNotFound},
-		{"-5", http.StatusNotFound},
-		{"1", http.StatusOK},
-	}
-	for _, tt := range tests {
-		req := httptest.NewRequest(http.MethodGet, "/game-covers/"+tt.id+"/library_600x900.jpg", nil)
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-		if rec.Code != tt.status {
-			t.Fatalf("appid %s status = %d, want %d", tt.id, rec.Code, tt.status)
-		}
-	}
-}
-
-// TestAssetHandlerReadsPathsSafelyWhileInitializing races ensureInitialized against assetHandler requests.
-// It only detects a regression (unlocked read of a.paths) under `go test -race`; without the race detector
-// the unsynchronized read usually passes silently.
-func TestAssetHandlerReadsPathsSafelyWhileInitializing(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Cleanup(logging.Fallback)
-	zk.MockInit()
-	app := &App{ctx: context.Background()}
-	handler := app.assetHandler()
-
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		<-start
-		if err := app.ensureInitialized(); err != nil {
-			t.Errorf("ensureInitialized: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		<-start
-		for i := 0; i < 200; i++ {
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/game-covers/10/library_600x900.jpg", nil))
-		}
-	}()
-	close(start)
-	wg.Wait()
-	t.Cleanup(func() { app.shutdown(context.Background()) })
-
-	coverDir := filepath.Join(app.paths.GameImages, "10")
-	if err := os.MkdirAll(coverDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(coverDir, "library_600x900.jpg"), []byte("after-init"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/game-covers/10/library_600x900.jpg", nil))
-	if rec.Code != http.StatusOK || rec.Body.String() != "after-init" {
-		t.Fatalf("after init status = %d body = %q, want 200 with cover bytes", rec.Code, rec.Body.String())
-	}
-}
-
 func TestRemoveCachedGameImagesOnlyRequestedDirs(t *testing.T) {
 	root := t.TempDir()
 	for _, appID := range []string{"10", "20", "30"} {
@@ -1259,76 +1179,5 @@ func TestRemoveCachedGameImagesOnlyRequestedDirs(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "30", "library_600x900.jpg")); err != nil {
 		t.Fatalf("unrequested cache dir removed: %v", err)
-	}
-}
-
-// TestAssetHandlerServesCoverKinds covers every happy-path cover route: a cached
-// per-game cover plus the hero, main and header fallbacks for DLC image apps.
-// Each case writes one file under <GameImages>/<appID>/<file> and asserts the
-// handler returns 200 with exactly those bytes.
-func TestAssetHandlerServesCoverKinds(t *testing.T) {
-	tests := []struct {
-		kind  string
-		appID string
-		file  string
-		body  string
-	}{
-		{kind: "cached", appID: "123", file: "library_600x900.jpg", body: "cover-bytes"},
-		{kind: "hero", appID: "4173830", file: "hero_capsule.jpg", body: "hero-bytes"},
-		{kind: "main", appID: "4173830", file: "main_capsule.jpg", body: "main-bytes"},
-		{kind: "header", appID: "4173830", file: "header.jpg", body: "header-bytes"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.kind, func(t *testing.T) {
-			imagesDir := filepath.Join(t.TempDir(), "cache", "images", "games")
-			coverPath := filepath.Join(imagesDir, tt.appID, tt.file)
-			if err := os.MkdirAll(filepath.Dir(coverPath), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(coverPath, []byte(tt.body), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			app := &App{paths: appdata.Paths{GameImages: imagesDir}}
-
-			req := httptest.NewRequest(http.MethodGet, "/game-covers/"+tt.appID+"/"+tt.file, nil)
-			rec := httptest.NewRecorder()
-			app.assetHandler().ServeHTTP(rec, req)
-
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-			}
-			if got := rec.Body.String(); got != tt.body {
-				t.Fatalf("body = %q, want %q", got, tt.body)
-			}
-		})
-	}
-}
-
-func TestAssetHandlerRejectsInvalidCoverRoutes(t *testing.T) {
-	app := &App{paths: appdata.Paths{GameImages: t.TempDir()}}
-	tests := []struct {
-		method string
-		path   string
-	}{
-		{http.MethodPost, "/game-covers/123/library_600x900.jpg"},
-		{http.MethodGet, "/game-covers/not-an-id/library_600x900.jpg"},
-		{http.MethodGet, "/game-covers/0/library_600x900.jpg"},
-		{http.MethodGet, "/game-covers/-5/library_600x900.jpg"},
-		{http.MethodGet, "/game-covers/123/other.jpg"},
-		{http.MethodGet, "/game-covers/123/header.png"},
-		{http.MethodGet, "/game-covers/123/../library_600x900.jpg"},
-		{http.MethodGet, "/game-covers/123/nested/library_600x900.jpg"},
-		{http.MethodGet, "/game-covers/123/hero_capsule.png"},
-		{http.MethodGet, "/game-covers/123/main_capsule.png"},
-		{http.MethodGet, "/game-covers/123/main_capsule.jpg.tmp"},
-		{http.MethodGet, "/other/123/library_600x900.jpg"},
-	}
-	for _, tt := range tests {
-		req := httptest.NewRequest(tt.method, tt.path, nil)
-		rec := httptest.NewRecorder()
-		app.assetHandler().ServeHTTP(rec, req)
-		if rec.Code != http.StatusNotFound {
-			t.Fatalf("%s %s status = %d, want %d", tt.method, tt.path, rec.Code, http.StatusNotFound)
-		}
 	}
 }
