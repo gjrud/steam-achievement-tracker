@@ -17,6 +17,12 @@ const entryBaseFromSQL = `from profile_games pg
 
 const coverJoinSQL = `left join cover_images ci on ci.image_appid=` + effectiveCoverAppIDSQL
 
+// Dashboard reads the four card lists from one loadGameCards pass, so they always agree with each other: a sync
+// commit cannot land between the list passes, which the old four GameCards reads allowed. Summary and
+// LatestSyncRun are separate reads (no read transaction), so they can still be a moment apart from the cards, and
+// the tags read in loadGameCards is a separate statement from the cards read.
+// The lists are read-only once Dashboard returns. A card that appears in two lists shares its Tags slice and
+// pointer fields with the other copy.
 func (r *Repository) Dashboard(profileID int64) (Dashboard, error) {
 	summary, err := r.Summary(profileID)
 	if err != nil {
@@ -26,23 +32,18 @@ func (r *Repository) Dashboard(profileID int64) (Dashboard, error) {
 	if err != nil {
 		return Dashboard{}, err
 	}
-	suggestions, err := r.GameCards(profileID, "suggestions")
+	cards, err := r.loadGameCards(profileID)
 	if err != nil {
 		return Dashboard{}, err
 	}
-	completed, err := r.GameCards(profileID, "completed")
-	if err != nil {
-		return Dashboard{}, err
-	}
-	warnings, err := r.GameCards(profileID, "warnings")
-	if err != nil {
-		return Dashboard{}, err
-	}
-	disabled, err := r.GameCards(profileID, "disabled")
-	if err != nil {
-		return Dashboard{}, err
-	}
-	return Dashboard{Summary: summary, LatestSyncRun: latest, Suggestions: suggestions, Completed: completed, Warnings: warnings, Disabled: disabled}, nil
+	return Dashboard{
+		Summary:       summary,
+		LatestSyncRun: latest,
+		Suggestions:   filterSorted(cards, "suggestions"),
+		Completed:     filterSorted(cards, "completed"),
+		Warnings:      filterSorted(cards, "warnings"),
+		Disabled:      filterSorted(cards, "disabled"),
+	}, nil
 }
 
 // Summary counts entries and games for one profile only. CompletedSetsCount counts completed enabled entries
@@ -81,7 +82,20 @@ func (r *Repository) Summary(profileID int64) (Summary, error) {
 	return s, nil
 }
 
+// GameCards returns the cards of one dashboard list (filter: suggestions, completed, warnings or disabled; any
+// other value means suggestions), sorted for display.
 func (r *Repository) GameCards(profileID int64, filter string) ([]GameCard, error) {
+	cards, err := r.loadGameCards(profileID)
+	if err != nil {
+		return nil, err
+	}
+	return filterSorted(cards, filter), nil
+}
+
+// loadGameCards reads every entry of the profile with its tags, unfiltered and unsorted. profileGameTags runs
+// to completion (rows closed) before the cards query opens: the pool has one connection, so a nested query
+// while a cursor is open would deadlock.
+func (r *Repository) loadGameCards(profileID int64) ([]GameCard, error) {
 	tagMap, err := r.profileGameTags(profileID)
 	if err != nil {
 		return nil, err
@@ -104,15 +118,25 @@ func (r *Repository) GameCards(profileID int64, filter string) ([]GameCard, erro
 		if err != nil {
 			return nil, err
 		}
-		if includeGameCard(c, filter) {
-			cards = append(cards, c)
-		}
+		cards = append(cards, c)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	sortGameCards(cards, filter)
 	return cards, nil
+}
+
+// filterSorted returns the cards of one list in display order. The result is nil when no card matches (it
+// marshals to JSON null, as before). Each call builds its own slice, so lists do not share a backing array.
+func filterSorted(cards []GameCard, filter string) []GameCard {
+	var list []GameCard
+	for _, c := range cards {
+		if includeGameCard(c, filter) {
+			list = append(list, c)
+		}
+	}
+	sortGameCards(list, filter)
+	return list
 }
 
 type gameCardScanner interface {

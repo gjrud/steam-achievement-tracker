@@ -81,6 +81,21 @@ export function toneClass(tone) {
   return tone ? `tone-${tone}` : ''
 }
 
+// Reference implementation (one pass per tag). Kept as the oracle for tagCountsFromGames in tests; not used by the app.
 export function tagCountFromGames(games, tag) {
   return (games || []).filter((game) => gameTags(game).includes(tag)).length
+}
+
+// tagCountsFromGames returns the count of games per filter chip tag in one pass over games. Every chip tag is present,
+// with 0 when no game has it. Equivalent to mapping tagCountFromGames over suggestionTagOptions.
+const suggestionTagSet = new Set(suggestionTagOptions)
+
+export function tagCountsFromGames(games) {
+  const counts = Object.fromEntries(suggestionTagOptions.map((tag) => [tag, 0]))
+  for (const game of games || []) {
+    for (const tag of gameTags(game)) {
+      if (suggestionTagSet.has(tag)) counts[tag]++
+    }
+  }
+  return counts
 }

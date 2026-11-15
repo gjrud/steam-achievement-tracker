@@ -173,6 +173,8 @@ go test -race ./...
 - Go tests drive package APIs against real SQLite and a real image cache; only Steam HTTP endpoints are faked. `app_test.go` covers the Wails-bound orchestration with `HOME` set to a temp dir and the `go-keyring` mock backend.
 - Tests that need real retry paths without sleeping use `steam.Client.SetRetryBackoff`.
 - Frontend tests (vitest) cover sync polling with fake timers, error banners for rejected Wails calls, keyboard/modal flows, and a drift check between `frontend/src/test/wails-app-mock.js` and the generated `frontend/wailsjs` bindings (skipped when the bindings are absent; regenerate with `wails generate module`).
+- `go test ./internal/repository -run '^$' -bench BenchmarkDashboard -benchmem` times the dashboard read on a generated synthetic library (about 425 entries). It is a local diagnostic with no threshold. The dashboard loads the profile's cards once and filters them into the four lists (suggestions, completed, warnings, disabled).
+- Frontend tests also cover the incremental card grid (`frontend/src/App.incremental.test.js`) with a controllable `IntersectionObserver` stub and a ~120-card fixture.
 - There is no coverage threshold. Coverage numbers overstate safety at the orchestration and async-UI boundaries, so use mutation testing as a diagnostic instead.
 
 ### Mutation testing
@@ -280,6 +282,8 @@ This view lists non-disabled games that are not currently complete. Cards show c
 ![Not completed view](docs/not-completed.gif)
 
 Suggestion tags include **New achievements added**, **Almost there**, **In progress**, **Untouched**, **Unvetted**, **No achievements**, **Set**, **DLC**, **Not owned**, **Achievements in DLC**, **Missing cover art**, and **Sync error**. Use the search box to filter by title and the tag chips to filter the **Not completed** and **Completed** lists. Each chip shows how many cards match it.
+
+Long lists load in batches: the first 48 cards appear at once and more are added automatically as you scroll near the end of the list. Blank space of the estimated height of the unloaded cards is reserved below the grid, so the scrollbar keeps its size and position while the list loads. Jumping straight to the bottom (dragging the scrollbar, **End**) loads every card needed in one step, which can cause one short pause on a long list. A **Show more (N of M)** button below the loaded cards adds 48 on demand (keyboard, screen reader) and disappears once every card is shown. Counters, the chip counts and the **Completed** results pill always use the full list, not the loaded part. Changing the search text, the tag filter or the tab starts again at 48 cards; a sync refresh does not. The reserved space is an estimate, so the page height can change by about 1% (up or down) once the last card loads.
 
 #### Tags and sorting
 

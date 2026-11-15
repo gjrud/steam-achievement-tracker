@@ -1899,7 +1899,15 @@ func TestGameTagsBelowAlmostThereThreshold(t *testing.T) {
 	assertTag(t, repo, profile.ID, 14, 0, "in_progress", true)
 }
 
-func testRepository(t *testing.T) *Repository {
+func testRepository(t testing.TB) *Repository {
+	t.Helper()
+	repo, _ := testRepositoryPath(t)
+	return repo
+}
+
+// testRepositoryPath opens a migrated repository and returns its sqlite file path, so a test can reach the same
+// database through a second connection.
+func testRepositoryPath(t testing.TB) (*Repository, string) {
 	t.Helper()
 	root := t.TempDir()
 	paths := appdata.Paths{
@@ -1916,7 +1924,7 @@ func testRepository(t *testing.T) *Repository {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return New(db)
+	return New(db), paths.DB
 }
 
 // seedGameSync saves a single completed base entry (group 0) for the game.

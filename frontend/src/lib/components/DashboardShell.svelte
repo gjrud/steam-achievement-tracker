@@ -2,6 +2,7 @@
   import SummaryStats from './SummaryStats.svelte'
   import ProfileCard from './ProfileCard.svelte'
   import GameCard from './GameCard.svelte'
+  import IncrementalGrid from './IncrementalGrid.svelte'
   import SyncErrorsView from './SyncErrorsView.svelte'
   import DisabledView from './DisabledView.svelte'
   import SettingsView from './SettingsView.svelte'
@@ -51,6 +52,8 @@
 
   $: tagFilterVisible = (activeView === 'suggestions' || activeView === 'completed') && visibleTagFilterOptions.length > 0
   $: tagFilterLabel = activeView === 'completed' ? 'Filter completed games by tag' : 'Filter not completed games by tag'
+  // Search text is trimmed so a trailing space does not reset the incremental grid.
+  $: listResetKey = `${viewSearch.trim()}|${activeTagFilter}`
 </script>
 
 <main class="app-shell">
@@ -69,9 +72,9 @@
     <section class="view-toolbar" aria-label="Search current view"><input bind:this={viewSearchInput} class="search-input" type="search" placeholder="Search games in this view" bind:value={viewSearch} on:input={(e) => onViewSearch(e.currentTarget.value)} />{#if tagFilterVisible}<div class="tag-filter-panel" aria-label={tagFilterLabel}><div class="tag-filter-heading"><span>Filter by tag</span>{#if activeTagFilter}<button class="link-button" on:click={() => onActiveTagFilter('')}>Clear tag filter</button>{/if}</div><div class="tag-filter-list"><button class="tag tag-filter" class:active={!activeTagFilter} aria-pressed={!activeTagFilter} on:click={() => onActiveTagFilter('')}>All <span>{integer(tagFilterGames.length)}</span></button>{#each visibleTagFilterOptions as tag}<button class={`tag tag-filter ${toneClass(tagTone(tag))}`} class:active={activeTagFilter === tag} aria-pressed={activeTagFilter === tag} on:click={() => onActiveTagFilter(tag)}>{tagLabel(tag)} <span>{integer(tagFilterCounts[tag])}</span></button>{/each}</div></div>{/if}</section>
   {/if}
   {#if activeView === 'suggestions'}
-    {#if filteredSuggestions.length}<div class="game-grid incomplete-grid">{#each filteredSuggestions as game (game.entryKey)}<GameCard {game} {gameTags} {tagLabel} {toneClass} {tagTone} {gameTitle} {gameWarning} {hasAchievements} {shouldShowSyncErrorMessage} {cardProgress} {completionLabel} {formatPlaytime} {pct} {missingAvgUnlockLabel} onContextMenu={onOpenGameMenu} />{/each}</div>{:else}<p class="empty-state">{viewFiltered ? 'No games match the current filters.' : 'No incomplete games found yet.'}</p>{/if}
+    {#if filteredSuggestions.length}<IncrementalGrid items={filteredSuggestions} resetKey={listResetKey} gridClass="game-grid incomplete-grid" let:game><GameCard {game} {gameTags} {tagLabel} {toneClass} {tagTone} {gameTitle} {gameWarning} {hasAchievements} {shouldShowSyncErrorMessage} {cardProgress} {completionLabel} {formatPlaytime} {pct} {missingAvgUnlockLabel} onContextMenu={onOpenGameMenu} /></IncrementalGrid>{:else}<p class="empty-state">{viewFiltered ? 'No games match the current filters.' : 'No incomplete games found yet.'}</p>{/if}
   {:else if activeView === 'completed'}
-    <section class="section-block"><div class="section-head"><h2>Completed games</h2><span class="pill">{filteredCompleted.length} results</span></div>{#if filteredCompleted.length}<div class="game-grid">{#each filteredCompleted as game (game.entryKey)}<GameCard {game} {gameTags} {tagLabel} {toneClass} {tagTone} {gameTitle} {gameWarning} {hasAchievements} {shouldShowSyncErrorMessage} {cardProgress} {completionLabel} {formatPlaytime} {pct} {missingAvgUnlockLabel} onContextMenu={onOpenGameMenu} />{/each}</div>{:else}<p class="empty-state">{viewFiltered ? 'No matching games.' : 'No completed games found yet.'}</p>{/if}</section>
+    <section class="section-block"><div class="section-head"><h2>Completed games</h2><span class="pill">{filteredCompleted.length} results</span></div>{#if filteredCompleted.length}<IncrementalGrid items={filteredCompleted} resetKey={listResetKey} gridClass="game-grid" let:game><GameCard {game} {gameTags} {tagLabel} {toneClass} {tagTone} {gameTitle} {gameWarning} {hasAchievements} {shouldShowSyncErrorMessage} {cardProgress} {completionLabel} {formatPlaytime} {pct} {missingAvgUnlockLabel} onContextMenu={onOpenGameMenu} /></IncrementalGrid>{:else}<p class="empty-state">{viewFiltered ? 'No matching games.' : 'No completed games found yet.'}</p>{/if}</section>
   {:else if activeView === 'warnings'}
     <SyncErrorsView games={filteredWarnings} {viewSearch} {tagLabel} {toneClass} {tagTone} {gameTitle} {gameWarning} {hasAchievements} {shouldShowSyncErrorMessage} {completionLabel} {pct} {gameActionLoading} {onOpenGameMenu} onRunGameAction={onRunGameAction} />
   {:else if activeView === 'disabled'}
