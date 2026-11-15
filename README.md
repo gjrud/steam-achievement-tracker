@@ -29,30 +29,30 @@ This app was born for personal use and was entirely vibecoded. I have entry-leve
 ### Compiled version
 
 - Linux desktop session.
-- GTK/WebKit runtime libraries compatible with the build. This project uses Wails with the `webkit2_41` build tag, so release builds target GTK3 + WebKit2GTK 4.1 + libsoup 3 runtime libraries.
+- GTK4 and WebKitGTK 6.0 runtime libraries compatible with the build. This project uses Wails v3 on Linux, which renders through GTK4 + WebKitGTK 6.0.
 - Linux Secret Service provider, such as GNOME Keyring or another compatible keyring service.
 - `secret-tool` from libsecret tools to store the Steam Web API key.
 - Steam Web API key.
 - Network access to Steam Web API and Steam static asset hosts.
 - Public Steam profile game details for the profile being tracked.
 
-Package names differ by distribution. On Debian/Ubuntu-style systems, look for packages similar to `libgtk-3-0`, `libwebkit2gtk-4.1-0`, `libsoup-3.0-0`, `gnome-keyring`, and `libsecret-tools`.
+Package names differ by distribution. On Debian/Ubuntu-style systems, look for packages similar to `libgtk-4-1`, `libwebkitgtk-6.0-4`, `gnome-keyring`, and `libsecret-tools`.
 
 ### Development version
 
 - Go 1.26.2 or newer.
-- Node.js frontend tooling required by Wails.
-- Wails v2 CLI. Example:
+- Node.js (with npm) for the frontend tooling used by the Wails build tasks.
+- Wails v3 CLI (`wails3`). Example:
 
   ```sh
-  go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.1
+  go install github.com/wailsapp/wails/v3/cmd/wails3@v3.1.0
   ```
 
-- Linux build dependencies for Wails and CGO: C compiler, `pkg-config`, GTK3 development headers, WebKit2GTK 4.1 development headers, and libsoup 3 development headers.
+- Linux build dependencies for Wails and CGO: C compiler, `pkg-config`, GTK4 development headers, and WebKitGTK 6.0 development headers. On Debian/Ubuntu-style systems: `build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev`.
 - SQLite CGO support through `github.com/mattn/go-sqlite3` dependencies, normally covered by the compiler and system SQLite/CGO toolchain.
 - Same Secret Service, Steam Web API key, network, and public profile requirements as the compiled version for real sync testing.
 
-Use `wails doctor` to check local Wails dependencies.
+Use `wails3 doctor` to check local Wails dependencies.
 
 ## Install
 
@@ -68,10 +68,10 @@ Download the release artifact for Linux, then install the executable and Linux d
 ./scripts/install-linux-user.sh install ./steam-achievement-tracker
 ```
 
-If you build from source, the production binary is created at `build/bin/steam-achievement-tracker`; install it with:
+If you build from source, the production binary is created at `bin/steam-achievement-tracker`; install it with:
 
 ```sh
-wails build
+wails3 build
 ./scripts/install-linux-user.sh install
 ```
 
@@ -116,25 +116,53 @@ If the API key is missing, the app opens to the key setup screen and shows the s
 
 ## Build & run
 
-Wails handles frontend dependency installation and frontend builds through the hooks in `wails.json`.
+Wails v3 runs the build through the root `Taskfile.yml` and `build/Taskfile.yml`. Frontend dependencies are installed with `npm ci` in `frontend/`, then the frontend is built and embedded.
 
 Run the desktop app in development mode from the repository root:
 
 ```sh
-wails dev
+wails3 dev
 ```
 
 Build the production app from the repository root:
 
 ```sh
-wails build
+wails3 build
 ```
 
 The production binary is written to:
 
 ```text
-build/bin/steam-achievement-tracker
+bin/steam-achievement-tracker
 ```
+
+Create Linux packages (AppImage, deb, rpm, and Arch) in `bin/`:
+
+```sh
+wails3 package
+```
+
+The AppImage step downloads `linuxdeploy`, so it needs network access. Use `wails3 task --list` to see every available task.
+
+### Generated bindings
+
+The Go methods on `*App` are bound to the frontend. After adding, removing, or changing an exported `App` method, regenerate the JavaScript bindings from the repository root:
+
+```sh
+wails3 generate bindings
+```
+
+This writes `frontend/bindings/` (git-ignored). The frontend imports `frontend/bindings/github.com/gjrud/steam-achievement-tracker/app.js`. Do not edit those files by hand. `wails3 dev` and `wails3 build` regenerate them automatically.
+
+### LLM / MCP access (development only)
+
+Wails can expose a Model Context Protocol server for coding agents while you run the app:
+
+```sh
+WAILS_MCP=1 wails3 dev
+```
+
+This adds the `mcp` build tag. The server listens on `http://127.0.0.1:9099/mcp`; set `WAILS_MCP_PORT` to change the port. Do not set `WAILS_MCP` for release builds. The project's `opencode.json` already defines a `wails3-cli` MCP server and a disabled `wails-app` server that points at that URL.
 
 ## Testing
 
@@ -172,14 +200,14 @@ go test -race ./...
 
 - Go tests drive package APIs against real SQLite and a real image cache; only Steam HTTP endpoints are faked. `app_test.go` covers the Wails-bound orchestration with `HOME` set to a temp dir and the `go-keyring` mock backend.
 - Tests that need real retry paths without sleeping use `steam.Client.SetRetryBackoff`.
-- Frontend tests (vitest) cover sync polling with fake timers, error banners for rejected Wails calls, keyboard/modal flows, and a drift check between `frontend/src/test/wails-app-mock.js` and the generated `frontend/wailsjs` bindings (skipped when the bindings are absent; regenerate with `wails generate module`).
+- Frontend tests (vitest) cover sync polling with fake timers, error banners for rejected Wails calls, keyboard/modal flows, and a drift check between `frontend/src/test/wails-app-mock.js` and the generated `frontend/bindings` (skipped when the bindings are absent; regenerate with `wails3 generate bindings`).
 - `go test ./internal/repository -run '^$' -bench BenchmarkDashboard -benchmem` times the dashboard read on a generated synthetic library (about 425 entries). It is a local diagnostic with no threshold. The dashboard loads the profile's cards once and filters them into the four lists (suggestions, completed, warnings, disabled).
 - Frontend tests also cover the incremental card grid (`frontend/src/App.incremental.test.js`) with a controllable `IntersectionObserver` stub and a ~120-card fixture.
 - There is no coverage threshold. Coverage numbers overstate safety at the orchestration and async-UI boundaries, so use mutation testing as a diagnostic instead.
 
 ### Mutation testing
 
-[gremlins](https://github.com/go-gremlins/gremlins) is configured in `.gremlins.yaml` (2 workers, timeout coefficient 20, `frontend/`, `wailsjs`, and `main.go` excluded). Run it per package, because whole-module runs report false timeouts:
+[gremlins](https://github.com/go-gremlins/gremlins) is configured in `.gremlins.yaml` (2 workers, timeout coefficient 20, `frontend/`, `bindings`, and `main.go` excluded). Run it per package, because whole-module runs report false timeouts:
 
 ```sh
 gremlins unleash ./internal/<pkg> -o tmp/gremlins/<pkg>.json
