@@ -103,6 +103,9 @@ describe('App dashboard views', () => {
     await user.click(screen.getByRole('button', {name: 'Completed'}))
     expect(await screen.findByRole('heading', {name: 'Portal'})).toBeInTheDocument()
     expect(screen.queryByRole('heading', {name: 'Hades'})).not.toBeInTheDocument()
+    expect(screen.getByRole('button', {name: 'Completed'})).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('button', {name: 'Not completed'})).not.toHaveAttribute('aria-current')
+    expect(screen.getByRole('button', {name: 'Sync errors'})).not.toHaveAttribute('aria-current')
 
     await user.click(screen.getByRole('button', {name: 'Sync errors'}))
     expect(await screen.findByRole('heading', {name: 'Broken Game'})).toBeInTheDocument()

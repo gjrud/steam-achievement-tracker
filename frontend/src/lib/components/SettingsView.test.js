@@ -43,7 +43,7 @@ describe('SettingsView library sync', () => {
 
     expect(screen.getByText('Library sync')).toBeInTheDocument()
     expect(screen.getByText('Steam hides new, not-yet-vetted apps by default.')).toBeInTheDocument()
-    expect(screen.getByText('When off, only purchased games are tracked and the Purchased games card equals All games.')).toBeInTheDocument()
+    expect(screen.getByText('When off, only purchased games are tracked and the Purchased counter equals All games.')).toBeInTheDocument()
     expect(screen.getByText('Changes apply on next sync. Games no longer returned are marked as not owned.')).toBeInTheDocument()
   })
 

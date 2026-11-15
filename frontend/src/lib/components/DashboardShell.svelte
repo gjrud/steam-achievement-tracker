@@ -1,5 +1,6 @@
 <script>
-  import SummaryCards from './SummaryCards.svelte'
+  import SummaryStats from './SummaryStats.svelte'
+  import ProfileCard from './ProfileCard.svelte'
   import GameCard from './GameCard.svelte'
   import SyncErrorsView from './SyncErrorsView.svelte'
   import DisabledView from './DisabledView.svelte'
@@ -10,7 +11,6 @@
   export let summary = {}
   export let latestSyncRun = null
   export let syncIsRunning = false
-  export let syncCardTone = ''
   export let activeView = 'suggestions'
   export let viewSearch = ''
   export let activeTagFilter = ''
@@ -48,18 +48,23 @@
   export let hasAchievements
   export let shouldShowSyncErrorMessage
   export let showDisabledReasonLabel
-  export let syncTitle
-  export let syncDetails
 
   $: tagFilterVisible = (activeView === 'suggestions' || activeView === 'completed') && visibleTagFilterOptions.length > 0
   $: tagFilterLabel = activeView === 'completed' ? 'Filter completed games by tag' : 'Filter not completed games by tag'
 </script>
 
 <main class="app-shell">
-  <header class="topbar"><div class="title-block"><p class="eyebrow large">Steam Achievement Tracker</p><h1 class="sr-only">Dashboard</h1><p class="title-subtitle">Spot new achievements without the hunt.</p></div><div class="profile-block"><div class="profile-identity">{#if state.profile?.avatarUrl}<img src={state.profile.avatarUrl} alt="" />{:else}<div class="avatar-fallback small">{(state.profile?.displayName || 'S').slice(0, 1).toUpperCase()}</div>{/if}<div class="profile-copy"><p class="profile-name">{state.profile?.displayName}</p></div></div><button class="primary" on:click={onSyncNow} disabled={state.syncInProgress}>{state.syncInProgress ? 'Syncing…' : 'Sync now'}</button></div></header>
+  <header class="dashboard-header">
+    <div class="brand">
+      <p class="eyebrow brand-title">Steam Achievement Tracker</p>
+      <h1 class="sr-only">Dashboard</h1>
+      <p class="brand-subtitle">Spot new achievements without the hunt.</p>
+    </div>
+    <SummaryStats {summary} {integer} />
+    <ProfileCard {state} {latestSyncRun} {syncIsRunning} {onSyncNow} />
+  </header>
   {#if error}<div class="banner error-banner" aria-live="polite">{error}</div>{/if}
-  <SummaryCards {summary} {syncIsRunning} {syncCardTone} {latestSyncRun} {toneClass} {syncTitle} {syncDetails} {integer} />
-  <nav class="tabs" aria-label="Dashboard views"><button class:active={activeView === 'suggestions'} on:click={() => onActiveViewChange('suggestions')}>Not completed</button><button class:active={activeView === 'completed'} on:click={() => onActiveViewChange('completed')}>Completed</button><button class:active={activeView === 'warnings'} on:click={() => onActiveViewChange('warnings')}>Sync errors</button><button class:active={activeView === 'disabled'} on:click={() => onActiveViewChange('disabled')}>Disabled</button><button class:active={activeView === 'settings'} on:click={() => onActiveViewChange('settings')}>Settings</button></nav>
+  <nav class="tabs" aria-label="Dashboard views"><button class="tab" class:active={activeView === 'suggestions'} aria-current={activeView === 'suggestions' ? 'page' : undefined} on:click={() => onActiveViewChange('suggestions')}>Not completed</button><button class="tab" class:active={activeView === 'completed'} aria-current={activeView === 'completed' ? 'page' : undefined} on:click={() => onActiveViewChange('completed')}>Completed</button><button class="tab" class:active={activeView === 'warnings'} aria-current={activeView === 'warnings' ? 'page' : undefined} on:click={() => onActiveViewChange('warnings')}>Sync errors</button><button class="tab" class:active={activeView === 'disabled'} aria-current={activeView === 'disabled' ? 'page' : undefined} on:click={() => onActiveViewChange('disabled')}>Disabled</button><button class="tab tab-settings" class:active={activeView === 'settings'} aria-current={activeView === 'settings' ? 'page' : undefined} on:click={() => onActiveViewChange('settings')}>Settings</button></nav>
   {#if activeView !== 'settings'}
     <section class="view-toolbar" aria-label="Search current view"><input bind:this={viewSearchInput} class="search-input" type="search" placeholder="Search games in this view" bind:value={viewSearch} on:input={(e) => onViewSearch(e.currentTarget.value)} />{#if tagFilterVisible}<div class="tag-filter-panel" aria-label={tagFilterLabel}><div class="tag-filter-heading"><span>Filter by tag</span>{#if activeTagFilter}<button class="link-button" on:click={() => onActiveTagFilter('')}>Clear tag filter</button>{/if}</div><div class="tag-filter-list"><button class="tag tag-filter" class:active={!activeTagFilter} aria-pressed={!activeTagFilter} on:click={() => onActiveTagFilter('')}>All <span>{integer(tagFilterGames.length)}</span></button>{#each visibleTagFilterOptions as tag}<button class={`tag tag-filter ${toneClass(tagTone(tag))}`} class:active={activeTagFilter === tag} aria-pressed={activeTagFilter === tag} on:click={() => onActiveTagFilter(tag)}>{tagLabel(tag)} <span>{integer(tagFilterCounts[tag])}</span></button>{/each}</div></div>{/if}</section>
   {/if}

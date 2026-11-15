@@ -13,7 +13,7 @@ This app was born for personal use and was entirely vibecoded. I have entry-leve
 - **Steam profile setup** from SteamID64, `steamcommunity.com/profiles/...` URLs, `steamcommunity.com/id/...` URLs, or vanity names.
 - **Secret Service-only API key storage** for the Steam Web API key; no environment variable or plaintext fallback is used.
 - **Startup and manual sync** against Steam Web API data.
-- **Dashboard summary** for all games, purchased games, completed games, completed sets, unlocked achievements, and latest sync status.
+- **Dashboard header** with counters for all games, purchased games, completed games, completed sets, and unlocked achievements, plus a profile card with the latest sync status.
 - **Not completed view** with ranked suggestions, search, and tag filters.
 - **Completed games view** for achievement sets with full completion, including completed named and DLC sets.
 - **Sync errors view** for games that failed refresh while preserving prior local data.
@@ -227,16 +227,20 @@ Sync behavior:
 
 ### Read the dashboard
 
-The top summary shows:
+The header shows the app title, the profile card, and five counters in three labeled groups. Counters are plain figures, not cards, and everything in the header and the game grid scales with the window size.
 
-- all games count, excluding disabled games. This includes played free-to-play games.
-- purchased games count, excluding disabled games. This counts the games in the account's purchased list, so played free-to-play games are not included. Steam's purchased list may also include free license grants.
-- completed games count, excluding disabled games. A game counts when its base achievement set is completed. A game with only a completed DLC set does not count, and neither does a game whose base set is not listed for the profile (for example, a game whose achievements all belong to named or DLC sets).
-- completed sets count, excluding disabled games and sets. Each completed set (base, named, or DLC) counts separately.
-- unlocked achievement count, excluding disabled games
-- current or latest sync status and per-game progress
+- **Library** group:
+  - **All games**: count excluding disabled games. This includes played free-to-play games.
+  - **Purchased**: count excluding disabled games. This counts the games in the account's purchased list, so played free-to-play games are not included. Steam's purchased list may also include free license grants.
+- **Completed** group:
+  - **Completed games**: count excluding disabled games. A game counts when its base achievement set is completed. A game with only a completed DLC set does not count, and neither does a game whose base set is not listed for the profile (for example, a game whose achievements all belong to named or DLC sets).
+  - **Completed sets**: count excluding disabled games and sets. Each completed set (base, named, or DLC) counts separately.
+- **Unlocked** group:
+  - **Achievements**: unlocked achievement count, excluding disabled games.
 
-The main tabs are **Not completed**, **Completed**, **Sync errors**, **Disabled**, and **Settings**.
+The profile card shows the avatar, the profile name, and the **Sync now** button. Below them, a status line shows the current or latest sync (a colored dot: blue while running, green on success, amber for partial or failed, grey when no sync has run yet) with its per-game progress.
+
+The main tabs are **Not completed**, **Completed**, **Sync errors**, **Disabled**, and **Settings**, drawn as folder tabs with the active tab raised. Below 1180 px wide the header stacks (title, profile card, one row of counters, tabs) and the tabs wrap without a baseline.
 
 ### Achievement sets
 

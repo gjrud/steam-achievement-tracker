@@ -48,7 +48,7 @@
       <input id="include-played-free-games" type="checkbox" role="switch" bind:this={playedFreeBox} checked={includePlayedFreeGames} aria-busy={savingSettings} aria-describedby="include-played-free-games-hint" on:click={blockWhileSaving} on:change={changeLibrarySettings} />
       <div>
         <label for="include-played-free-games">Include played free games</label>
-        <p id="include-played-free-games-hint" class="muted">When off, only purchased games are tracked and the Purchased games card equals All games.</p>
+        <p id="include-played-free-games-hint" class="muted">When off, only purchased games are tracked and the Purchased counter equals All games.</p>
       </div>
     </div>
     <p class="muted">Changes apply on next sync. Games no longer returned are marked as not owned.</p>

@@ -28,7 +28,6 @@
   } from './lib/game.js'
   import {matchesViewFilters, matchesSearchQuery, sortByTitle} from './lib/filter.js'
   import {gameTags, suggestionTagOptions, tagLabel, tagTone, toneClass, tagCountFromGames} from './lib/tag.js'
-  import {syncDetails, syncTitle} from './lib/sync.js'
   import {showDisabledReasonLabel} from './lib/disabled.js'
 
   let state = null
@@ -335,7 +334,6 @@
   $: tagFilterCounts = Object.fromEntries(suggestionTagOptions.map((tag) => [tag, tagCountFromGames(tagFilterGames, tag)]))
   $: visibleTagFilterOptions = suggestionTagOptions.filter((tag) => tagFilterCounts[tag] > 0)
   $: if (activeTagFilter && !tagFilterCounts[activeTagFilter]) activeTagFilter = ''
-  $: syncCardTone = syncIsRunning ? 'info' : latestSyncRun?.status === 'partial' || latestSyncRun?.status === 'failed' ? 'warn' : ''
   $: filteredSuggestions = suggestions.filter((game) => matchesViewFilters(game, normalizedViewSearch, activeTagFilter))
   $: filteredCompleted = completed.filter((game) => matchesViewFilters(game, normalizedViewSearch, activeTagFilter))
   $: filteredWarnings = warningGames.filter((game) => matchesSearchQuery(game, normalizedViewSearch))
@@ -375,7 +373,6 @@
     {summary}
     {latestSyncRun}
     {syncIsRunning}
-    {syncCardTone}
     {activeView}
     {viewSearch}
     {activeTagFilter}
@@ -405,8 +402,6 @@
     gameTitle={gameTitle}
     gameWarning={gameWarning}
     formatPlaytime={formatPlaytime}
-    syncTitle={syncTitle}
-    syncDetails={syncDetails}
     integer={integer}
     pct={pct}
     cardProgress={cardProgress}
