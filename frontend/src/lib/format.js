@@ -30,3 +30,25 @@ export function formatDateTime(value) {
   const parsed = new Date(value)
   return Number.isNaN(parsed.getTime()) ? value : dateTimeFormatter.format(parsed)
 }
+
+const MINUTE_MS = 60 * 1000
+const HOUR_MS = 60 * MINUTE_MS
+const DAY_MS = 24 * HOUR_MS
+
+// formatRelativeTime words a timestamp against now ("5 min ago", "2 hours ago"). After a week it falls back to the
+// absolute date, and input that cannot be parsed comes back unchanged.
+export function formatRelativeTime(value, now = Date.now()) {
+  if (!value) return ''
+  const then = new Date(value).getTime()
+  if (Number.isNaN(then)) return value
+  const elapsed = now - then
+  if (elapsed >= 7 * DAY_MS) return formatDateTime(value)
+  if (elapsed < MINUTE_MS) return 'just now'
+  if (elapsed < HOUR_MS) return `${Math.floor(elapsed / MINUTE_MS)} min ago`
+  if (elapsed < DAY_MS) {
+    const hours = Math.floor(elapsed / HOUR_MS)
+    return hours === 1 ? '1 hour ago' : `${hours} hours ago`
+  }
+  const days = Math.floor(elapsed / DAY_MS)
+  return days === 1 ? '1 day ago' : `${days} days ago`
+}
