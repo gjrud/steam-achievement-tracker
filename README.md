@@ -86,12 +86,12 @@ Install GTK/WebKit runtime libraries, a Secret Service provider, and `secret-too
 
 ### 2. Install the app
 
-Install the Linux package for your distribution (deb, rpm, or Arch), or run the AppImage. The packages install the binary, the `.desktop` entry, and the hicolor app icons (`scalable` SVG and 1024x1024 PNG). The desktop shell takes the window and taskbar icon from that entry, because GTK4 has no API to set it from the app.
+Download the Linux package for your distribution (deb, rpm, or Arch) or the AppImage from the [GitHub Releases](https://github.com/gjrud/steam-achievement-tracker/releases) page. Each release lists `SHA256SUMS` for the files. The packages install the binary, the `.desktop` entry, and the hicolor app icons (`scalable` SVG and 1024x1024 PNG). The desktop shell takes the window and taskbar icon from that entry, because GTK4 has no API to set it from the app.
 
-If you build from source, create the packages in `bin/` and install one with your package manager:
+If you build from source, create the packages in `bin/` and install one with your package manager. `VERSION` sets the package version; always set it, because packaging without it silently produces a wrong version (see [Releasing](#releasing)):
 
 ```sh
-wails3 package
+VERSION=0.0.0-dev wails3 package
 ```
 
 A bare `bin/steam-achievement-tracker` from `wails3 build` runs fine but has no menu entry or icon until it is installed through a package.
@@ -146,10 +146,34 @@ bin/steam-achievement-tracker
 Create Linux packages (AppImage, deb, rpm, and Arch) in `bin/`:
 
 ```sh
-wails3 package
+VERSION=0.0.0-dev wails3 package
 ```
 
+The package version comes only from the `VERSION` environment variable, which `build/linux/nfpm/nfpm.yaml` expands (`version: ${VERSION}`). No version is stored in the repository. Without `VERSION`, packaging still succeeds but produces a wrong version (the deb shows `0.0.0~rc0-1`), so always set it. Use the version without the `v` prefix, for example `1.2.3` or `1.2.3-rc.1`.
+
 The deb, rpm, and Arch packages install the binary to `/usr/local/bin` and declare the GTK4 and WebKitGTK 6.0 runtime packages as dependencies (see `build/linux/nfpm/nfpm.yaml`). They do not depend on a Secret Service provider or `secret-tool`; install those separately. The AppImage step downloads `linuxdeploy`, so it needs network access. Use `wails3 task --list` to see every available task.
+
+### Releasing
+
+Releases are built by `.github/workflows/release.yml` when a version tag is pushed. The tag is the only place the version is written.
+
+1. Merge the work into `main`.
+2. Tag the tip of `main` and push the tag:
+
+   ```sh
+   git switch main && git pull
+   git tag -a v1.2.3 -m "v1.2.3"
+   git push origin v1.2.3
+   ```
+
+The tag must look like `vMAJOR.MINOR.PATCH`, optionally with a suffix (`v1.2.3-rc.1`). A suffix marks the release as a pre-release. The workflow then:
+
+1. Checks that the tagged commit is on `main`; otherwise nothing is published. The repository only allows squash merges, so a tag on a PR-branch commit can never pass: tag the squashed commit on `main` instead. Tags are immutable, so after a rejected tag either use the next version or follow the bad-tag procedure below.
+2. Runs the same checks as `ci.yml`.
+3. Runs `wails3 package` on Ubuntu 24.04, using the tag without its `v` as `VERSION`, and checks that the AppImage, deb, rpm, and Arch packages exist that the deb version matches the tag, and that the build did not change `go.mod` or `go.sum`.
+4. Publishes a GitHub release with the four packages, a source archive, `SHA256SUMS`, build provenance attestations, and a changelog of every non-merge commit since the previous release, grouped by conventional-commit type. A final release lists changes since the previous final release; pre-release tags are skipped.
+
+Tags matching `v*` are protected by repository rulesets: only admins can create them, and they cannot be moved or deleted. To fix a bad tag, disable the *Release tags: immutable* ruleset in the repository settings, delete the release if one was published (`gh release delete vX.Y.Z --yes`) and the tag, re-push the tag, then re-enable the ruleset. Pushing a tag that already has a release fails at the publish step. Pushing more than three tags at once triggers no workflow runs. The Arch package of a pre-release gets the same version as the final release (nfpm drops the suffix there), so do not rely on pacman upgrading from a pre-release.
 
 ### Generated bindings
 
