@@ -6,7 +6,7 @@
 
 Steam Achievement Tracker is a Linux desktop app for tracking Steam achievement completion from real Steam data. It syncs a public Steam profile, stores progress locally, highlights games worth finishing next, and keeps sync warnings visible instead of silently losing old data.
 
-This app was born for personal use and was entirely vibecoded. I have entry-level knowledge of Go, which I often usen for personal or work related cli tools, but the Svelte/JavaScript frontend is far outside my own area of expertise.
+This app was born for personal use and was entirely vibecoded. I have entry-level knowledge of Go, which I often use for personal or work related cli tools, but the Svelte/JavaScript frontend is far outside my own area of expertise.
 
 ## Features
 
@@ -23,6 +23,29 @@ This app was born for personal use and was entirely vibecoded. I have entry-leve
 - **Local cover cache** using Steam library capsule images taken from the owned-games list; the store API is only queried for DLC sets and for base games without a listed cover, with hero, header and main capsule fallbacks. DLC sets without any image of their own show the parent game's cover.
 - **Profile-scoped data clear** that removes the active profile, tracked games, owned-game playtime and purchase status, achievements, sync history, manual flags, and cached covers while keeping the Secret Service key and logs.
 - **Local SQLite storage** with migration backups, WAL mode, and app-local log rotation.
+
+## Tech stack
+
+| Layer | Technology |
+| --- | --- |
+| Desktop shell | [Wails v3](https://v3.wails.io) (`v3.1.0`), Linux only: GTK4 + WebKitGTK 6.0 through CGO |
+| Backend | Go 1.26; exported `App` methods are bound to the frontend as a Wails service |
+| Local storage | SQLite through `github.com/mattn/go-sqlite3` (CGO; SQLite is compiled in, no system SQLite library needed), WAL mode |
+| Secrets | Linux Secret Service through `github.com/zalando/go-keyring` (D-Bus) |
+| Logging | Standard `log` with `gopkg.in/natefinch/lumberjack.v2` rotation; the Wails `slog` logger is bridged into it (`wailslog.go`) |
+| Frontend | Svelte 5 + Vite 8, talking to Go through generated Wails bindings and `@wailsio/runtime` `3.1.0` |
+| Frontend tests | Vitest 5, Testing Library, jsdom |
+| Build and packaging | Wails v3 CLI over [Task](https://taskfile.dev) (`Taskfile.yml`, `build/`), nfpm for deb/rpm/Arch packages, AppImage through linuxdeploy |
+
+### Wails v3 architecture
+
+The app follows the Wails v3 service model instead of the v2 `wails.Run` layout:
+
+- `main.go` creates the application with `application.New`, registers services, opens the window with `app.Window.NewWithOptions`, then calls `app.Run`.
+- `App` (`app.go`) is a plain Go struct registered with `application.NewService`. It holds no Wails runtime context. It owns its own lifetime context, which `ServiceShutdown` cancels, and it initializes and shuts down through the `ServiceStartup` and `ServiceShutdown` hooks (never bound to the frontend).
+- `CoverService` (`covers.go`) implements `http.Handler` and is mounted at `/game-covers` through the service `Route` option. It serves cached covers from the app data directory. The embedded frontend assets and the `wails3 dev` proxy handle everything else.
+- Wails's own logger (`slog`) is bridged to the standard `log` package (`wailslog.go`) at warning level, so framework warnings and errors (including failed bound calls) end up in `app.log` together with the app's own log lines once logging is initialized. They use `slog` text format (`time=... level=... msg=...`).
+- Frontend code imports the generated bindings from `frontend/bindings/` and does not use any v2 `wailsjs` runtime.
 
 ## Requirements
 
@@ -41,7 +64,7 @@ Package names differ by distribution. On Debian/Ubuntu-style systems, look for p
 ### Development version
 
 - Go 1.26.2 or newer.
-- Node.js (with npm) for the frontend tooling used by the Wails build tasks.
+- Node.js 22.22.2+ (22.x), 24.15+ (24.x), or 26+, with npm, for the frontend tooling used by the Wails build tasks. Vite 8 alone needs 20.19+ or 22.12+; the test tooling (Vitest 5, jsdom 31) sets the stricter floor. CI uses Node 22.
 - Wails v3 CLI (`wails3`). Example:
 
   ```sh
@@ -49,7 +72,7 @@ Package names differ by distribution. On Debian/Ubuntu-style systems, look for p
   ```
 
 - Linux build dependencies for Wails and CGO: C compiler, `pkg-config`, GTK4 development headers, and WebKitGTK 6.0 development headers. On Debian/Ubuntu-style systems: `build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev`.
-- SQLite CGO support through `github.com/mattn/go-sqlite3` dependencies, normally covered by the compiler and system SQLite/CGO toolchain.
+- CGO for `github.com/mattn/go-sqlite3`. It compiles its own bundled SQLite, so only the C compiler is needed, not a system SQLite library.
 - Same Secret Service, Steam Web API key, network, and public profile requirements as the compiled version for real sync testing.
 
 Use `wails3 doctor` to check local Wails dependencies.
@@ -142,7 +165,7 @@ Create Linux packages (AppImage, deb, rpm, and Arch) in `bin/`:
 wails3 package
 ```
 
-The AppImage step downloads `linuxdeploy`, so it needs network access. Use `wails3 task --list` to see every available task.
+The deb, rpm, and Arch packages install the binary to `/usr/local/bin` and declare the GTK4 and WebKitGTK 6.0 runtime packages as dependencies (see `build/linux/nfpm/nfpm.yaml`). They do not depend on a Secret Service provider or `secret-tool`; install those separately. The AppImage step downloads `linuxdeploy`, so it needs network access. Use `wails3 task --list` to see every available task.
 
 ### Generated bindings
 
@@ -190,7 +213,7 @@ cd ..
 go test ./...
 ```
 
-Run the Go tests with the race detector (several tests, such as the asset handler and sync cancellation, only catch regressions under `-race`):
+Run the Go tests with the race detector (several tests, such as the cover service and sync cancellation, only catch regressions under `-race`):
 
 ```sh
 go test -race ./...
@@ -198,7 +221,7 @@ go test -race ./...
 
 ### Test suite layout
 
-- Go tests drive package APIs against real SQLite and a real image cache; only Steam HTTP endpoints are faked. `app_test.go` covers the Wails-bound orchestration with `HOME` set to a temp dir and the `go-keyring` mock backend.
+- Go tests drive package APIs against real SQLite and a real image cache; only Steam HTTP endpoints are faked. `app_test.go` covers the Wails-bound orchestration with `HOME` set to a temp dir and the `go-keyring` mock backend; `service_lifecycle_test.go` covers the service startup/shutdown hooks and lifetime context, `covers_test.go` the `/game-covers` service, and `wailslog_test.go` the Wails-to-`log` bridge.
 - Tests that need real retry paths without sleeping use `steam.Client.SetRetryBackoff`.
 - Frontend tests (vitest) cover sync polling with fake timers, error banners for rejected Wails calls, keyboard/modal flows, and a drift check between `frontend/src/test/wails-app-mock.js` and the generated `frontend/bindings` (skipped when the bindings are absent; regenerate with `wails3 generate bindings`).
 - `go test ./internal/repository -run '^$' -bench BenchmarkDashboard -benchmem` times the dashboard read on a generated synthetic library (about 425 entries). It is a local diagnostic with no threshold. The dashboard loads the profile's cards once and filters them into the four lists (suggestions, completed, warnings, disabled).
@@ -410,8 +433,8 @@ All app-owned files live under `~/.steam-achievement-tracker` unless noted. Dire
 | `~/.steam-achievement-tracker/cache/images/games/<appid>/header.jpg` | Cover sync | Cached Steam header image, the fallback when neither the library nor the hero capsule is available. |
 | `~/.steam-achievement-tracker/cache/images/games/<appid>/main_capsule.jpg` | Cover sync | Cached Steam main capsule image, the last fallback when the library capsule, hero capsule and header are all unavailable. |
 | `~/.steam-achievement-tracker/logs/` | Logging initialization | Log directory. |
-| `~/.steam-achievement-tracker/logs/app.log` | Logging initialization | Current application log. |
-| `~/.steam-achievement-tracker/logs/app.log*` | Log rotation | Rotated logs; max size is 5 MB with up to 5 backups. |
+| `~/.steam-achievement-tracker/logs/app.log` | Logging initialization | Current application log: app messages plus Wails warnings and errors. |
+| `~/.steam-achievement-tracker/logs/app-*.log` | Log rotation | Rotated logs; max size is 5 MB with up to 5 backups. |
 | Secret Service item `service=steam-achievement-tracker`, `username=steam-web-api-key` | User via `secret-tool` | Steam Web API key. Stored outside the app data directory by the desktop keyring. |
 
 ### steam-achievement-tracker.db Schema

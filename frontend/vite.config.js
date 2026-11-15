@@ -2,8 +2,9 @@ import {fileURLToPath, URL} from 'node:url'
 import {defineConfig} from 'vite'
 import {svelte} from '@sveltejs/vite-plugin-svelte'
 
-// Game covers (/game-covers/...) are served by the Go asset middleware in main.go, which runs before the embedded
-// assets and the `wails3 dev` proxy. Vite never sees those requests, so no dev-server rule is needed for them.
+// Game covers (/game-covers/...) are served by the CoverService mounted at that route (covers.go, registered in
+// main.go), which Wails consults before the embedded assets and the `wails3 dev` proxy. Vite never sees those
+// requests, so no dev-server rule is needed for them.
 
 // https://vitejs.dev/config/
 export default defineConfig(({mode}) => ({
