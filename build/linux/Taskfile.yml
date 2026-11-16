@@ -13,6 +13,10 @@ vars:
   # Docker image for cross-compiling cgo builds (not needed with -tags purego).
   CROSS_IMAGE: wails-cross
 
+  # Reverse-DNS application id. It must equal ApplicationID in main.go: GTK sends it as the Wayland app_id, and the
+  # desktop shell finds the icon through the .desktop file of the same name (and the icon file of the same name).
+  APP_ID: io.github.gjrud.steam-achievement-tracker
+
 tasks:
   build:
     summary: Builds the application for Linux
@@ -115,13 +119,15 @@ tasks:
       - task: generate:dotdesktop
     cmds:
       - cp "{{.APP_BINARY}}" "{{.APP_NAME}}"
-      - cp ../../appicon.png "{{.APP_NAME}}.png"
-      - wails3 generate appimage -binary "{{.APP_NAME}}" -icon {{.ICON}} -desktopfile {{.DESKTOP_FILE}} -outputdir {{.OUTPUT_DIR}} -builddir {{.ROOT_DIR}}/build/linux/appimage/build
+      # 512x512: hicolor has no 1024x1024 directory, so launchers and AppImageLauncher would not find a larger icon.
+      - cp ../../appicon-512.png "{{.APP_ID}}.png"
+      # VERSION is unset here: with it, AppImageLauncher shows "Name (version)" in the menu.
+      - env -u VERSION wails3 generate appimage -binary "{{.APP_NAME}}" -icon {{.ICON}} -desktopfile {{.DESKTOP_FILE}} -outputdir {{.OUTPUT_DIR}} -builddir {{.ROOT_DIR}}/build/linux/appimage/build
     vars:
       APP_NAME: '{{.APP_NAME}}'
       APP_BINARY: '../../../bin/{{.APP_NAME}}'
-      ICON: '{{.APP_NAME}}.png'
-      DESKTOP_FILE: '../{{.APP_NAME}}.desktop'
+      ICON: '{{.APP_ID}}.png'
+      DESKTOP_FILE: '../{{.APP_ID}}.desktop'
       OUTPUT_DIR: '../../../bin'
 
   create:deb:
@@ -166,20 +172,24 @@ tasks:
   generate:dotdesktop:
     summary: Generates a `.desktop` file
     dir: build
+    # Several tasks depend on this one and Task runs dependencies in parallel; the StartupWMClass append is not
+    # idempotent, so run it once per invocation (a duplicate key makes appimagetool's desktop-file-validate fail).
+    run: once
     cmds:
       - mkdir -p {{.ROOT_DIR}}/build/linux/appimage
-      - wails3 generate .desktop -name "{{.DISPLAY_NAME}}" -exec "{{.EXEC}}" -icon "{{.ICON}}" -comment "{{.COMMENT}}" -keywords "{{.KEYWORDS}}" -outputfile "{{.ROOT_DIR}}/build/linux/{{.APP_NAME}}.desktop" -categories "{{.CATEGORIES}}"
+      - wails3 generate .desktop -name "{{.DISPLAY_NAME}}" -exec "{{.EXEC}}" -icon "{{.ICON}}" -comment "{{.COMMENT}}" -keywords "{{.KEYWORDS}}" -outputfile "{{.ROOT_DIR}}/build/linux/{{.APP_ID}}.desktop" -categories "{{.CATEGORIES}}"
+      # Wayland app_id and X11 class; lets launchers that rename the file (AppImageLauncher) still match the window.
+      - echo "StartupWMClass={{.APP_ID}}" >> "{{.ROOT_DIR}}/build/linux/{{.APP_ID}}.desktop"
     vars:
       APP_NAME: '{{.APP_NAME}}'
-      # Human-readable menu name. The file name and Icon= stay the executable name, which is also the Wayland app_id
-      # (Linux.ProgramName in main.go), so the shell matches windows to this entry and its icon.
+      # Human-readable menu name. The file name and Icon= are the application id (see APP_ID above); Exec stays the
+      # executable name.
       DISPLAY_NAME: 'Steam Achievement Tracker'
       COMMENT: 'Track Steam achievement progress for your public library'
       KEYWORDS: 'steam;achievements;games;'
       EXEC: '{{.APP_NAME}}'
-      ICON: '{{.APP_NAME}}'
+      ICON: '{{.APP_ID}}'
       CATEGORIES: 'Game;Utility;'
-      OUTPUTFILE: '{{.ROOT_DIR}}/build/linux/{{.APP_NAME}}.desktop'
 
   run:
     cmds:
