@@ -86,7 +86,7 @@ Install GTK/WebKit runtime libraries, a Secret Service provider, and `secret-too
 
 ### 2. Install the app
 
-Download the Linux package for your distribution (deb, rpm, or Arch) or the AppImage from the [GitHub Releases](https://github.com/gjrud/steam-achievement-tracker/releases) page. Each release lists `SHA256SUMS` for the files. The packages install the binary, the `.desktop` entry, and the hicolor app icons (`scalable` SVG and 1024x1024 PNG). The desktop shell takes the window and taskbar icon from that entry, because GTK4 has no API to set it from the app.
+Download the Linux package for your distribution (deb, rpm, or Arch) or the AppImage from the [GitHub Releases](https://github.com/gjrud/steam-achievement-tracker/releases) page. Each release lists `SHA256SUMS` for the files. The packages install the binary, the `.desktop` entry, and the hicolor app icons (`scalable` SVG and 512x512 PNG). The desktop shell takes the window and taskbar icon from that entry, which is named after the application id (`io.github.gjrud.steam-achievement-tracker`) so it matches the window. The AppImage cannot install such an entry itself: AppImageLauncher renames it, so on KDE the taskbar and menu icons are right but the window title bar may show a generic icon.
 
 If you build from source, create the packages in `bin/` and install one with your package manager. `VERSION` sets the package version; always set it, because packaging without it silently produces a wrong version (see [Releasing](#releasing)):
 

@@ -29,10 +29,10 @@ func main() {
 		// everything, is not used. See newWailsLogger for the level.
 		Logger: newWailsLogger(logWriter{}),
 		Linux: application.LinuxOptions{
-			// Reverse-DNS GTK application id. ProgramName stays the executable name so the Wayland app_id keeps
-			// matching the packaged steam-achievement-tracker.desktop file.
+			// Reverse-DNS GTK application id. GTK sends it as the Wayland app_id, and Wails derives the program name
+			// (X11 class) from it. The packaged .desktop file and icons use the same name (APP_ID in
+			// build/linux/Taskfile.yml); keep them in step, or the shell shows the wrong icon.
 			ApplicationID: "io.github.gjrud.steam-achievement-tracker",
-			ProgramName:   "steam-achievement-tracker",
 		},
 		Services: []application.Service{
 			application.NewService(backend),

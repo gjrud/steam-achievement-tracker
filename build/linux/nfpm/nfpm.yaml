@@ -19,14 +19,15 @@ release: "1"
 contents:
   - src: "./bin/steam-achievement-tracker"
     dst: "/usr/local/bin/steam-achievement-tracker"
-  # Icon= in the .desktop file is the bare name "steam-achievement-tracker"; the icon theme resolves it from hicolor.
-  # The SVG scales to any size; the 1024x1024 PNG is the fallback for consumers without SVG support.
+  # The desktop file, the Icon= name and the icon files all use the application id (ApplicationID in main.go), which
+  # GTK sends as the Wayland app_id. The SVG scales to any size; the 512x512 PNG is the fallback for consumers
+  # without SVG support (hicolor has no 1024x1024 directory, so a larger PNG would be ignored).
   - src: "./build/appicon.svg"
-    dst: "/usr/share/icons/hicolor/scalable/apps/steam-achievement-tracker.svg"
-  - src: "./build/appicon.png"
-    dst: "/usr/share/icons/hicolor/1024x1024/apps/steam-achievement-tracker.png"
-  - src: "./build/linux/steam-achievement-tracker.desktop"
-    dst: "/usr/share/applications/steam-achievement-tracker.desktop"
+    dst: "/usr/share/icons/hicolor/scalable/apps/io.github.gjrud.steam-achievement-tracker.svg"
+  - src: "./build/appicon-512.png"
+    dst: "/usr/share/icons/hicolor/512x512/apps/io.github.gjrud.steam-achievement-tracker.png"
+  - src: "./build/linux/io.github.gjrud.steam-achievement-tracker.desktop"
+    dst: "/usr/share/applications/io.github.gjrud.steam-achievement-tracker.desktop"
 
 # Default dependencies for the GTK4 + WebKitGTK 6.0 stack (Ubuntu 24.04+ / Debian 13+)
 depends:
