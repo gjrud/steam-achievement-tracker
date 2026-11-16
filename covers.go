@@ -52,12 +52,7 @@ func (s *CoverService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	paths := s.app.paths
 	s.app.mu.Unlock()
 	if paths.GameImages == "" {
-		resolved, err := appdata.Resolve()
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		paths = resolved
+		paths = appdata.Resolve()
 	}
 	path := filepath.Join(paths.GameImages, strconv.FormatInt(appid, 10), parts[1])
 	http.ServeFile(w, r, path)

@@ -4,14 +4,14 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/gjrud/steam-achievement-tracker)](https://goreportcard.com/report/github.com/gjrud/steam-achievement-tracker)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/gjrud/steam-achievement-tracker)](go.mod)
 
-Steam Achievement Tracker is a Linux desktop app for tracking Steam achievement completion from real Steam data. It syncs a public Steam profile, stores progress locally, highlights games worth finishing next, and keeps sync warnings visible instead of silently losing old data.
+Steam Achievement Tracker is a Linux and Windows desktop app for tracking Steam achievement completion from real Steam data. It syncs a public Steam profile, stores progress locally, highlights games worth finishing next, and keeps sync warnings visible instead of silently losing old data.
 
 This app was born for personal use and was entirely vibecoded. I have entry-level knowledge of Go, which I often use for personal or work related cli tools, but the Svelte/JavaScript frontend is far outside my own area of expertise.
 
 ## Features
 
 - **Steam profile setup** from SteamID64, `steamcommunity.com/profiles/...` URLs, `steamcommunity.com/id/...` URLs, or vanity names.
-- **Secret Service-only API key storage** for the Steam Web API key; no environment variable or plaintext fallback is used.
+- **System keyring-only API key storage** for the Steam Web API key (Secret Service on Linux, Windows Credential Manager on Windows); no environment variable or plaintext fallback is used.
 - **Startup and manual sync** against Steam Web API data.
 - **Dashboard header** with counters for all games, purchased games, completed games, completed sets, and unlocked achievements, plus a profile card with the latest sync status.
 - **Not completed view** with ranked suggestions, search, and tag filters.
@@ -28,14 +28,14 @@ This app was born for personal use and was entirely vibecoded. I have entry-leve
 
 | Layer | Technology |
 | --- | --- |
-| Desktop shell | [Wails v3](https://v3.wails.io) (`v3.1.0`), Linux only: GTK4 + WebKitGTK 6.0 through CGO |
+| Desktop shell | [Wails v3](https://v3.wails.io) (`v3.1.0`): Linux (GTK4 + WebKitGTK 6.0 through CGO) and Windows 10+ amd64 (WebView2) |
 | Backend | Go 1.26; exported `App` methods are bound to the frontend as a Wails service |
 | Local storage | SQLite through `github.com/mattn/go-sqlite3` (CGO; SQLite is compiled in, no system SQLite library needed), WAL mode |
-| Secrets | Linux Secret Service through `github.com/zalando/go-keyring` (D-Bus) |
+| Secrets | `github.com/zalando/go-keyring`: Linux Secret Service (D-Bus), Windows Credential Manager |
 | Logging | Standard `log` with `gopkg.in/natefinch/lumberjack.v2` rotation; the Wails `slog` logger is bridged into it (`wailslog.go`) |
 | Frontend | Svelte 5 + Vite 8, talking to Go through generated Wails bindings and `@wailsio/runtime` `3.1.0` |
 | Frontend tests | Vitest 5, Testing Library, jsdom |
-| Build and packaging | Wails v3 CLI over [Task](https://taskfile.dev) (`Taskfile.yml`, `build/`), nfpm for deb/rpm/Arch packages, AppImage through linuxdeploy |
+| Build and packaging | Wails v3 CLI over [Task](https://taskfile.dev) (`Taskfile.yml`, `build/`), nfpm for deb/rpm/Arch packages, AppImage through linuxdeploy; Windows portable exe and NSIS user-scope installer (`build/windows/`) |
 
 ### Wails v3 architecture
 
@@ -43,8 +43,8 @@ The app follows the Wails v3 service model instead of the v2 `wails.Run` layout:
 
 - `main.go` creates the application with `application.New`, registers services, opens the window with `app.Window.NewWithOptions`, then calls `app.Run`.
 - `App` (`app.go`) is a plain Go struct registered with `application.NewService`. It holds no Wails runtime context. It owns its own lifetime context, which `ServiceShutdown` cancels, and it initializes and shuts down through the `ServiceStartup` and `ServiceShutdown` hooks (never bound to the frontend).
-- `CoverService` (`covers.go`) implements `http.Handler` and is mounted at `/game-covers` through the service `Route` option. It serves cached covers from the app data directory. The embedded frontend assets and the `wails3 dev` proxy handle everything else.
-- Wails's own logger (`slog`) is bridged to the standard `log` package (`wailslog.go`) at warning level, so framework warnings and errors (including failed bound calls) end up in `app.log` together with the app's own log lines once logging is initialized. They use `slog` text format (`time=... level=... msg=...`).
+- `CoverService` (`covers.go`) implements `http.Handler` and is mounted at `/game-covers` through the service `Route` option. It serves cached covers from the cache directory. The embedded frontend assets and the `wails3 dev` proxy handle everything else.
+- Wails's own logger (`slog`) is bridged to the app log writer (`wailslog.go`, `logging.Writer`) at warning level, so framework warnings and errors (including failed bound calls) end up in `app.log` together with the app's own log lines once logging is initialized. They use `slog` text format (`time=... level=... msg=...`).
 - Sync progress is pushed, not polled. The backend emits the custom Wails event `sync:changed` (no payload; `app.Event.Emit`, wired in `main.go` through the unexported `setEventEmitter`) when a sync starts, after each game's progress write, after the run's final status write, and once more after the sync flag clears. The frontend subscribes with `Events.On('sync:changed')` from `@wailsio/runtime` before its first state read and refetches `GetAppState` on each event. Refreshes never overlap, wait for any user action in flight, and coalesce bursts of events into one extra read. If a refresh fails while a sync is still shown as running, the frontend retries every 2 seconds until a read succeeds, so the **Syncing…** button cannot stay stuck; no timers run otherwise.
 - Frontend code imports the generated bindings from `frontend/bindings/` and does not use any v2 `wailsjs` runtime.
 
@@ -52,14 +52,24 @@ The app follows the Wails v3 service model instead of the v2 `wails.Run` layout:
 
 ### Compiled version
 
+On Linux:
+
 - Linux desktop session.
 - GTK4 and WebKitGTK 6.0 runtime libraries compatible with the build. This project uses Wails v3 on Linux, which renders through GTK4 + WebKitGTK 6.0.
 - Linux Secret Service provider, such as GNOME Keyring or another compatible keyring service.
+
+Package names differ by distribution. On Debian/Ubuntu-style systems, look for packages similar to `libgtk-4-1`, `libwebkitgtk-6.0-4`, and `gnome-keyring`.
+
+On Windows:
+
+- Windows 10 or Windows 11, 64-bit (amd64). Windows Credential Manager is built in.
+- Microsoft Edge WebView2 Runtime. Windows 11 includes it. The NSIS installer installs it on Windows 10 when it is missing. The portable exe does not install anything, so on Windows 10 install the [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) first if you use the portable build.
+
+On both:
+
 - Steam Web API key, pasted into the app on first launch.
 - Network access to Steam Web API and Steam static asset hosts.
 - Public Steam profile game details for the profile being tracked.
-
-Package names differ by distribution. On Debian/Ubuntu-style systems, look for packages similar to `libgtk-4-1`, `libwebkitgtk-6.0-4`, and `gnome-keyring`.
 
 ### Development version
 
@@ -73,7 +83,13 @@ Package names differ by distribution. On Debian/Ubuntu-style systems, look for p
 
 - Linux build dependencies for Wails and CGO: C compiler, `pkg-config`, GTK4 development headers, and WebKitGTK 6.0 development headers. On Debian/Ubuntu-style systems: `build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev`.
 - CGO for `github.com/mattn/go-sqlite3`. It compiles its own bundled SQLite, so only the C compiler is needed, not a system SQLite library.
-- Same Secret Service, Steam Web API key, network, and public profile requirements as the compiled version for real sync testing.
+- Same keyring (Secret Service on Linux), Steam Web API key, network, and public profile requirements as the compiled version for real sync testing.
+
+Windows build dependencies:
+
+- Go (version from `go.mod`), Node.js 22, and the Wails CLI as above.
+- MinGW-w64 `gcc` on `PATH` for CGO (`go-sqlite3`). The Windows build runs only on a Windows host; cross-compiling from Linux or macOS is not supported.
+- NSIS (`makensis`) for the installer.
 
 Use `wails3 doctor` to check local Wails dependencies.
 
@@ -81,11 +97,20 @@ Use `wails3 doctor` to check local Wails dependencies.
 
 ### 1. Install runtime dependencies
 
-Install GTK/WebKit runtime libraries and a Secret Service provider for your distribution.
+On Linux, install GTK/WebKit runtime libraries and a Secret Service provider for your distribution. On Windows, the WebView2 runtime is needed (see [Requirements](#requirements)); the NSIS installer adds it when it is missing.
 
 ### 2. Install the app
 
-Download the Linux package for your distribution (deb, rpm, or Arch) or the AppImage from the [GitHub Releases](https://github.com/gjrud/steam-achievement-tracker/releases) page. Each release lists `SHA256SUMS` for the files. The packages install the binary, the `.desktop` entry, and the hicolor app icons (`scalable` SVG and 512x512 PNG). The desktop shell takes the window and taskbar icon from that entry, which is named after the application id (`io.github.gjrud.steam-achievement-tracker`) so it matches the window. The AppImage cannot install such an entry itself: AppImageLauncher renames it, so on KDE the taskbar and menu icons are right but the window title bar may show a generic icon.
+Download the Linux package for your distribution (deb, rpm, or Arch) or the AppImage from the [GitHub Releases](https://github.com/gjrud/steam-achievement-tracker/releases) page. Each release lists `SHA256SUMS` for the files.
+
+On Windows, the release has two amd64 files:
+
+- `steam-achievement-tracker-<version>-windows-amd64-setup.exe`: user-scope NSIS installer. It needs no administrator rights, installs to `%LocalAppData%\Programs\Steam Achievement Tracker`, and adds a Start Menu shortcut (no desktop icon). Uninstalling removes the program files and the shortcut. It keeps your data, cache, and saved API key.
+- `steam-achievement-tracker-<version>-windows-amd64-portable.exe`: runs without installing. It uses the same data directory as the installer, so you can switch between them.
+
+Windows releases are not code-signed. SmartScreen keeps warning for unsigned apps until downloads build reputation, and signing alone would not remove the warning at first. SmartScreen may show "Windows protected your PC". Choose **More info**, then **Run anyway**. Check the file against `SHA256SUMS` on the release page first if you want to verify it (`Get-FileHash <file> -Algorithm SHA256` in PowerShell).
+
+On Linux, the packages install the binary, the `.desktop` entry, and the hicolor app icons (`scalable` SVG and 512x512 PNG). The desktop shell takes the window and taskbar icon from that entry, which is named after the application id (`io.github.gjrud.steam-achievement-tracker`) so it matches the window. The AppImage cannot install such an entry itself: AppImageLauncher renames it, so on KDE the taskbar and menu icons are right but the window title bar may show a generic icon.
 
 If you build from source, create the packages in `bin/` and install one with your package manager. `VERSION` sets the package version; always set it, because packaging without it silently produces a wrong version (see [Releasing](#releasing)):
 
@@ -95,13 +120,18 @@ VERSION=0.0.0-dev wails3 package
 
 A bare `bin/steam-achievement-tracker` from `wails3 build` runs fine but has no menu entry or icon until it is installed through a package.
 
-Uninstalling through the package manager keeps `~/.steam-achievement-tracker` and the Secret Service API key.
+Uninstalling through the package manager keeps the app data and cache (see [Data](#data)) and the Secret Service API key.
 
 ### 3. Enter the Steam Web API key
 
 Generate a Steam Web API key from Steam's developer page: <https://steamcommunity.com/dev/apikey>. When Steam asks for a domain name, enter `localhost`. The key field on the setup screen has a **Get a Steam Web API key** link that opens the same page in your browser.
 
-Start the app (step 4), paste the key into the key field on the setup screen, and click **Save key**. Your keyring may ask to unlock first. The app stores it in Secret Service under `service=steam-achievement-tracker`, `username=steam-web-api-key`, and reads only that item. Saving does not start a sync. Keys stored earlier with `secret-tool` under the same names keep working; no migration is needed.
+Start the app (step 4), paste the key into the key field on the setup screen, and click **Save key**. The app stores it in the system keyring under `service=steam-achievement-tracker`, `username=steam-web-api-key`, and reads only that item:
+
+- **Linux:** Secret Service. Your keyring may ask to unlock first. Keys stored earlier with `secret-tool` under the same names keep working; no migration is needed.
+- **Windows:** Windows Credential Manager, as a generic credential named `steam-achievement-tracker:steam-web-api-key`. You can view or delete it under **Credential Manager** > **Windows Credentials** > **Generic Credentials**.
+
+Saving does not start a sync.
 
 ### 4. Launch
 
@@ -109,11 +139,11 @@ Start the app (step 4), paste the key into the key field on the setup screen, an
 steam-achievement-tracker
 ```
 
-If the API key is missing, the app opens to the key setup screen. Paste the key and click **Save key**. **Retry key lookup** re-reads Secret Service, for example after storing the key another way.
+If the API key is missing, the app opens to the key setup screen. Paste the key and click **Save key**. **Retry key lookup** re-reads the system keyring, for example after storing the key another way.
 
 ## Build & run
 
-Wails v3 runs the build through the root `Taskfile.yml` and `build/Taskfile.yml`. Frontend dependencies are installed with `npm ci` in `frontend/`, then the frontend is built and embedded.
+Wails v3 runs the build through the root `Taskfile.yml`, `build/Taskfile.yml`, and the platform Taskfiles in `build/linux/` and `build/windows/`. Frontend dependencies are installed with `npm ci` in `frontend/`, then the frontend is built and embedded.
 
 Run the desktop app in development mode from the repository root:
 
@@ -133,6 +163,8 @@ The production binary is written to:
 bin/steam-achievement-tracker
 ```
 
+On Windows the same command writes `bin\steam-achievement-tracker.exe`. `wails3 build` and `wails3 package` run the build for the current OS.
+
 Create Linux packages (AppImage, deb, rpm, and Arch) in `bin/`:
 
 ```sh
@@ -141,7 +173,20 @@ VERSION=0.0.0-dev wails3 package
 
 The package version comes only from the `VERSION` environment variable, which `build/linux/nfpm/nfpm.yaml` expands (`version: ${VERSION}`). No version is stored in the repository. Without `VERSION`, packaging still succeeds but produces a wrong version (the deb shows `0.0.0~rc0-1`), so always set it. Use the version without the `v` prefix, for example `1.2.3` or `1.2.3-rc.1`.
 
-The deb, rpm, and Arch packages install the binary to `/usr/local/bin` and declare the GTK4 and WebKitGTK 6.0 runtime packages as dependencies (see `build/linux/nfpm/nfpm.yaml`). They do not depend on a Secret Service provider; install one separately. The AppImage step downloads `linuxdeploy`, so it needs network access. Use `wails3 task --list` to see every available task.
+The deb, rpm, and Arch packages install the binary to `/usr/local/bin` and declare the GTK4 and WebKitGTK 6.0 runtime packages as dependencies (see `build/linux/nfpm/nfpm.yaml`). They do not depend on a Secret Service provider; install one separately. The AppImage step downloads `linuxdeploy`, so it needs network access. Use `wails3 task --list-all` to see every available task.
+
+### Windows build and packaging
+
+Run these on a Windows host with the dependencies listed in [Development version](#development-version). Set `VERSION` first; in PowerShell:
+
+```powershell
+$env:VERSION = "0.0.0-dev"
+wails3 task windows:build                  # bin\steam-achievement-tracker.exe (GUI subsystem, no console)
+wails3 task windows:create:nsis:installer  # bin\steam-achievement-tracker-amd64-installer.exe, from the existing exe
+wails3 task windows:package                # build + installer
+```
+
+`VERSION` must start with `X.Y.Z`. Pre-release suffixes (`1.2.3-rc.1`) and a leading `v` are accepted, but Windows resources and NSIS take only the numeric core plus `.0`, so `1.2.3-rc.1` becomes `1.2.3.0`. The full tag name belongs in release filenames, which the release workflow sets. Without `VERSION` the tasks use `0.0.0`. `windows:create:nsis:installer` does not rebuild the exe. The task writes the WebView2 bootstrapper (embedded in the Wails CLI) into `build/windows/nsis`; git ignores it.
 
 ### Releasing
 
@@ -161,7 +206,10 @@ The tag must look like `vMAJOR.MINOR.PATCH`, optionally with a suffix (`v1.2.3-r
 1. Checks that the tagged commit is on `main`; otherwise nothing is published. The repository only allows squash merges, so a tag on a PR-branch commit can never pass: tag the squashed commit on `main` instead. Tags are immutable, so after a rejected tag either use the next version or follow the bad-tag procedure below.
 2. Runs the same checks as `ci.yml`.
 3. Runs `wails3 package` on Ubuntu 24.04, using the tag without its `v` as `VERSION`, and checks that the AppImage, deb, rpm, and Arch packages exist that the deb version matches the tag, and that the build did not change `go.mod` or `go.sum`.
-4. Publishes a GitHub release with the four packages, a source archive, `SHA256SUMS`, build provenance attestations, and a changelog of every non-merge commit since the previous release, grouped by conventional-commit type. A final release lists changes since the previous final release; pre-release tags are skipped.
+4. Runs the Windows job on `windows-latest` (after the tests pass): `wails3 task windows:build`, then the NSIS installer from the same exe. It checks that the exe's ProductVersion matches the tag's numeric core (`1.2.3-rc.1` gives `1.2.3.0`), that the build did not change `go.mod` or `go.sum`, and that exactly the portable exe and the installer exist. The files are renamed to `steam-achievement-tracker-<version>-windows-amd64-portable.exe` and `...-windows-amd64-setup.exe`.
+5. Publishes a GitHub release with the four Linux packages, the two Windows executables, a source archive, `SHA256SUMS`, build provenance attestations, and a changelog of every non-merge commit since the previous release, grouped by conventional-commit type. A final release lists changes since the previous final release; pre-release tags are skipped.
+
+Windows executables are not code-signed. The Windows packaging path can only be validated by a real run, so test it with an `-rc` tag before a final release.
 
 Tags matching `v*` are protected by repository rulesets: only admins can create them, and they cannot be moved or deleted. To fix a bad tag, disable the *Release tags: immutable* ruleset in the repository settings, delete the release if one was published (`gh release delete vX.Y.Z --yes`) and the tag, re-push the tag, then re-enable the ruleset. Pushing a tag that already has a release fails at the publish step. Pushing more than three tags at once triggers no workflow runs. The Arch package of a pre-release gets the same version as the final release (nfpm drops the suffix there), so do not rely on pacman upgrading from a pre-release.
 
@@ -207,9 +255,11 @@ Run the Go tests with the race detector (several tests, such as the cover servic
 go test -race ./...
 ```
 
+CI (`.github/workflows/ci.yml`) runs on pull requests and on pushes to `main`, in two matrix legs, `ubuntu-latest` and `windows-latest`. The Linux leg does the full pipeline: bindings, frontend build and tests, `go vet`, and `go test -race`. The Windows leg runs `go vet` and `go test -race` only (CGO on; the frontend is not built there, so a placeholder `frontend/dist` is used), then smoke-builds the production exe. The branch protection check is the `test` job, which passes only when both legs succeed; it is the required check, not the matrix job names.
+
 ### Test suite layout
 
-- Go tests drive package APIs against real SQLite and a real image cache; only Steam HTTP endpoints are faked. `app_test.go` covers the Wails-bound orchestration with `HOME` set to a temp dir and the `go-keyring` mock backend; `service_lifecycle_test.go` covers the service startup/shutdown hooks and lifetime context, `covers_test.go` the `/game-covers` service, and `wailslog_test.go` the Wails-to-`log` bridge.
+- Go tests drive package APIs against real SQLite and a real image cache; only Steam HTTP endpoints are faked. Tests isolate the app's directories by setting `XDG_DATA_HOME`, `XDG_CACHE_HOME`, and `XDG_STATE_HOME` to temp dirs through `internal/appdata/appdatatest` (not `HOME`, which Windows does not use for these paths). `app_test.go` covers the Wails-bound orchestration with the `go-keyring` mock backend; `service_lifecycle_test.go` covers the service startup/shutdown hooks and lifetime context, `covers_test.go` the `/game-covers` service, and `wailslog_test.go` the Wails-to-log-writer bridge.
 - Tests that need real retry paths without sleeping use `steam.Client.SetRetryBackoff`.
 - Frontend tests (vitest) cover event-driven sync refresh (a mocked `@wailsio/runtime` in `frontend/src/test/wails-runtime-mock.js`, fake timers for the failure retry), error banners for rejected Wails calls, keyboard/modal flows, and a drift check between `frontend/src/test/wails-app-mock.js` and the generated `frontend/bindings`. The check compares every mock export and argument count with the generated bindings in both directions, and rejects rest parameters in the mock. It also asserts that the `syncChangedEvent` name in `app.go` and `App.svelte` match. The bindings checks are skipped locally when the bindings are absent (regenerate with `wails3 generate bindings`), but fail when the `CI` environment variable is `1` or `true`, so CI cannot pass without them.
 - `ValidateProfile` and `SyncNow` are tested offline: `App.steamBaseURL` (tests only) points both the profile lookup and the sync at an `httptest` Steam stub.
@@ -402,38 +452,64 @@ Changes apply on the next sync and do not start one. Turning an option off remov
 Open **Settings** and click **Remove profile** in the **Remove active profile** section. The dialog asks you to type the value shown in it (the profile's SteamID64) before the button becomes active. Two switches, both off by default, choose what else is deleted:
 
 - **Delete profile data** removes the profile's tracked games, owned-game playtime and purchase status, achievement data, sync history, manual flags, profile-scoped tags, library sync settings, and cached covers.
-- **Delete API key** removes the Steam Web API key from Secret Service. The app then shows the key screen, and sync stays unavailable until you enter a key again.
+- **Delete API key** removes the Steam Web API key from the system keyring (Secret Service on Linux, Credential Manager on Windows). The app then shows the key screen, and sync stays unavailable until you enter a key again.
 
 The confirm button reads **Remove profile**, **Remove profile and data**, **Remove profile and key**, or **Remove profile, data and key**, matching the switches you turned on. Logs are never removed.
 
-With both switches off, the profile is only disconnected: its data stays under `~/.steam-achievement-tracker` and the key is kept. Connecting the same SteamID64 again restores that data, and a sync starts. Data from a disconnected profile stays on disk until you reconnect that profile and remove it with **Delete profile data**. If you deleted the profile data, connecting the profile again starts with both library sync options on.
+With both switches off, the profile is only disconnected: its data stays in the data directory (see [Data](#data)) and the key is kept. Connecting the same SteamID64 again restores that data, and a sync starts. Data from a disconnected profile stays on disk until you reconnect that profile and remove it with **Delete profile data**. If you deleted the profile data, connecting the profile again starts with both library sync options on.
 
 ![Remove active profile](docs/clear-data.gif)
 
 ## Data
 
-All app-owned files live under `~/.steam-achievement-tracker` unless noted. Directories are created with mode `0700`; local DB, backup, image, and log files are kept at `0600` where the app controls permissions.
+The app keeps its files in three per-user roots. Each root ends in `steam-achievement-tracker`, and the `XDG_DATA_HOME`, `XDG_CACHE_HOME`, and `XDG_STATE_HOME` environment variables override the base directories on both OSes:
+
+| Root | Linux | Windows | Holds |
+| --- | --- | --- | --- |
+| Data (`<data>`) | `~/.local/share/steam-achievement-tracker/` | `%LocalAppData%\steam-achievement-tracker\` | Database and backups |
+| Cache (`<cache>`) | `~/.cache/steam-achievement-tracker/` | `%LocalAppData%\cache\steam-achievement-tracker\` | Cover images; on Windows also the WebView2 profile (`webview/`) |
+| State (`<state>`) | `~/.local/state/steam-achievement-tracker/` | `%LocalAppData%\steam-achievement-tracker\` | Logs (`logs/`) |
+
+On Windows, data and state share one folder. The Settings screen shows the data directory, cache directory, log directory, and log file.
+
+Directories are created with mode `0700`; local DB, backup, image, and log files are kept at `0600` where the app controls permissions. Windows does not enforce these permission bits; the files are protected by the ACLs of your user profile.
+
+The cache is disposable. Deleting it only means the covers are downloaded again on the next sync; until then they are blank.
 
 ### Stored Files
 
 | Path | Created by (process/major function) | Purpose |
 | --- | --- | --- |
-| `~/.steam-achievement-tracker/` | Startup initialization | App data root. |
-| `~/.steam-achievement-tracker/steam-achievement-tracker.db` | DB open/migration | SQLite database for profiles, games, achievements, flags, tags, snapshots, and sync history. |
-| `~/.steam-achievement-tracker/steam-achievement-tracker.db-wal` | SQLite WAL mode | SQLite write-ahead log while database is active. |
-| `~/.steam-achievement-tracker/steam-achievement-tracker.db-shm` | SQLite WAL mode | SQLite shared-memory file while database is active. |
-| `~/.steam-achievement-tracker/backups/` | DB migration | Backup directory. |
-| `~/.steam-achievement-tracker/backups/steam-achievement-tracker-<unix-ns>.db` | DB migration before schema changes | Point-in-time SQLite DB backup created before migrating an existing user DB. |
-| `~/.steam-achievement-tracker/cache/` | Startup initialization | Cache root. |
-| `~/.steam-achievement-tracker/cache/images/games/` | Startup initialization / cover cache | Game cover cache root. |
-| `~/.steam-achievement-tracker/cache/images/games/<appid>/library_600x900.jpg` | Cover sync | Cached Steam library capsule image for one app (or DLC app id for DLC sets). |
-| `~/.steam-achievement-tracker/cache/images/games/<appid>/hero_capsule.jpg` | Cover sync | Cached Steam hero capsule image, used when a DLC has no library capsule. |
-| `~/.steam-achievement-tracker/cache/images/games/<appid>/header.jpg` | Cover sync | Cached Steam header image, the fallback when neither the library nor the hero capsule is available. |
-| `~/.steam-achievement-tracker/cache/images/games/<appid>/main_capsule.jpg` | Cover sync | Cached Steam main capsule image, the last fallback when the library capsule, hero capsule and header are all unavailable. |
-| `~/.steam-achievement-tracker/logs/` | Logging initialization | Log directory. |
-| `~/.steam-achievement-tracker/logs/app.log` | Logging initialization | Current application log: app messages plus Wails warnings and errors. |
-| `~/.steam-achievement-tracker/logs/app-*.log` | Log rotation | Rotated logs; max size is 5 MB with up to 5 backups. |
-| Secret Service item `service=steam-achievement-tracker`, `username=steam-web-api-key` | Entered in the app (setup screens) | Steam Web API key. Stored outside the app data directory by the desktop keyring. The app deletes it only through **Delete API key** in the Remove profile dialog. |
+| `<data>/` | Startup initialization | App data root. |
+| `<data>/steam-achievement-tracker.db` | DB open/migration | SQLite database for profiles, games, achievements, flags, tags, snapshots, and sync history. |
+| `<data>/steam-achievement-tracker.db-wal` | SQLite WAL mode | SQLite write-ahead log while database is active. |
+| `<data>/steam-achievement-tracker.db-shm` | SQLite WAL mode | SQLite shared-memory file while database is active. |
+| `<data>/backups/` | DB migration | Backup directory. |
+| `<data>/backups/steam-achievement-tracker-<unix-ns>.db` | DB migration before schema changes | Point-in-time SQLite DB backup created before migrating an existing user DB. |
+| `<cache>/` | Startup initialization | Cache root. |
+| `<cache>/images/games/` | Startup initialization / cover cache | Game cover cache root. |
+| `<cache>/images/games/<appid>/library_600x900.jpg` | Cover sync | Cached Steam library capsule image for one app (or DLC app id for DLC sets). |
+| `<cache>/images/games/<appid>/hero_capsule.jpg` | Cover sync | Cached Steam hero capsule image, used when a DLC has no library capsule. |
+| `<cache>/images/games/<appid>/header.jpg` | Cover sync | Cached Steam header image, the fallback when neither the library nor the hero capsule is available. |
+| `<cache>/images/games/<appid>/main_capsule.jpg` | Cover sync | Cached Steam main capsule image, the last fallback when the library capsule, hero capsule and header are all unavailable. |
+| `<cache>/webview/` | WebView2 (Windows only) | Browser profile for the app window (cache and state). Created on first use; kept on uninstall. |
+| `<state>/logs/` | Logging initialization | Log directory. |
+| `<state>/logs/app.log` | Logging initialization | Current application log: app messages plus Wails warnings and errors. |
+| `<state>/logs/app-*.log` | Log rotation | Rotated logs; max size is 5 MB with up to 5 backups. |
+| Keyring item: Secret Service `service=steam-achievement-tracker`, `username=steam-web-api-key` (Linux); Credential Manager generic credential `steam-achievement-tracker:steam-web-api-key` (Windows) | Entered in the app (setup screens) | Steam Web API key. Stored outside the app directories by the system keyring. The app deletes it only through **Delete API key** in the Remove profile dialog. |
+
+#### Moving data from the old Linux location
+
+Earlier Linux builds kept everything in `~/.steam-achievement-tracker`. There is no automatic migration. The new version starts with an empty database if it finds none in the data directory, so move your data before the first start of the new version. With the app closed:
+
+```sh
+mkdir -p ~/.local/share/steam-achievement-tracker ~/.cache/steam-achievement-tracker
+mv ~/.steam-achievement-tracker/steam-achievement-tracker.db* ~/.local/share/steam-achievement-tracker/   # db, -wal and -shm, whichever exist
+mv ~/.steam-achievement-tracker/backups ~/.local/share/steam-achievement-tracker/
+mv ~/.steam-achievement-tracker/cache/images ~/.cache/steam-achievement-tracker/
+```
+
+The database and `backups/` are the data you need to keep. Moving `cache/images` keeps the cover images; without it the covers are downloaded again on the next sync. The old `logs/` folder can be dropped or moved to `~/.local/state/steam-achievement-tracker/logs/`. Once the data is in place and the new version works, you can delete `~/.steam-achievement-tracker`.
 
 ### steam-achievement-tracker.db Schema
 

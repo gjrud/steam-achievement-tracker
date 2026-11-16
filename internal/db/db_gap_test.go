@@ -2,8 +2,8 @@ package db
 
 import (
 	"database/sql"
-	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -119,7 +119,7 @@ func TestMigrationFailureReleasesConnection(t *testing.T) {
 	}
 	replaceMigrations(t, broken)
 
-	conn, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?_busy_timeout=5000&_foreign_keys=on", paths.DB))
+	conn, err := sql.Open("sqlite3", sqliteDSN(paths.DB))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,6 +202,9 @@ func TestMigrationV8WithoutSyncRunsOrActiveProfileScopesToNobody(t *testing.T) {
 }
 
 func TestOpenAndMigrateSecuresDatabaseAndBackupFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
 	paths := testPaths(t)
 	seedV9Database(t, paths.DB)
 	if err := os.Chmod(paths.DB, 0o644); err != nil {
@@ -228,6 +231,9 @@ func TestOpenAndMigrateSecuresDatabaseAndBackupFiles(t *testing.T) {
 }
 
 func TestSecureDBFilesChmodsOnlyExistingFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
 	paths := testPaths(t)
 	for _, p := range []string{paths.DB, paths.DB + "-wal"} {
 		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {

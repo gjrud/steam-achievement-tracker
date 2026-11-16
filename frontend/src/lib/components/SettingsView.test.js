@@ -23,6 +23,22 @@ function playedFreeBox() {
   return screen.getByRole('switch', {name: 'Include played free games'})
 }
 
+describe('SettingsView storage locations', () => {
+  test('shows the data, cache and log directories and the log file', () => {
+    const state = stateWith(undefined)
+    state.dataDir = '/xdg/data/steam-achievement-tracker'
+    state.cacheDir = '/xdg/cache/steam-achievement-tracker'
+    state.logDir = '/xdg/state/steam-achievement-tracker/logs'
+    state.logFile = '/xdg/state/steam-achievement-tracker/logs/app.log'
+    render(SettingsView, {props: {state}})
+
+    expect(screen.getByText('Data directory').nextElementSibling).toHaveTextContent('/xdg/data/steam-achievement-tracker')
+    expect(screen.getByText('Cache directory').nextElementSibling).toHaveTextContent('/xdg/cache/steam-achievement-tracker')
+    expect(screen.getByText('Log directory').nextElementSibling).toHaveTextContent('/xdg/state/steam-achievement-tracker/logs')
+    expect(screen.getByText('Log file').nextElementSibling).toHaveTextContent('/xdg/state/steam-achievement-tracker/logs/app.log')
+  })
+})
+
 describe('SettingsView library sync', () => {
   test('reflects state.settings in the switches', () => {
     render(SettingsView, {props: {state: stateWith({includeUnvettedApps: false, includePlayedFreeGames: true})}})

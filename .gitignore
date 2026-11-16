@@ -7,6 +7,8 @@
 *.test
 *.out
 coverage.out
+# Windows resource objects generated during `windows:build`
+*.syso
 
 # Wails v3 build/generated artifacts
 /steam-achievement-tracker

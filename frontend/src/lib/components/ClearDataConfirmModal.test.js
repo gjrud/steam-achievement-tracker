@@ -66,7 +66,7 @@ describe('ClearDataConfirmModal toggles', () => {
 
     expect(profileDataBox()).toHaveAttribute('type', 'checkbox')
     expect(profileDataBox()).toHaveAccessibleDescription('Tracked games, achievements, sync history, settings and cached images.')
-    expect(apiKeyBox()).toHaveAccessibleDescription("Removes the saved key from the system keyring (Secret Service). The app can't sync until you enter a key again.")
+    expect(apiKeyBox()).toHaveAccessibleDescription("Removes the saved key from the system keyring (Secret Service on Linux, Credential Manager on Windows). The app can't sync until you enter a key again.")
   })
 
   test.each([

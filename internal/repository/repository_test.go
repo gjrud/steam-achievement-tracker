@@ -3,6 +3,7 @@ package repository
 import (
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1912,13 +1913,14 @@ func testRepositoryPath(t testing.TB) (*Repository, string) {
 	t.Helper()
 	root := t.TempDir()
 	paths := appdata.Paths{
-		Root:       root,
-		DB:         root + "/test.db",
-		Backups:    root + "/backups",
-		Cache:      root + "/cache",
-		GameImages: root + "/cache/images/games",
-		Logs:       root + "/logs",
-		LogFile:    root + "/logs/app.log",
+		DataDir:    root,
+		CacheDir:   filepath.Join(root, "cache"),
+		StateDir:   root,
+		DB:         filepath.Join(root, "test.db"),
+		Backups:    filepath.Join(root, "backups"),
+		GameImages: filepath.Join(root, "cache", "images", "games"),
+		Logs:       filepath.Join(root, "logs"),
+		LogFile:    filepath.Join(root, "logs", "app.log"),
 	}
 	db, err := dbinit.OpenAndMigrate(paths)
 	if err != nil {

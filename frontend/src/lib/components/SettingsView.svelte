@@ -34,7 +34,13 @@
 
 <section class="settings-panel">
   <div class="section-head"><h2>Settings</h2></div>
-  <dl><dt>Active profile</dt><dd>{state.profile?.displayName} ({state.profile?.steamId64})</dd><dt>Data directory</dt><dd>{state.dataDir}</dd><dt>Log file</dt><dd>{state.logFile}</dd></dl>
+  <dl>
+    <dt>Active profile</dt><dd>{state.profile?.displayName} ({state.profile?.steamId64})</dd>
+    <dt>Data directory</dt><dd>{state.dataDir}</dd>
+    <dt>Cache directory</dt><dd>{state.cacheDir}</dd>
+    <dt>Log directory</dt><dd>{state.logDir}</dd>
+    <dt>Log file</dt><dd>{state.logFile}</dd>
+  </dl>
   <section class="library-sync" aria-labelledby="library-sync-heading">
     <h3 id="library-sync-heading">Library sync</h3>
     <div class="setting-row">

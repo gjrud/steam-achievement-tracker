@@ -46,10 +46,7 @@ func TestOpenAndMigrateFreshDB(t *testing.T) {
 
 func TestOpenAndMigrateLegacyV1DB(t *testing.T) {
 	paths := testPaths(t)
-	legacy, err := sql.Open("sqlite3", paths.DB)
-	if err != nil {
-		t.Fatalf("open legacy db: %v", err)
-	}
+	legacy := openRawDB(t, paths.DB)
 	if _, err := legacy.Exec(initialSchemaSQL + "PRAGMA user_version = 1;"); err != nil {
 		t.Fatalf("create legacy schema: %v", err)
 	}
@@ -90,11 +87,8 @@ func TestOpenAndMigrateLegacyV1DB(t *testing.T) {
 
 func TestOpenAndMigrateLegacyV1BackupContainsOriginalData(t *testing.T) {
 	paths := testPaths(t)
-	legacy, err := sql.Open("sqlite3", paths.DB)
-	if err != nil {
-		t.Fatalf("open legacy db: %v", err)
-	}
-	_, err = legacy.Exec(initialSchemaSQL + `PRAGMA user_version = 1;
+	legacy := openRawDB(t, paths.DB)
+	_, err := legacy.Exec(initialSchemaSQL + `PRAGMA user_version = 1;
 		insert into profiles(id, steam_id64, display_name, created_at, updated_at) values(1, '11111111111111111', 'Legacy User', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
 		insert into games(appid, name, playtime_forever, has_achievements, achievement_status, created_at, updated_at) values(42, 'Legacy Game', 90, 1, 'ok', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
 		insert into profile_games(profile_id, appid, total_achievements, unlocked_achievements, completion_percent, is_completed, was_completed) values(1, 42, 10, 7, 70, 0, 1);`)
@@ -174,13 +168,10 @@ func TestOpenAndMigrateSkipsNoopBackup(t *testing.T) {
 
 func TestMigrationV9RebuildsPopulatedV8DB(t *testing.T) {
 	paths := testPaths(t)
-	legacy, err := sql.Open("sqlite3", paths.DB)
-	if err != nil {
-		t.Fatalf("open v8 db: %v", err)
-	}
+	legacy := openRawDB(t, paths.DB)
 	// Build the exact v8 schema by running the real migrations 1..8.
 	applyMigrationsUpTo(t, legacy, 8)
-	_, err = legacy.Exec(`
+	_, err := legacy.Exec(`
 		CREATE TABLE IF NOT EXISTS schema_migrations(version integer primary key, name text not null, applied_at text not null);
 		INSERT INTO schema_migrations(version, name, applied_at) VALUES
 			(1,'m1','2026-01-01T00:00:00Z'),(2,'m2','2026-01-01T00:00:00Z'),(3,'m3','2026-01-01T00:00:00Z'),(4,'m4','2026-01-01T00:00:00Z'),
@@ -516,7 +507,7 @@ func testPaths(t *testing.T) appdata.Paths {
 	t.Helper()
 	root := t.TempDir()
 	return appdata.Paths{
-		Root:    root,
+		DataDir: root,
 		DB:      filepath.Join(root, "steam-achievement-tracker.db"),
 		Backups: filepath.Join(root, "backups"),
 	}

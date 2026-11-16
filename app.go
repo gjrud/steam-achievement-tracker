@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -13,6 +12,7 @@ import (
 	"github.com/gjrud/steam-achievement-tracker/internal/appdata"
 	"github.com/gjrud/steam-achievement-tracker/internal/config"
 	dbinit "github.com/gjrud/steam-achievement-tracker/internal/db"
+	"github.com/gjrud/steam-achievement-tracker/internal/fsretry"
 	"github.com/gjrud/steam-achievement-tracker/internal/images"
 	"github.com/gjrud/steam-achievement-tracker/internal/keyring"
 	"github.com/gjrud/steam-achievement-tracker/internal/logging"
@@ -80,6 +80,8 @@ type App struct {
 type AppState struct {
 	AppName        string                     `json:"appName"`
 	DataDir        string                     `json:"dataDir"`
+	CacheDir       string                     `json:"cacheDir"`
+	LogDir         string                     `json:"logDir"`
 	LogFile        string                     `json:"logFile"`
 	APIKeyPresent  bool                       `json:"apiKeyPresent"`
 	APIKeyError    string                     `json:"apiKeyError"`
@@ -214,7 +216,7 @@ func (a *App) RetryAPIKey() (AppState, error) {
 	return a.GetAppState()
 }
 
-// SaveAPIKey stores the Steam Web API key in the Secret Service, replacing any key already stored, and updates the
+// SaveAPIKey stores the Steam Web API key in the system keyring, replacing any key already stored, and updates the
 // cached key state. It does not start a sync. It returns only an error: the key is not returned, and no error text
 // contains it, because Wails logs the error of a bound method. The cache changes only after the store is verified,
 // so a failed save leaves the previous key state as it was. Accepted edge: if the store succeeds but the read-back
@@ -305,7 +307,7 @@ func (a *App) SyncNow() (AppState, error) {
 //     still starts its usual sync.
 //   - deleteProfileData=true: the profile and its data are deleted (ClearProfileData), and cached images that no
 //     remaining profile shows are removed from disk.
-//   - deleteAPIKey=true: the Steam Web API key is deleted from the Secret Service and the cached key state is reset,
+//   - deleteAPIKey=true: the Steam Web API key is deleted from the system keyring and the cached key state is reset,
 //     so the app shows the missing-key screen. Without it the key is kept.
 //
 // The key is deleted first, before any profile change. A key deletion error is returned with nothing changed: no
@@ -347,7 +349,7 @@ func (a *App) ClearActiveUserData(deleteProfileData, deleteAPIKey bool) (AppStat
 	return a.GetAppState()
 }
 
-// clearSteamAPIKey deletes the key from the Secret Service and resets the cached key state. The cache changes only
+// clearSteamAPIKey deletes the key from the system keyring and resets the cached key state. The cache changes only
 // after the keyring delete succeeds, so a failed delete leaves the key state as it was.
 func (a *App) clearSteamAPIKey() error {
 	a.keyMu.Lock()
@@ -425,11 +427,9 @@ func (a *App) ensureInitialized() error {
 	}
 	a.mu.Unlock()
 
-	paths, err := appdata.Resolve()
-	if err == nil {
-		err = appdata.Ensure(paths)
-	}
-	if err != nil {
+	paths := appdata.Resolve()
+	if err := appdata.Ensure(paths); err != nil {
+		err = fmt.Errorf("create app directories: %w", err)
 		logging.Fallback()
 		a.setInitError(err)
 		return err
@@ -723,7 +723,8 @@ func (a *App) baseState(profile *repository.Profile, dashboard *repository.Dashb
 	syncInProgress := a.syncInProgress
 	a.mu.Unlock()
 	return AppState{
-		AppName: config.AppName, DataDir: paths.Root, LogFile: paths.LogFile, APIKeyPresent: apiKeyPresent, APIKeyError: apiKeyError,
+		AppName: config.AppName, DataDir: paths.DataDir, CacheDir: paths.CacheDir, LogDir: paths.Logs, LogFile: paths.LogFile,
+		APIKeyPresent: apiKeyPresent, APIKeyError: apiKeyError,
 		ProfileExists: profile != nil, Profile: profile,
 		Dashboard: dashboard, Settings: repository.DefaultLibrarySettings(), SyncInProgress: syncInProgress, InitError: initError,
 	}
@@ -771,7 +772,7 @@ func removeCachedGameImages(root string, appIDs []int64) error {
 			continue
 		}
 		path := filepath.Join(root, strconv.FormatInt(appID, 10))
-		if err := os.RemoveAll(path); err != nil {
+		if err := fsretry.RemoveAll(path); err != nil {
 			return fmt.Errorf("remove cached images for appid %d: %w", appID, err)
 		}
 	}

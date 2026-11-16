@@ -9,22 +9,24 @@ vars:
 includes:
   common: ./build/Taskfile.yml
   linux: ./build/linux/Taskfile.yml
+  windows: ./build/windows/Taskfile.yml
 
+# build, package and run dispatch to the current OS (linux or windows). Platform tasks are in build/<os>/Taskfile.yml.
 tasks:
   build:
-    summary: Builds the application
+    summary: Builds the application for the current OS
     cmds:
-      - task: linux:build
+      - task: '{{OS}}:build'
 
   package:
-    summary: Packages a production build of the application
+    summary: Packages a production build of the application for the current OS
     cmds:
-      - task: linux:package
+      - task: '{{OS}}:package'
 
   run:
     summary: Runs the application
     cmds:
-      - task: linux:run
+      - task: '{{OS}}:run'
 
   dev:
     summary: Runs the application in development mode
