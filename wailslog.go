@@ -21,6 +21,12 @@ func (logWriter) Write(p []byte) (int, error) {
 // newWailsLogger returns the logger handed to Wails. It keeps warnings and errors only: at Info Wails logs one line
 // per embedded asset request and platform details on every launch, which would only add noise to the app log. Errors
 // of bound methods (for example a failed profile check) are logged at Error and are kept.
+//
+// Rules for this logger, because it writes to app.log:
+//   - It must never enable Debug. Wails logs the arguments of every bound-method call at Debug, and those arguments
+//     include the Steam Web API key passed to SaveAPIKey. Keep the level at Warn (or higher).
+//   - Errors returned by bound methods are kept at Error with their text, so such errors must never contain the
+//     secret. Return constant messages or wrapped backend errors, never the input.
 func newWailsLogger(w io.Writer) *slog.Logger {
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelWarn}))
 }

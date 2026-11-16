@@ -55,12 +55,11 @@ The app follows the Wails v3 service model instead of the v2 `wails.Run` layout:
 - Linux desktop session.
 - GTK4 and WebKitGTK 6.0 runtime libraries compatible with the build. This project uses Wails v3 on Linux, which renders through GTK4 + WebKitGTK 6.0.
 - Linux Secret Service provider, such as GNOME Keyring or another compatible keyring service.
-- `secret-tool` from libsecret tools to store the Steam Web API key.
-- Steam Web API key.
+- Steam Web API key, pasted into the app on first launch.
 - Network access to Steam Web API and Steam static asset hosts.
 - Public Steam profile game details for the profile being tracked.
 
-Package names differ by distribution. On Debian/Ubuntu-style systems, look for packages similar to `libgtk-4-1`, `libwebkitgtk-6.0-4`, `gnome-keyring`, and `libsecret-tools`.
+Package names differ by distribution. On Debian/Ubuntu-style systems, look for packages similar to `libgtk-4-1`, `libwebkitgtk-6.0-4`, and `gnome-keyring`.
 
 ### Development version
 
@@ -82,7 +81,7 @@ Use `wails3 doctor` to check local Wails dependencies.
 
 ### 1. Install runtime dependencies
 
-Install GTK/WebKit runtime libraries, a Secret Service provider, and `secret-tool` for your distribution.
+Install GTK/WebKit runtime libraries and a Secret Service provider for your distribution.
 
 ### 2. Install the app
 
@@ -98,20 +97,11 @@ A bare `bin/steam-achievement-tracker` from `wails3 build` runs fine but has no 
 
 Uninstalling through the package manager keeps `~/.steam-achievement-tracker` and the Secret Service API key.
 
-### 3. Store the Steam Web API key
-
-Store the key in Secret Service:
+### 3. Enter the Steam Web API key
 
 Generate a Steam Web API key from Steam's developer page: <https://steamcommunity.com/dev/apikey>.
 
-```sh
-secret-tool store \
-  --label="Steam Achievement Tracker - Steam Web API Key" \
-  service steam-achievement-tracker \
-  username steam-web-api-key
-```
-
-Paste the Steam Web API key when prompted by `secret-tool`. The app reads only this Secret Service item.
+Start the app (step 4), paste the key into the key field on the setup screen, and click **Save key**. Your keyring may ask to unlock first. The app stores it in Secret Service under `service=steam-achievement-tracker`, `username=steam-web-api-key`, and reads only that item. Saving does not start a sync. Keys stored earlier with `secret-tool` under the same names keep working; no migration is needed.
 
 ### 4. Launch
 
@@ -119,7 +109,7 @@ Paste the Steam Web API key when prompted by `secret-tool`. The app reads only t
 steam-achievement-tracker
 ```
 
-If the API key is missing, the app opens to the key setup screen and shows the same `secret-tool` command.
+If the API key is missing, the app opens to the key setup screen. Paste the key and click **Save key**. **Retry key lookup** re-reads Secret Service, for example after storing the key another way.
 
 ## Build & run
 
@@ -151,7 +141,7 @@ VERSION=0.0.0-dev wails3 package
 
 The package version comes only from the `VERSION` environment variable, which `build/linux/nfpm/nfpm.yaml` expands (`version: ${VERSION}`). No version is stored in the repository. Without `VERSION`, packaging still succeeds but produces a wrong version (the deb shows `0.0.0~rc0-1`), so always set it. Use the version without the `v` prefix, for example `1.2.3` or `1.2.3-rc.1`.
 
-The deb, rpm, and Arch packages install the binary to `/usr/local/bin` and declare the GTK4 and WebKitGTK 6.0 runtime packages as dependencies (see `build/linux/nfpm/nfpm.yaml`). They do not depend on a Secret Service provider or `secret-tool`; install those separately. The AppImage step downloads `linuxdeploy`, so it needs network access. Use `wails3 task --list` to see every available task.
+The deb, rpm, and Arch packages install the binary to `/usr/local/bin` and declare the GTK4 and WebKitGTK 6.0 runtime packages as dependencies (see `build/linux/nfpm/nfpm.yaml`). They do not depend on a Secret Service provider; install one separately. The AppImage step downloads `linuxdeploy`, so it needs network access. Use `wails3 task --list` to see every available task.
 
 ### Releasing
 
@@ -241,7 +231,7 @@ Distrust any run with more than about 5% timed-out mutants; rerun with a higher 
 
 ### Set up the API key
 
-Before sync can run, store a Steam Web API key in Secret Service using the command in [Install](#3-store-the-steam-web-api-key). If the key is missing, the app shows the setup command and a **Retry key lookup** button. Store the key, then click **Retry key lookup**.
+Before sync can run, enter a Steam Web API key in the app; see [Install](#3-enter-the-steam-web-api-key). If the key is missing, the app shows the key setup screen with a key field. Paste the key and click **Save key**. To change the key later, open **Settings**, go to the **Steam Web API key** section, and click **Replace key**; the profile setup screen has the same **Replace key** button.
 
 ![API key setup](docs/setup-apikey.gif)
 
@@ -407,7 +397,7 @@ Changes apply on the next sync and do not start one. Turning an option off remov
 
 ### Clear active user data
 
-Open **Settings** and click **Clear data**. The app asks you to type the shown profile identifier before clearing. This removes the active profile, tracked games, owned-game playtime and purchase status, achievement data, sync history, manual flags, profile-scoped tags, library sync settings, and cached covers for that profile. It does not remove the Secret Service API key or logs. Re-adding the profile starts with both library sync options on.
+Open **Settings** and click **Clear data**. The app asks you to type the shown profile identifier before clearing. This removes the active profile, tracked games, owned-game playtime and purchase status, achievement data, sync history, manual flags, profile-scoped tags, library sync settings, and cached covers for that profile. It does not remove the Steam Web API key or logs. After clearing, the app shows the profile setup screen; use **Replace key** there if the next profile needs a different key. Re-adding the profile starts with both library sync options on.
 
 ![Clear active user data](docs/clear-data.gif)
 
@@ -434,7 +424,7 @@ All app-owned files live under `~/.steam-achievement-tracker` unless noted. Dire
 | `~/.steam-achievement-tracker/logs/` | Logging initialization | Log directory. |
 | `~/.steam-achievement-tracker/logs/app.log` | Logging initialization | Current application log: app messages plus Wails warnings and errors. |
 | `~/.steam-achievement-tracker/logs/app-*.log` | Log rotation | Rotated logs; max size is 5 MB with up to 5 backups. |
-| Secret Service item `service=steam-achievement-tracker`, `username=steam-web-api-key` | User via `secret-tool` | Steam Web API key. Stored outside the app data directory by the desktop keyring. |
+| Secret Service item `service=steam-achievement-tracker`, `username=steam-web-api-key` | Entered in the app | Steam Web API key. Stored outside the app data directory by the desktop keyring. |
 
 ### steam-achievement-tracker.db Schema
 

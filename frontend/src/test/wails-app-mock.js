@@ -5,6 +5,7 @@ const defaultHandlers = {
   GetAppState: async () => missingHandler('GetAppState'),
   MarkGamePreviouslyCompleted: async () => missingHandler('MarkGamePreviouslyCompleted'),
   RetryAPIKey: async () => missingHandler('RetryAPIKey'),
+  SaveAPIKey: async () => missingHandler('SaveAPIKey'),
   SaveProfile: async () => missingHandler('SaveProfile'),
   SetLibrarySettings: async () => missingHandler('SetLibrarySettings'),
   SyncNow: async () => missingHandler('SyncNow'),
@@ -34,6 +35,7 @@ export const EnableGame = (appID, groupID) => handlers.EnableGame(appID, groupID
 export const GetAppState = () => handlers.GetAppState()
 export const MarkGamePreviouslyCompleted = (appID, groupID) => handlers.MarkGamePreviouslyCompleted(appID, groupID)
 export const RetryAPIKey = () => handlers.RetryAPIKey()
+export const SaveAPIKey = (key) => handlers.SaveAPIKey(key)
 export const SaveProfile = (preview) => handlers.SaveProfile(preview)
 export const SetLibrarySettings = (includeUnvettedApps, includePlayedFreeGames) => handlers.SetLibrarySettings(includeUnvettedApps, includePlayedFreeGames)
 export const SyncNow = () => handlers.SyncNow()

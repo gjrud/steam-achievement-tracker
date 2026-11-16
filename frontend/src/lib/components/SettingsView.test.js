@@ -91,3 +91,88 @@ describe('SettingsView library sync', () => {
     await waitFor(() => expect(unvettedBox()).toBeChecked())
   })
 })
+
+describe('SettingsView Steam Web API key', () => {
+  function replaceButton() {
+    return screen.getByRole('button', {name: 'Replace key'})
+  }
+
+  function keyField() {
+    return screen.getByLabelText('Steam Web API key')
+  }
+
+  test('shows the stored status, and opens the key form only on Replace key with focus in the field', async () => {
+    render(SettingsView, {props: {state: stateWith(undefined)}})
+
+    expect(screen.getByText('Stored in Secret Service.')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Steam Web API key')).not.toBeInTheDocument()
+
+    await fireEvent.click(replaceButton())
+
+    expect(keyField()).toHaveAttribute('type', 'password')
+    expect(replaceButton()).toHaveAttribute('aria-expanded', 'true')
+    await waitFor(() => expect(keyField()).toHaveFocus())
+  })
+
+  test('saves the trimmed key through onSaveKey, closes the form, confirms the save, and returns focus to Replace key', async () => {
+    const onSaveKey = vi.fn(async () => {})
+    render(SettingsView, {props: {state: stateWith(undefined), onSaveKey}})
+
+    await fireEvent.click(replaceButton())
+    await fireEvent.input(keyField(), {target: {value: '  new-key  '}})
+    await fireEvent.click(screen.getByRole('button', {name: 'Save key'}))
+
+    expect(onSaveKey).toHaveBeenCalledWith('new-key')
+    await waitFor(() => expect(screen.queryByLabelText('Steam Web API key')).not.toBeInTheDocument())
+    expect(screen.getByRole('status')).toHaveTextContent('Key saved.')
+    expect(replaceButton()).toHaveFocus()
+  })
+
+  test('clears the Key saved. status when the form is opened again', async () => {
+    const onSaveKey = vi.fn(async () => {})
+    render(SettingsView, {props: {state: stateWith(undefined), onSaveKey}})
+
+    await fireEvent.click(replaceButton())
+    await fireEvent.input(keyField(), {target: {value: 'new-key'}})
+    await fireEvent.click(screen.getByRole('button', {name: 'Save key'}))
+    expect(await screen.findByRole('status')).toHaveTextContent('Key saved.')
+
+    await fireEvent.click(replaceButton())
+
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(keyField()).toBeInTheDocument()
+  })
+
+  test('keeps the form open with the error when the save fails', async () => {
+    const onSaveKey = vi.fn(async () => {
+      throw new Error('Secret Service is locked')
+    })
+    render(SettingsView, {props: {state: stateWith(undefined), onSaveKey}})
+
+    await fireEvent.click(replaceButton())
+    await fireEvent.input(keyField(), {target: {value: 'new-key'}})
+    await fireEvent.click(screen.getByRole('button', {name: 'Save key'}))
+
+    expect(await screen.findByText('Secret Service is locked')).toBeInTheDocument()
+    expect(keyField()).toBeInTheDocument()
+    expect(keyField()).toHaveValue('')
+    expect(document.body.textContent).not.toContain('new-key')
+  })
+
+  test('shows Saving…, refuses submit, and disables Replace key while a key save is pending', async () => {
+    const onSaveKey = vi.fn(async () => {})
+    const state = stateWith(undefined)
+    const {rerender} = render(SettingsView, {props: {state, onSaveKey}})
+
+    await fireEvent.click(replaceButton())
+    expect(replaceButton()).toBeEnabled()
+
+    await rerender({state, savingKey: true, onSaveKey})
+
+    expect(replaceButton()).toBeDisabled()
+    expect(screen.getByRole('button', {name: 'Saving…'})).toBeDisabled()
+    expect(keyField()).toBeDisabled()
+    await fireEvent.submit(keyField().closest('form'))
+    expect(onSaveKey).not.toHaveBeenCalled()
+  })
+})

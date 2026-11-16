@@ -33,13 +33,24 @@ var errShuttingDown = errors.New("shutting down")
 // refetches GetAppState when it arrives.
 const syncChangedEvent = "sync:changed"
 
+// readSteamAPIKey and storeSteamAPIKey are the keyring calls the App makes. Tests swap them to count reads and to
+// simulate store failures or ordering; production uses the keyring package. Tests restore them with t.Cleanup.
+var (
+	readSteamAPIKey  = keyring.GetSteamAPIKey
+	storeSteamAPIKey = keyring.SetSteamAPIKey
+)
+
 type App struct {
 	// lifeCtx is the service lifetime context, created by NewApp and cancelled by ServiceShutdown. Sync and Steam
 	// request contexts derive from it through context(). lifeCancel is its cancel func.
 	lifeCtx    context.Context
 	lifeCancel context.CancelFunc
-	mu         sync.Mutex
-	initMu     sync.Mutex
+	// keyMu serializes the keyring operations that update the cached key state: SaveAPIKey and refreshAPIKey. It is
+	// held over the keyring call and the cache write, so a read that started before a save cannot overwrite the
+	// saved key. Lock order: keyMu before mu. Never take keyMu while holding mu.
+	keyMu  sync.Mutex
+	mu     sync.Mutex
+	initMu sync.Mutex
 	// emit delivers named Wails events to the frontend. Set once by main through setEventEmitter; nil in tests.
 	// It is read under mu and called only after mu is released.
 	emit func(name string)
@@ -65,18 +76,17 @@ type App struct {
 }
 
 type AppState struct {
-	AppName            string                     `json:"appName"`
-	DataDir            string                     `json:"dataDir"`
-	LogFile            string                     `json:"logFile"`
-	APIKeyPresent      bool                       `json:"apiKeyPresent"`
-	APIKeyError        string                     `json:"apiKeyError"`
-	SecretSetupCommand string                     `json:"secretSetupCommand"`
-	ProfileExists      bool                       `json:"profileExists"`
-	Profile            *repository.Profile        `json:"profile"`
-	Dashboard          *repository.Dashboard      `json:"dashboard"`
-	Settings           repository.LibrarySettings `json:"settings"`
-	SyncInProgress     bool                       `json:"syncInProgress"`
-	InitError          string                     `json:"initError"`
+	AppName        string                     `json:"appName"`
+	DataDir        string                     `json:"dataDir"`
+	LogFile        string                     `json:"logFile"`
+	APIKeyPresent  bool                       `json:"apiKeyPresent"`
+	APIKeyError    string                     `json:"apiKeyError"`
+	ProfileExists  bool                       `json:"profileExists"`
+	Profile        *repository.Profile        `json:"profile"`
+	Dashboard      *repository.Dashboard      `json:"dashboard"`
+	Settings       repository.LibrarySettings `json:"settings"`
+	SyncInProgress bool                       `json:"syncInProgress"`
+	InitError      string                     `json:"initError"`
 }
 
 type ProfilePreview struct {
@@ -200,6 +210,30 @@ func (a *App) SetLibrarySettings(includeUnvettedApps, includePlayedFreeGames boo
 func (a *App) RetryAPIKey() (AppState, error) {
 	_ = a.refreshAPIKey()
 	return a.GetAppState()
+}
+
+// SaveAPIKey stores the Steam Web API key in the Secret Service, replacing any key already stored, and updates the
+// cached key state. It does not start a sync. It returns only an error: the key is not returned, and no error text
+// contains it, because Wails logs the error of a bound method. The cache changes only after the store is verified,
+// so a failed save leaves the previous key state as it was. Accepted edge: if the store succeeds but the read-back
+// errors, the keyring may hold the new key while the cache keeps the old one until the next refresh (requireAPIKey
+// or RetryAPIKey re-reads). Do not "fix" this by re-reading inside SaveAPIKey.
+func (a *App) SaveAPIKey(key string) error {
+	if err := a.ensureInitialized(); err != nil {
+		return err
+	}
+	a.keyMu.Lock()
+	defer a.keyMu.Unlock()
+	stored, err := storeSteamAPIKey(key)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.steamAPIKey = stored
+	a.apiKeyPresent = true
+	a.apiKeyError = ""
+	return nil
 }
 
 func (a *App) ValidateProfile(input string) (ProfilePreview, error) {
@@ -365,7 +399,7 @@ func (a *App) ensureInitialized() error {
 	if err := repo.CancelRunningSyncRuns("app restarted before sync completed"); err != nil {
 		log.Printf("cancel stale sync runs: %v", err)
 	}
-	key, keyErr := keyring.GetSteamAPIKey()
+	key, keyErr := readSteamAPIKey()
 	if keyErr != nil && !errors.Is(keyErr, keyring.ErrMissing) {
 		log.Printf("keyring lookup: %v", keyErr)
 	}
@@ -406,7 +440,9 @@ func (a *App) activeRepoAndProfile() (*repository.Repository, *repository.Profil
 }
 
 func (a *App) refreshAPIKey() error {
-	key, err := keyring.GetSteamAPIKey()
+	a.keyMu.Lock()
+	defer a.keyMu.Unlock()
+	key, err := readSteamAPIKey()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err != nil {
@@ -643,7 +679,7 @@ func (a *App) baseState(profile *repository.Profile, dashboard *repository.Dashb
 	a.mu.Unlock()
 	return AppState{
 		AppName: config.AppName, DataDir: paths.Root, LogFile: paths.LogFile, APIKeyPresent: apiKeyPresent, APIKeyError: apiKeyError,
-		SecretSetupCommand: config.SecretSetupCommand, ProfileExists: profile != nil, Profile: profile,
+		ProfileExists: profile != nil, Profile: profile,
 		Dashboard: dashboard, Settings: repository.DefaultLibrarySettings(), SyncInProgress: syncInProgress, InitError: initError,
 	}
 }

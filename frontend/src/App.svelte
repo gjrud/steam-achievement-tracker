@@ -8,6 +8,7 @@
     GetAppState,
     MarkGamePreviouslyCompleted,
     RetryAPIKey,
+    SaveAPIKey,
     SaveProfile,
     SetLibrarySettings,
     SyncNow,
@@ -41,6 +42,9 @@
   let preview = null
   let validating = false
   let saving = false
+  // savingKey covers a SaveAPIKey call. It lives here (not in the form) so a remounted form still sees it. It is not
+  // a beginAction: the unlock prompt can stay open for a long time, and holding reads would freeze live sync progress.
+  let savingKey = false
   let activeView = 'suggestions'
   let viewSearch = ''
   let activeTagFilter = ''
@@ -188,7 +192,8 @@
 
   async function validateProfile() {
     const input = profileInput.trim()
-    if (!input) return
+    // The Enter key in the profile input calls this directly, so the save guard lives here too, not only on the button.
+    if (!input || savingKey) return
     validating = true
     preview = null
     error = ''
@@ -203,7 +208,7 @@
   }
 
   async function saveProfile() {
-    if (!preview) return
+    if (!preview || savingKey) return
     saving = true
     const token = beginAction()
     try {
@@ -214,6 +219,23 @@
     } finally {
       saving = false
       endAction()
+    }
+  }
+
+  // saveApiKey stores the key with no beginAction (see savingKey). On success the stored key changed, so the profile
+  // preview (validated with the old key) is dropped, an earlier Validate error is cleared, and state is re-read. On
+  // failure it rethrows: the form shows the error, and this banner stays untouched.
+  async function saveApiKey(key) {
+    if (savingKey) throw new Error('A save is already in progress')
+    savingKey = true
+    try {
+      await SaveAPIKey(key)
+      preview = null
+      error = ''
+      refreshError = false
+      requestRefresh()
+    } finally {
+      savingKey = false
     }
   }
 
@@ -384,7 +406,7 @@
 {:else if state?.initError}
   <SetupView mode="startup-error" state={state} error={error} onRetry={retryKey} />
 {:else if !state?.apiKeyPresent}
-  <SetupView mode="missing-key" state={state} error={error} onRetry={retryKey} />
+  <SetupView mode="missing-key" state={state} error={error} onRetry={retryKey} savingKey={savingKey} onSaveKey={saveApiKey} />
 {:else if !state?.profileExists}
   <SetupView
     mode="profile"
@@ -394,8 +416,10 @@
     preview={preview}
     validating={validating}
     saving={saving}
+    savingKey={savingKey}
     onValidate={validateProfile}
     onSave={saveProfile}
+    onSaveKey={saveApiKey}
     onProfileInput={(value) => (profileInput = value)}
   />
 {:else}
@@ -420,7 +444,9 @@
     {gameActionLoading}
     {clearingData}
     {savingSettings}
+    {savingKey}
     onSyncNow={syncNow}
+    onSaveKey={saveApiKey}
     onSetLibrarySettings={saveLibrarySettings}
     onActiveViewChange={changeView}
     onViewSearch={(value) => (viewSearch = value)}

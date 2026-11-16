@@ -434,7 +434,9 @@ describe('App sync events', () => {
 
   // Each action runs while the dashboard reports a sync. A rejection must leave the banner in place and the
   // dashboard must still follow sync:changed until the run finishes. RetryAPIKey and SaveProfile are not listed:
-  // they render only in setup views, which the dashboard's syncing state never reaches.
+  // they render only in setup views, which the dashboard's syncing state never reaches. SaveAPIKey is not listed
+  // either: its error is shown by the key form, not this banner, and it never calls beginAction, so there is no
+  // banner or read hold to check. Its live-sync behaviour has its own test below.
   const runningOnly = (gamesSynced) => dashboardState({latestSyncRun: syncRun({status: 'running', finishedAt: '', gamesSynced})})
   const cardMenuAction = (label) => async () => {
     await fireEvent.contextMenu(hadesCard())
@@ -560,6 +562,51 @@ describe('App sync events', () => {
     await settle()
     expect(getState).toHaveBeenCalledTimes(2)
     expect(screen.getByText(failureMessage)).toBeInTheDocument()
+  })
+})
+
+describe('App API key save during a sync', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.clearAllTimers()
+    vi.useRealTimers()
+  })
+
+  // A save with the unlock prompt still open must not hold reads (no beginAction), so sync:changed keeps updating the
+  // dashboard while the save is pending.
+  test('live sync updates keep arriving while a key save is pending', async () => {
+    let resolveKey
+    const getState = vi.fn()
+      .mockResolvedValueOnce(syncingState(1))
+      .mockResolvedValue(syncingState(3))
+    __setWailsMocks({
+      GetAppState: getState,
+      SaveAPIKey: vi.fn(() => new Promise((resolve) => {
+        resolveKey = resolve
+      }))
+    })
+
+    render(App)
+    await settle()
+    await fireEvent.click(screen.getByRole('button', {name: 'Settings'}))
+    await fireEvent.click(screen.getByRole('button', {name: 'Replace key'}))
+    await fireEvent.input(screen.getByLabelText('Steam Web API key'), {target: {value: 'steam-key'}})
+    await fireEvent.click(screen.getByRole('button', {name: 'Save key'}))
+    await settle()
+    expect(screen.getByRole('button', {name: 'Saving…'})).toBeDisabled()
+
+    emitSyncChanged()
+    await settle()
+    expect(getState).toHaveBeenCalledTimes(2)
+    expect(screen.getByText('Syncing 3 / 6')).toBeInTheDocument()
+
+    resolveKey()
+    await settle()
+    expect(screen.queryByLabelText('Steam Web API key')).not.toBeInTheDocument()
   })
 })
 

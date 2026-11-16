@@ -8,8 +8,3 @@ const (
 	KeyringUser   = "steam-web-api-key"
 	SchemaVersion = 14
 )
-
-const SecretSetupCommand = `secret-tool store \
-  --label="Steam Achievement Tracker - Steam Web API Key" \
-  service steam-achievement-tracker \
-  username steam-web-api-key`

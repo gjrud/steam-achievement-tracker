@@ -42,17 +42,6 @@
     margin: 0;
   }
 
-  .setup-panel pre {
-    margin: 20px 0;
-    padding: 16px;
-    border-radius: 14px;
-    background: #09111a;
-    border: 1px solid #26384d;
-    color: #d7e8ff;
-    overflow: auto;
-    white-space: pre-wrap;
-  }
-
   .setup-error {
     color: #f4fbff;
   }
@@ -79,6 +68,26 @@
   input:focus {
     border-color: #66c0f4;
     box-shadow: 0 0 0 3px rgba(102, 192, 244, 0.16);
+  }
+
+  input:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  /* Wraps the API key input. The label grows like the input it holds, so the Save button stays on the same row. */
+  .key-field {
+    flex: 1 1 340px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .key-field .key-label {
+    color: #8ea7be;
+    font-weight: 600;
+    white-space: nowrap;
   }
 
   button {
@@ -1103,7 +1112,8 @@
     margin-top: 6px;
   }
 
-  .library-sync {
+  .library-sync,
+  .api-key-section {
     margin-top: 24px;
     padding: 16px;
     border: 1px solid #26384d;
@@ -1117,6 +1127,26 @@
   }
 
   .library-sync > .muted {
+    margin-top: 14px;
+  }
+
+  /* Children of the key blocks drop their default paragraph margins; siblings are spaced by one 14px gap. */
+  .api-key-section > *,
+  .api-key-setup > * {
+    margin: 0;
+  }
+
+  .api-key-section > * + *,
+  .api-key-setup > * + * {
+    margin-top: 14px;
+  }
+
+  .api-key-setup {
+    margin-top: 20px;
+  }
+
+  /* The missing-key screen's retry row follows the key form (or the error line), so it gets its own gap. */
+  .setup-panel > .button-row {
     margin-top: 14px;
   }
 
@@ -1476,5 +1506,16 @@
 
     .game-grid {
       grid-template-columns: 1fr;
+    }
+
+    /* Narrow screens: label above the key input, so the input keeps its width. */
+    .key-field {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+
+    .key-field input {
+      flex: 0 0 auto;
     }
   }

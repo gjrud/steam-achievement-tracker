@@ -33,7 +33,7 @@ In scope: this repository's Go backend, Svelte frontend, and build/CI configurat
 
 Particularly relevant areas:
 
-- Handling of the Steam Web API key (stored only in the Linux Secret Service)
+- Handling of the Steam Web API key (entered in the app, stored only in the Linux Secret Service, never logged)
 - Local data under `~/.steam-achievement-tracker`
 - Network requests to Steam
 
