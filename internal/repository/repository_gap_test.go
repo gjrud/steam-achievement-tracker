@@ -485,14 +485,14 @@ func TestActiveProfileFallbacks(t *testing.T) {
 	if active, err := repo.ActiveProfile(); err != nil || active == nil || active.ID != p2.ID {
 		t.Fatalf("active after save = %#v err=%v, want profile %d", active, err, p2.ID)
 	}
-	// A setting that points at a missing profile falls back to the lowest id.
+	// A setting that points at a missing profile is no active profile: no fallback.
 	if _, err := repo.db.Exec(`update settings set value='999' where key='active_profile_id'`); err != nil {
 		t.Fatal(err)
 	}
-	if active, err := repo.ActiveProfile(); err != nil || active == nil || active.ID != p1.ID {
-		t.Fatalf("stale setting active = %#v err=%v, want lowest id %d", active, err, p1.ID)
+	if active, err := repo.ActiveProfile(); err != nil || active != nil {
+		t.Fatalf("stale setting active = %#v err=%v, want nil", active, err)
 	}
-	// No setting row at all (sql.ErrNoRows) also falls back to the lowest id.
+	// No setting row at all (sql.ErrNoRows) falls back to the lowest id.
 	if _, err := repo.db.Exec(`delete from settings where key='active_profile_id'`); err != nil {
 		t.Fatal(err)
 	}

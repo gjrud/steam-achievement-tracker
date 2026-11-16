@@ -34,7 +34,7 @@
 
 <section class="settings-panel">
   <div class="section-head"><h2>Settings</h2></div>
-  <dl><dt>Active profile</dt><dd>{state.profile?.displayName} ({state.profile?.steamId64})</dd><dt>Data directory</dt><dd>{state.dataDir}</dd><dt>Log file</dt><dd>{state.logFile}</dd><dt>Secret Service key</dt><dd>{state.apiKeyPresent ? 'Present' : 'Missing'}</dd></dl>
+  <dl><dt>Active profile</dt><dd>{state.profile?.displayName} ({state.profile?.steamId64})</dd><dt>Data directory</dt><dd>{state.dataDir}</dd><dt>Log file</dt><dd>{state.logFile}</dd></dl>
   <section class="library-sync" aria-labelledby="library-sync-heading">
     <h3 id="library-sync-heading">Library sync</h3>
     <div class="setting-row">
@@ -53,5 +53,5 @@
     </div>
     <p class="muted">Changes apply on next sync. Games no longer returned are marked as not owned.</p>
   </section>
-  <section class="danger-zone"><div><h3>Clear active user data</h3><p class="muted">Deletes this active profile, tracked games, achievement data, sync history, manual flags, library sync settings, and cached game images. API key and logs stay.</p></div><button class="danger" on:click={onClearData} disabled={clearingData}>{clearingData ? 'Clearing…' : 'Clear data'}</button></section>
+  <section class="danger-zone"><div><h3>Remove active profile</h3><p class="muted">Remove the active profile. You choose whether to also delete its data and the API key.</p></div><button class="danger" on:click={onClearData} disabled={clearingData}>{clearingData ? 'Removing…' : 'Remove profile'}</button></section>
 </section>

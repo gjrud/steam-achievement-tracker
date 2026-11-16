@@ -64,7 +64,8 @@ func TestClearProfileDataScopesDeletion(t *testing.T) {
 	assertCount(t, repo, `select count(*) from games where appid=30`, 1)
 	assertCount(t, repo, `select count(*) from achievements where appid=10`, 0)
 	assertCount(t, repo, `select count(*) from achievements where appid=20`, 1)
-	assertCount(t, repo, `select count(*) from settings where key='active_profile_id'`, 0)
+	// The active setting is kept as '' (no active profile), not deleted, so it cannot fall back to p2.
+	assertCount(t, repo, `select count(*) from settings where key='active_profile_id' and value=''`, 1)
 }
 
 func TestClearProfileDataKeepsOtherActiveProfileSetting(t *testing.T) {

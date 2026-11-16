@@ -231,8 +231,12 @@ func TestGetAppStateWithoutKeyOrProfile(t *testing.T) {
 	if state.DataDir != dataDir || state.LogFile != filepath.Join(dataDir, "logs", "app.log") {
 		t.Fatalf("DataDir = %q LogFile = %q, want paths under %q", state.DataDir, state.LogFile, dataDir)
 	}
-	if state.SecretSetupCommand != config.SecretSetupCommand {
-		t.Fatalf("SecretSetupCommand = %q, want config value", state.SecretSetupCommand)
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "secretSetupCommand") {
+		t.Fatal("serialized AppState still carries the removed secretSetupCommand field")
 	}
 }
 
@@ -984,10 +988,10 @@ func TestInitFailureIsReportedAndBlocksActions(t *testing.T) {
 	}
 }
 
-func TestClearActiveUserDataCancelsSyncAndRemovesCache(t *testing.T) {
-	app := newTestApp(t)
-	profile := saveTestProfile(t, app)
-	seedTwoSetGame(t, app, profile.ID)
+// seedCachedCover saves the library cover of app 10 in the repository and writes its file under the image cache,
+// as a sync would. It returns the cache directory of app 10.
+func seedCachedCover(t *testing.T, app *App) string {
+	t.Helper()
 	if err := app.repo.SaveCover(repository.CoverUpdate{
 		ImageAppID: 10,
 		Kind:       "library",
@@ -1005,10 +1009,37 @@ func TestClearActiveUserDataCancelsSyncAndRemovesCache(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(coverDir, "library_600x900.jpg"), []byte("cover"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return coverDir
+}
+
+// entryCoverURL returns the cover URL of one entry of the profile's dashboard, searching every list.
+func entryCoverURL(t *testing.T, app *App, profileID, appID, groupID int64) string {
+	t.Helper()
+	dashboard, err := app.repo.Dashboard(profileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := fmt.Sprintf("%d:%d", appID, groupID)
+	for _, list := range [][]repository.GameCard{dashboard.Suggestions, dashboard.Completed, dashboard.Warnings, dashboard.Disabled} {
+		for _, card := range list {
+			if card.EntryKey == key {
+				return card.CoverURL
+			}
+		}
+	}
+	t.Fatalf("entry %s not on dashboard", key)
+	return ""
+}
+
+func TestClearActiveUserDataCancelsSyncAndRemovesCache(t *testing.T) {
+	app := newTestApp(t)
+	profile := saveTestProfile(t, app)
+	seedTwoSetGame(t, app, profile.ID)
+	coverDir := seedCachedCover(t, app)
 
 	canceled := 0
 	app.syncCancel = func() { canceled++ }
-	state, err := app.ClearActiveUserData()
+	state, err := app.ClearActiveUserData(true, false)
 	if err != nil {
 		t.Fatalf("ClearActiveUserData: %v", err)
 	}
@@ -1020,6 +1051,282 @@ func TestClearActiveUserDataCancelsSyncAndRemovesCache(t *testing.T) {
 	}
 	if _, err := os.Stat(coverDir); !os.IsNotExist(err) {
 		t.Fatalf("orphaned cover dir still present, err=%v", err)
+	}
+}
+
+// Both flags off: the profile is deactivated, and its games, cover (file and row) and the stored key all stay.
+func TestClearActiveUserDataKeepsDataAndKeyWhenBothOff(t *testing.T) {
+	app := newTestApp(t)
+	profile := saveTestProfile(t, app)
+	seedTwoSetGame(t, app, profile.ID)
+	coverDir := seedCachedCover(t, app)
+	if err := app.SaveAPIKey("kept-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	canceled := 0
+	app.syncCancel = func() { canceled++ }
+	state, err := app.ClearActiveUserData(false, false)
+	if err != nil {
+		t.Fatalf("ClearActiveUserData(false, false): %v", err)
+	}
+	if canceled != 1 {
+		t.Fatalf("sync cancel called %d times, want 1", canceled)
+	}
+	if state.ProfileExists || state.Profile != nil {
+		t.Fatal("profile still active after deactivate")
+	}
+	if active, err := app.repo.ActiveProfile(); err != nil || active != nil {
+		t.Fatalf("repository active profile = %#v, %v; want none", active, err)
+	}
+	if !state.APIKeyPresent || state.APIKeyError != "" {
+		t.Fatalf("state api key = present %v err %q, want key kept", state.APIKeyPresent, state.APIKeyError)
+	}
+	if key, present, _ := cachedAPIKeyState(app); key != "kept-key" || !present {
+		t.Fatalf("cache = key %q present %v, want key kept", key, present)
+	}
+	if stored, err := zk.Get(testKeyringService, testKeyringUser); err != nil || stored != "kept-key" {
+		t.Fatalf("keyring = %q, %v; want key kept", stored, err)
+	}
+	if _, err := os.Stat(filepath.Join(coverDir, "library_600x900.jpg")); err != nil {
+		t.Fatalf("cached cover file removed: %v", err)
+	}
+	if game, err := app.repo.ProfileGame(profile.ID, 10, 0); err != nil || !game.Exists {
+		t.Fatalf("profile game after deactivate = %+v, %v; want kept", game, err)
+	}
+	if url := entryCoverURL(t, app, profile.ID, 10, 0); url == "" {
+		t.Fatal("cover row removed, want kept")
+	}
+}
+
+// Data on, key off: the profile and its data are deleted as before, and the key stays.
+func TestClearActiveUserDataDeletesDataKeepsKey(t *testing.T) {
+	app := newTestApp(t)
+	profile := saveTestProfile(t, app)
+	seedTwoSetGame(t, app, profile.ID)
+	coverDir := seedCachedCover(t, app)
+	if err := app.SaveAPIKey("kept-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := app.ClearActiveUserData(true, false)
+	if err != nil {
+		t.Fatalf("ClearActiveUserData(true, false): %v", err)
+	}
+	if state.ProfileExists {
+		t.Fatal("profile still active after data delete")
+	}
+	if _, err := os.Stat(coverDir); !os.IsNotExist(err) {
+		t.Fatalf("orphaned cover dir still present, err=%v", err)
+	}
+	if !state.APIKeyPresent {
+		t.Fatal("api key reported missing, want kept")
+	}
+	if stored, err := zk.Get(testKeyringService, testKeyringUser); err != nil || stored != "kept-key" {
+		t.Fatalf("keyring = %q, %v; want key kept", stored, err)
+	}
+}
+
+// Key on, data off: the keyring item and cached key are removed, the profile data is kept.
+func TestClearActiveUserDataDeletesKeyKeepsData(t *testing.T) {
+	app := newTestApp(t)
+	profile := saveTestProfile(t, app)
+	seedTwoSetGame(t, app, profile.ID)
+	coverDir := seedCachedCover(t, app)
+	if err := app.SaveAPIKey("removed-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := app.ClearActiveUserData(false, true)
+	if err != nil {
+		t.Fatalf("ClearActiveUserData(false, true): %v", err)
+	}
+	if _, err := zk.Get(testKeyringService, testKeyringUser); !errors.Is(err, zk.ErrNotFound) {
+		t.Fatalf("keyring get after delete err = %v, want not found", err)
+	}
+	if state.APIKeyPresent || state.APIKeyError != "" {
+		t.Fatalf("state api key = present %v err %q, want missing without error", state.APIKeyPresent, state.APIKeyError)
+	}
+	if key, present, keyErr := cachedAPIKeyState(app); key != "" || present || keyErr != "" {
+		t.Fatalf("cache = key %q present %v err %q, want reset", key, present, keyErr)
+	}
+	if _, err := app.requireAPIKey(); !errors.Is(err, keyring.ErrMissing) {
+		t.Fatalf("requireAPIKey err = %v, want ErrMissing", err)
+	}
+	if state.ProfileExists {
+		t.Fatal("profile still active after deactivate")
+	}
+	if game, err := app.repo.ProfileGame(profile.ID, 10, 0); err != nil || !game.Exists {
+		t.Fatalf("profile game = %+v, %v; want kept", game, err)
+	}
+	if _, err := os.Stat(filepath.Join(coverDir, "library_600x900.jpg")); err != nil {
+		t.Fatalf("cached cover file removed: %v", err)
+	}
+}
+
+// Both flags on: the profile data, its cached images and the key are all removed.
+func TestClearActiveUserDataDeletesDataAndKey(t *testing.T) {
+	app := newTestApp(t)
+	profile := saveTestProfile(t, app)
+	seedTwoSetGame(t, app, profile.ID)
+	coverDir := seedCachedCover(t, app)
+	if err := app.SaveAPIKey("removed-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := app.ClearActiveUserData(true, true)
+	if err != nil {
+		t.Fatalf("ClearActiveUserData(true, true): %v", err)
+	}
+	if state.ProfileExists {
+		t.Fatal("profile still active after data delete")
+	}
+	if _, err := os.Stat(coverDir); !os.IsNotExist(err) {
+		t.Fatalf("orphaned cover dir still present, err=%v", err)
+	}
+	if _, err := zk.Get(testKeyringService, testKeyringUser); !errors.Is(err, zk.ErrNotFound) {
+		t.Fatalf("keyring get after delete err = %v, want not found", err)
+	}
+	if state.APIKeyPresent {
+		t.Fatal("api key still reported present after key delete")
+	}
+}
+
+// A failed key delete returns the error and changes nothing: profile, data, cover and key cache stay as they were.
+func TestClearActiveUserDataKeyDeleteErrorChangesNothing(t *testing.T) {
+	const sentinel = "SENTINEL"
+	backendErr := errors.New("secret service locked")
+	for _, deleteProfileData := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deleteProfileData=%v", deleteProfileData), func(t *testing.T) {
+			app := newTestApp(t)
+			profile := saveTestProfile(t, app)
+			seedTwoSetGame(t, app, profile.ID)
+			coverDir := seedCachedCover(t, app)
+			if err := app.SaveAPIKey(sentinel + "-key"); err != nil {
+				t.Fatal(err)
+			}
+			prev := deleteSteamAPIKey
+			deleteSteamAPIKey = func() error { return fmt.Errorf("delete api key: %w", backendErr) }
+			t.Cleanup(func() { deleteSteamAPIKey = prev })
+
+			_, err := app.ClearActiveUserData(deleteProfileData, true)
+			if !errors.Is(err, backendErr) {
+				t.Fatalf("ClearActiveUserData err = %v, want backend error", err)
+			}
+			if strings.Contains(err.Error(), sentinel) {
+				t.Fatalf("error text %q contains the key", err.Error())
+			}
+			if active, err := app.repo.ActiveProfile(); err != nil || active == nil || active.ID != profile.ID {
+				t.Fatalf("active profile = %#v, %v; want unchanged profile %d", active, err, profile.ID)
+			}
+			if game, err := app.repo.ProfileGame(profile.ID, 10, 0); err != nil || !game.Exists {
+				t.Fatalf("profile game = %+v, %v; want kept", game, err)
+			}
+			if _, err := os.Stat(filepath.Join(coverDir, "library_600x900.jpg")); err != nil {
+				t.Fatalf("cached cover file removed: %v", err)
+			}
+			if key, present, keyErr := cachedAPIKeyState(app); key != sentinel+"-key" || !present || keyErr != "" {
+				t.Fatalf("cache = key %q present %v err %q, want unchanged", key, present, keyErr)
+			}
+			if stored, err := zk.Get(testKeyringService, testKeyringUser); err != nil || stored != sentinel+"-key" {
+				t.Fatalf("keyring = %q, %v; want key kept", stored, err)
+			}
+		})
+	}
+}
+
+// Deactivated profile: the same SteamID64 saved again re-activates it with its games intact and without a sync.
+// The keyring is empty, so the post-save sync returns ErrMissing and starts nothing.
+func TestClearActiveUserDataReconnectRestoresKeptProfile(t *testing.T) {
+	app := newTestApp(t)
+	profile := saveTestProfile(t, app)
+	seedTwoSetGame(t, app, profile.ID)
+
+	if _, err := app.ClearActiveUserData(false, false); err != nil {
+		t.Fatalf("ClearActiveUserData(false, false): %v", err)
+	}
+	state, err := app.SaveProfile(ProfilePreview{SteamID64: testSteamID, DisplayName: "Tester"})
+	if err != nil {
+		t.Fatalf("SaveProfile: %v", err)
+	}
+	if state.Profile == nil || state.Profile.ID != profile.ID {
+		t.Fatalf("profile after reconnect = %#v, want profile %d", state.Profile, profile.ID)
+	}
+	if state.SyncInProgress {
+		t.Fatal("sync started on reconnect, want none")
+	}
+	if state.Dashboard == nil || state.Dashboard.LatestSyncRun != nil {
+		t.Fatalf("dashboard latest sync run = %#v, want none", state.Dashboard)
+	}
+	if game, err := app.repo.ProfileGame(profile.ID, 10, 0); err != nil || !game.Exists {
+		t.Fatalf("profile game after reconnect = %+v, %v; want restored", game, err)
+	}
+}
+
+// After the key is deleted, a new key can be saved and is used as the cached key again.
+func TestClearActiveUserDataAllowsSaveAPIKeyAfterKeyDeleted(t *testing.T) {
+	app := newTestApp(t)
+	saveTestProfile(t, app)
+	if err := app.SaveAPIKey("first-key"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.ClearActiveUserData(false, true); err != nil {
+		t.Fatalf("ClearActiveUserData(false, true): %v", err)
+	}
+
+	if err := app.SaveAPIKey("second-key"); err != nil {
+		t.Fatalf("SaveAPIKey after key delete: %v", err)
+	}
+	if key, present, keyErr := cachedAPIKeyState(app); key != "second-key" || !present || keyErr != "" {
+		t.Fatalf("cache = key %q present %v err %q, want second key", key, present, keyErr)
+	}
+	if stored, err := zk.Get(testKeyringService, testKeyringUser); err != nil || stored != "second-key" {
+		t.Fatalf("keyring = %q, %v; want second key", stored, err)
+	}
+}
+
+// The key is deleted first; then the data step fails. The error is returned, the key is gone from the keyring and the
+// cache, and the profile data and cached cover are intact. The failure is a trigger that aborts the profile delete
+// inside ClearProfileData's transaction, so that transaction rolls back.
+func TestClearActiveUserDataDataStepFailureAfterKeyDeleted(t *testing.T) {
+	app := newTestApp(t)
+	profile := saveTestProfile(t, app)
+	seedTwoSetGame(t, app, profile.ID)
+	coverDir := seedCachedCover(t, app)
+	if err := app.SaveAPIKey("removed-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open("sqlite3", "file:"+app.paths.DB+"?_busy_timeout=5000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(`create trigger block_profile_delete before delete on profiles begin select raise(abort, 'profile delete blocked'); end`); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = app.ClearActiveUserData(true, true)
+	if err == nil || !strings.Contains(err.Error(), "profile delete blocked") {
+		t.Fatalf("ClearActiveUserData err = %v, want the data step failure", err)
+	}
+	if _, err := zk.Get(testKeyringService, testKeyringUser); !errors.Is(err, zk.ErrNotFound) {
+		t.Fatalf("keyring get after failed data step err = %v, want key deleted", err)
+	}
+	if key, present, keyErr := cachedAPIKeyState(app); key != "" || present || keyErr != "" {
+		t.Fatalf("cache = key %q present %v err %q, want key reset", key, present, keyErr)
+	}
+	if _, err := app.requireAPIKey(); !errors.Is(err, keyring.ErrMissing) {
+		t.Fatalf("requireAPIKey err = %v, want ErrMissing (missing-key screen)", err)
+	}
+	if active, err := app.repo.ActiveProfile(); err != nil || active == nil || active.ID != profile.ID {
+		t.Fatalf("active profile = %#v, %v; want profile %d kept", active, err, profile.ID)
+	}
+	if game, err := app.repo.ProfileGame(profile.ID, 10, 0); err != nil || !game.Exists {
+		t.Fatalf("profile game = %+v, %v; want kept", game, err)
+	}
+	if _, err := os.Stat(filepath.Join(coverDir, "library_600x900.jpg")); err != nil {
+		t.Fatalf("cached cover file removed: %v", err)
 	}
 }
 
@@ -1405,5 +1712,274 @@ func TestSyncNowStartsSyncAndRejectsSecondStart(t *testing.T) {
 	}
 	if final == nil || final.Status != "failed" {
 		t.Fatalf("latest sync run = %+v, want failed", final)
+	}
+}
+
+// countSteamKeyReads wraps readSteamAPIKey so that reads are counted. The real read path still runs.
+func countSteamKeyReads(t *testing.T) *atomic.Int32 {
+	t.Helper()
+	var reads atomic.Int32
+	prev := readSteamAPIKey
+	readSteamAPIKey = func() (string, error) {
+		reads.Add(1)
+		return prev()
+	}
+	t.Cleanup(func() { readSteamAPIKey = prev })
+	return &reads
+}
+
+// cachedAPIKeyState returns the cached key fields under the lock.
+func cachedAPIKeyState(app *App) (key string, present bool, keyErr string) {
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	return app.steamAPIKey, app.apiKeyPresent, app.apiKeyError
+}
+
+func TestSaveAPIKeyStoresKeyAndUpdatesCacheWithoutExtraRead(t *testing.T) {
+	app := newTestApp(t)
+	reads := countSteamKeyReads(t)
+	before := reads.Load()
+
+	if err := app.SaveAPIKey("  first-key \t"); err != nil {
+		t.Fatalf("SaveAPIKey: %v", err)
+	}
+	if n := reads.Load() - before; n != 0 {
+		t.Fatalf("SaveAPIKey read the keyring %d times, want 0: the cache is set from the store", n)
+	}
+	key, present, keyErr := cachedAPIKeyState(app)
+	if key != "first-key" || !present || keyErr != "" {
+		t.Fatalf("cache = key %q present %v err %q, want trimmed key present without error", key, present, keyErr)
+	}
+	state, err := app.GetAppState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.APIKeyPresent || state.APIKeyError != "" {
+		t.Fatalf("GetAppState api key = present %v err %q, want present without error", state.APIKeyPresent, state.APIKeyError)
+	}
+	stored, err := zk.Get(testKeyringService, testKeyringUser)
+	if err != nil || stored != "first-key" {
+		t.Fatalf("keyring = %q, %v; want first-key", stored, err)
+	}
+}
+
+func TestSaveAPIKeyReplacesExistingKey(t *testing.T) {
+	app := newTestAppWithKey(t, "old-key")
+
+	if err := app.SaveAPIKey("new-key"); err != nil {
+		t.Fatalf("SaveAPIKey: %v", err)
+	}
+	key, present, keyErr := cachedAPIKeyState(app)
+	if key != "new-key" || !present || keyErr != "" {
+		t.Fatalf("cache = key %q present %v err %q, want new-key present without error", key, present, keyErr)
+	}
+	stored, err := zk.Get(testKeyringService, testKeyringUser)
+	if err != nil || stored != "new-key" {
+		t.Fatalf("keyring = %q, %v; want new-key", stored, err)
+	}
+}
+
+// SaveAPIKey must not start a sync. A profile is active and the key is set, so a started sync would reach the Steam
+// stub; the stub must receive nothing and the sync flags must stay idle.
+func TestSaveAPIKeyDoesNotStartSync(t *testing.T) {
+	app := newTestApp(t)
+	saveTestProfile(t, app)
+	stub, received := newSteamStub(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	})
+	setSteamBaseURL(app, stub.URL)
+
+	if err := app.SaveAPIKey("fixture-steam-key"); err != nil {
+		t.Fatalf("SaveAPIKey: %v", err)
+	}
+	app.mu.Lock()
+	inProgress, cancel := app.syncInProgress, app.syncCancel
+	app.mu.Unlock()
+	if inProgress || cancel != nil {
+		t.Fatalf("SaveAPIKey started a sync: syncInProgress %v syncCancel set %v", inProgress, cancel != nil)
+	}
+	if reqs := received(); len(reqs) != 0 {
+		t.Fatalf("SaveAPIKey sent %d Steam requests, want none", len(reqs))
+	}
+}
+
+// A failed store leaves the cached key state as it was: a working old key stays present, and an earlier key error
+// stays reported.
+func TestSaveAPIKeyKeyringErrorLeavesCacheUnchanged(t *testing.T) {
+	t.Run("working old key stays present", func(t *testing.T) {
+		app := newTestAppWithKey(t, "old-key")
+		zk.MockInitWithError(errors.New("secret service locked"))
+
+		err := app.SaveAPIKey("new-key")
+		if err == nil || !strings.Contains(err.Error(), "secret service locked") {
+			t.Fatalf("SaveAPIKey err = %v, want the keyring error", err)
+		}
+		key, present, keyErr := cachedAPIKeyState(app)
+		if key != "old-key" || !present || keyErr != "" {
+			t.Fatalf("cache = key %q present %v err %q, want old-key present without error", key, present, keyErr)
+		}
+	})
+
+	t.Run("earlier key error stays reported", func(t *testing.T) {
+		zk.MockInitWithError(errors.New("secret service unavailable"))
+		app := openTestApp(t)
+		zk.MockInitWithError(errors.New("secret service locked"))
+
+		if err := app.SaveAPIKey("new-key"); err == nil {
+			t.Fatal("SaveAPIKey err = nil, want keyring error")
+		}
+		key, present, keyErr := cachedAPIKeyState(app)
+		if key != "" || present || keyErr != "secret service unavailable" {
+			t.Fatalf("cache = key %q present %v err %q, want no key and the earlier error", key, present, keyErr)
+		}
+	})
+}
+
+// Profile-switch flow: with no active profile the saved key is what the next key-using call reads. ValidateProfile
+// sends it to Steam.
+func TestSaveAPIKeyWithoutActiveProfileIsUsedByNextRequests(t *testing.T) {
+	app := newTestApp(t)
+	if err := app.SaveAPIKey("profile-b-key"); err != nil {
+		t.Fatalf("SaveAPIKey: %v", err)
+	}
+	key, err := app.requireAPIKey()
+	if err != nil || key != "profile-b-key" {
+		t.Fatalf("requireAPIKey = %q, %v; want profile-b-key", key, err)
+	}
+
+	stub, received := newSteamStub(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"response":{"players":[{"steamid":%q,"personaname":"Tester"}]}}`, testSteamID)
+	})
+	setSteamBaseURL(app, stub.URL)
+	if _, err := app.ValidateProfile(testSteamID); err != nil {
+		t.Fatalf("ValidateProfile: %v", err)
+	}
+	reqs := received()
+	if len(reqs) != 1 || reqs[0].query.Get("key") != "profile-b-key" {
+		t.Fatalf("Steam requests = %+v, want one request with the saved key", reqs)
+	}
+}
+
+// Init failure: SaveAPIKey returns the init error, stores nothing, and the error does not contain the input.
+func TestSaveAPIKeyInitFailureStoresNothing(t *testing.T) {
+	// A regular file where the data directory's parent should be makes appdata.Ensure fail.
+	blocked := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", blocked)
+	t.Cleanup(logging.Fallback)
+	zk.MockInit()
+
+	var stores atomic.Int32
+	prevStore := storeSteamAPIKey
+	storeSteamAPIKey = func(key string) (string, error) {
+		stores.Add(1)
+		return prevStore(key)
+	}
+	t.Cleanup(func() { storeSteamAPIKey = prevStore })
+
+	app := &App{}
+	err := app.SaveAPIKey("  SENTINELkey  ")
+	if err == nil {
+		t.Fatal("SaveAPIKey err = nil after failed init, want error")
+	}
+	if strings.Contains(err.Error(), "SENTINEL") {
+		t.Fatalf("error text %q contains the key", err.Error())
+	}
+	if n := stores.Load(); n != 0 {
+		t.Fatalf("store called %d times after failed init, want 0", n)
+	}
+}
+
+// SaveAPIKey error paths that the App reaches keep the key out of the error text. Each path gets its own input so
+// that it is reached; padding is trimmed before the store, so the assertion uses the bare sentinel. The keyring
+// package tests cover the invalid-character, read-back, and mismatch paths in depth.
+func TestSaveAPIKeyErrorsNeverContainTheKey(t *testing.T) {
+	const sentinel = "SENTINEL"
+	backendErr := errors.New("boom")
+	tests := []struct {
+		name  string
+		input string
+		setup func()
+	}{
+		{"invalid input passes through", "SENTINEL\u200bkey", zk.MockInit},
+		{"store error", "  SENTINELkey  ", func() { zk.MockInitWithError(backendErr) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.setup()
+			app := openTestApp(t)
+			err := app.SaveAPIKey(tt.input)
+			if err == nil {
+				t.Fatal("SaveAPIKey err = nil, want an error")
+			}
+			if strings.Contains(err.Error(), sentinel) {
+				t.Fatalf("error text %q contains the key", err.Error())
+			}
+		})
+	}
+}
+
+// Ordering: a refresh that read the old key before a save must not overwrite the saved key in the cache. The fake
+// read blocks until released, so the refresh holds keyMu while the save waits behind it. Fakes are installed after
+// openTestApp, because ensureInitialized calls the read fake. The fake maps are not used, so there is no race.
+func TestSaveAPIKeyWaitsForInFlightRefresh(t *testing.T) {
+	app := newTestApp(t)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	storeCalled := make(chan struct{})
+	var releaseOnce, enteredOnce, storeOnce sync.Once
+	closeRelease := func() { releaseOnce.Do(func() { close(release) }) }
+	defer closeRelease()
+
+	var reads, stores atomic.Int32
+	prevRead, prevStore := readSteamAPIKey, storeSteamAPIKey
+	t.Cleanup(func() {
+		readSteamAPIKey = prevRead
+		storeSteamAPIKey = prevStore
+	})
+	readSteamAPIKey = func() (string, error) {
+		reads.Add(1)
+		enteredOnce.Do(func() { close(entered) })
+		<-release
+		return "old", nil
+	}
+	storeSteamAPIKey = func(key string) (string, error) {
+		stores.Add(1)
+		storeOnce.Do(func() { close(storeCalled) })
+		return key, nil
+	}
+
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- app.refreshAPIKey() }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refreshAPIKey did not read the keyring")
+	}
+
+	saveDone := make(chan error, 1)
+	go func() { saveDone <- app.SaveAPIKey("new") }()
+	select {
+	case <-storeCalled:
+		t.Fatal("SaveAPIKey stored while refreshAPIKey held the key lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	closeRelease()
+	if err := <-refreshDone; err != nil {
+		t.Fatalf("refreshAPIKey: %v", err)
+	}
+	if err := <-saveDone; err != nil {
+		t.Fatalf("SaveAPIKey: %v", err)
+	}
+	key, _, _ := cachedAPIKeyState(app)
+	if key != "new" {
+		t.Fatalf("cached key = %q, want new: the refresh overwrote the save", key)
+	}
+	if reads.Load() != 1 || stores.Load() != 1 {
+		t.Fatalf("reads = %d stores = %d, want 1 and 1", reads.Load(), stores.Load())
 	}
 }

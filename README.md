@@ -21,7 +21,7 @@ This app was born for personal use and was entirely vibecoded. I have entry-leve
 - **Achievement sets**: each achievement set of a game (base game, named sets, DLC sets) is its own card, completed and disabled independently.
 - **Per-set actions** to mark a set as previously completed, flag missing achievements as DLC-related, disable a set, or re-enable it.
 - **Local cover cache** using Steam library capsule images taken from the owned-games list; the store API is only queried for DLC sets and for base games without a listed cover, with hero, header and main capsule fallbacks. DLC sets without any image of their own show the parent game's cover.
-- **Profile-scoped data clear** that removes the active profile, tracked games, owned-game playtime and purchase status, achievements, sync history, manual flags, and cached covers while keeping the Secret Service key and logs.
+- **Remove active profile** from Settings: by default it only disconnects the profile and keeps its data. Two switches, both off by default, also delete the profile's data (tracked games, achievements, sync history, settings, and cached covers) and the saved API key. Logs are never removed.
 - **Local SQLite storage** with migration backups, WAL mode, and app-local log rotation.
 
 ## Tech stack
@@ -55,12 +55,11 @@ The app follows the Wails v3 service model instead of the v2 `wails.Run` layout:
 - Linux desktop session.
 - GTK4 and WebKitGTK 6.0 runtime libraries compatible with the build. This project uses Wails v3 on Linux, which renders through GTK4 + WebKitGTK 6.0.
 - Linux Secret Service provider, such as GNOME Keyring or another compatible keyring service.
-- `secret-tool` from libsecret tools to store the Steam Web API key.
-- Steam Web API key.
+- Steam Web API key, pasted into the app on first launch.
 - Network access to Steam Web API and Steam static asset hosts.
 - Public Steam profile game details for the profile being tracked.
 
-Package names differ by distribution. On Debian/Ubuntu-style systems, look for packages similar to `libgtk-4-1`, `libwebkitgtk-6.0-4`, `gnome-keyring`, and `libsecret-tools`.
+Package names differ by distribution. On Debian/Ubuntu-style systems, look for packages similar to `libgtk-4-1`, `libwebkitgtk-6.0-4`, and `gnome-keyring`.
 
 ### Development version
 
@@ -82,7 +81,7 @@ Use `wails3 doctor` to check local Wails dependencies.
 
 ### 1. Install runtime dependencies
 
-Install GTK/WebKit runtime libraries, a Secret Service provider, and `secret-tool` for your distribution.
+Install GTK/WebKit runtime libraries and a Secret Service provider for your distribution.
 
 ### 2. Install the app
 
@@ -98,20 +97,11 @@ A bare `bin/steam-achievement-tracker` from `wails3 build` runs fine but has no 
 
 Uninstalling through the package manager keeps `~/.steam-achievement-tracker` and the Secret Service API key.
 
-### 3. Store the Steam Web API key
+### 3. Enter the Steam Web API key
 
-Store the key in Secret Service:
+Generate a Steam Web API key from Steam's developer page: <https://steamcommunity.com/dev/apikey>. When Steam asks for a domain name, enter `localhost`. The key field on the setup screen has a **Get a Steam Web API key** link that opens the same page in your browser.
 
-Generate a Steam Web API key from Steam's developer page: <https://steamcommunity.com/dev/apikey>.
-
-```sh
-secret-tool store \
-  --label="Steam Achievement Tracker - Steam Web API Key" \
-  service steam-achievement-tracker \
-  username steam-web-api-key
-```
-
-Paste the Steam Web API key when prompted by `secret-tool`. The app reads only this Secret Service item.
+Start the app (step 4), paste the key into the key field on the setup screen, and click **Save key**. Your keyring may ask to unlock first. The app stores it in Secret Service under `service=steam-achievement-tracker`, `username=steam-web-api-key`, and reads only that item. Saving does not start a sync. Keys stored earlier with `secret-tool` under the same names keep working; no migration is needed.
 
 ### 4. Launch
 
@@ -119,7 +109,7 @@ Paste the Steam Web API key when prompted by `secret-tool`. The app reads only t
 steam-achievement-tracker
 ```
 
-If the API key is missing, the app opens to the key setup screen and shows the same `secret-tool` command.
+If the API key is missing, the app opens to the key setup screen. Paste the key and click **Save key**. **Retry key lookup** re-reads Secret Service, for example after storing the key another way.
 
 ## Build & run
 
@@ -151,7 +141,7 @@ VERSION=0.0.0-dev wails3 package
 
 The package version comes only from the `VERSION` environment variable, which `build/linux/nfpm/nfpm.yaml` expands (`version: ${VERSION}`). No version is stored in the repository. Without `VERSION`, packaging still succeeds but produces a wrong version (the deb shows `0.0.0~rc0-1`), so always set it. Use the version without the `v` prefix, for example `1.2.3` or `1.2.3-rc.1`.
 
-The deb, rpm, and Arch packages install the binary to `/usr/local/bin` and declare the GTK4 and WebKitGTK 6.0 runtime packages as dependencies (see `build/linux/nfpm/nfpm.yaml`). They do not depend on a Secret Service provider or `secret-tool`; install those separately. The AppImage step downloads `linuxdeploy`, so it needs network access. Use `wails3 task --list` to see every available task.
+The deb, rpm, and Arch packages install the binary to `/usr/local/bin` and declare the GTK4 and WebKitGTK 6.0 runtime packages as dependencies (see `build/linux/nfpm/nfpm.yaml`). They do not depend on a Secret Service provider; install one separately. The AppImage step downloads `linuxdeploy`, so it needs network access. Use `wails3 task --list` to see every available task.
 
 ### Releasing
 
@@ -241,7 +231,9 @@ Distrust any run with more than about 5% timed-out mutants; rerun with a higher 
 
 ### Set up the API key
 
-Before sync can run, store a Steam Web API key in Secret Service using the command in [Install](#3-store-the-steam-web-api-key). If the key is missing, the app shows the setup command and a **Retry key lookup** button. Store the key, then click **Retry key lookup**.
+Before sync can run, enter a Steam Web API key in the app; see [Install](#3-enter-the-steam-web-api-key). If the key is missing, the app shows the key setup screen with a key field, a **Get a Steam Web API key** link, and the reminder to enter `localhost` as the domain. Paste the key and click **Save key**.
+
+Settings does not change the key. If the key is wrong and no profile is active, the profile setup screen has a **Replace key** button that opens the same field. Once a profile is active, switch keys by removing the profile with **Delete API key** (see [Remove the active profile](#remove-the-active-profile)); the app then shows the key screen. After you save the new key, reconnect the profile; its data is kept unless you also turned on **Delete profile data**.
 
 ![API key setup](docs/setup-apikey.gif)
 
@@ -405,11 +397,18 @@ Open **Settings** to choose what a sync of the active profile loads. Settings ar
 
 Changes apply on the next sync and do not start one. Turning an option off removes the games it excluded from the library on that sync, so they may be marked as no longer owned or disabled.
 
-### Clear active user data
+### Remove the active profile
 
-Open **Settings** and click **Clear data**. The app asks you to type the shown profile identifier before clearing. This removes the active profile, tracked games, owned-game playtime and purchase status, achievement data, sync history, manual flags, profile-scoped tags, library sync settings, and cached covers for that profile. It does not remove the Secret Service API key or logs. Re-adding the profile starts with both library sync options on.
+Open **Settings** and click **Remove profile** in the **Remove active profile** section. The dialog asks you to type the value shown in it (the profile's SteamID64) before the button becomes active. Two switches, both off by default, choose what else is deleted:
 
-![Clear active user data](docs/clear-data.gif)
+- **Delete profile data** removes the profile's tracked games, owned-game playtime and purchase status, achievement data, sync history, manual flags, profile-scoped tags, library sync settings, and cached covers.
+- **Delete API key** removes the Steam Web API key from Secret Service. The app then shows the key screen, and sync stays unavailable until you enter a key again.
+
+The confirm button reads **Remove profile**, **Remove profile and data**, **Remove profile and key**, or **Remove profile, data and key**, matching the switches you turned on. Logs are never removed.
+
+With both switches off, the profile is only disconnected: its data stays under `~/.steam-achievement-tracker` and the key is kept. Connecting the same SteamID64 again restores that data, and a sync starts. Data from a disconnected profile stays on disk until you reconnect that profile and remove it with **Delete profile data**. If you deleted the profile data, connecting the profile again starts with both library sync options on.
+
+![Remove active profile](docs/clear-data.gif)
 
 ## Data
 
@@ -434,21 +433,21 @@ All app-owned files live under `~/.steam-achievement-tracker` unless noted. Dire
 | `~/.steam-achievement-tracker/logs/` | Logging initialization | Log directory. |
 | `~/.steam-achievement-tracker/logs/app.log` | Logging initialization | Current application log: app messages plus Wails warnings and errors. |
 | `~/.steam-achievement-tracker/logs/app-*.log` | Log rotation | Rotated logs; max size is 5 MB with up to 5 backups. |
-| Secret Service item `service=steam-achievement-tracker`, `username=steam-web-api-key` | User via `secret-tool` | Steam Web API key. Stored outside the app data directory by the desktop keyring. |
+| Secret Service item `service=steam-achievement-tracker`, `username=steam-web-api-key` | Entered in the app (setup screens) | Steam Web API key. Stored outside the app data directory by the desktop keyring. The app deletes it only through **Delete API key** in the Remove profile dialog. |
 
 ### steam-achievement-tracker.db Schema
 
 | Table | Columns | Notes |
 | --- | --- | --- |
-| `settings` | `key` PK, `value` | App settings. Stores `active_profile_id`. |
+| `settings` | `key` PK, `value` | App settings. Stores `active_profile_id`; an empty value means no profile is active (after **Remove profile**). |
 | `schema_migrations` | `version` PK, `name`, `applied_at` | Applied DB migrations. Current schema version is `14`. |
 | `game_sets` | `appid`, `groupid`, `name`, `dlcappid`, `sort_order`, `updated_at`; PK (`appid`, `groupid`) | Achievement set catalog per game. Group `0` is the base set; `dlcappid` ties a set to a DLC app. |
 | `cover_images` | `image_appid` PK, `kind`, `file_name`, `path`, `source_url`, `checked_at`, `downloaded_at` | Cover image per image app id (the game, or the DLC for DLC sets). `kind` is `library`, `hero`, `header` or `main`. |
-| `profiles` | `id` PK, `steam_id64` unique, `display_name`, `avatar_url`, `created_at`, `updated_at`, `last_synced_at` | Steam profiles known to the app. |
+| `profiles` | `id` PK, `steam_id64` unique, `display_name`, `avatar_url`, `created_at`, `updated_at`, `last_synced_at` | Steam profiles known to the app. A profile removed without **Delete profile data** keeps its row, so reconnecting the same SteamID64 restores it. |
 | `games` | `appid` PK, `name`, `playtime_forever`, `purchased`, `has_achievements`, `achievement_status`, `disabled`, `disabled_reason`, `cover_path`, `cover_source_url`, `cover_checked_at`, `cover_downloaded_at`, `created_at`, `updated_at` | Shared Steam app metadata and cover cache metadata. `playtime_forever` and `purchased` are legacy columns (migrations 11 and 12): app code no longer reads or writes them; per-profile values are in `profile_owned_games`. `disabled`/`disabled_reason` are legacy/global fields; current manual disables are profile-scoped. |
 | `profile_games` | `profile_id`, `appid`, `groupid`, `total_achievements`, `unlocked_achievements`, `completion_percent`, `missing_avg_unlock`, `suggestion_score`, `is_completed`, `was_completed`, `newly_incomplete`, `sync_warning`, `last_error`, `last_error_at`, `last_synced_at`, `dlc_not_owned`; PK (`profile_id`, `appid`, `groupid`) | Per-profile entry progress and latest warning state. `dlc_not_owned` is `1` for a DLC-bound set the profile does not own. |
 | `profile_owned_games` | `profile_id`, `appid`, `playtime_forever`, `purchased`, `vetted`, `updated_at`; PK (`profile_id`, `appid`) | Per-profile playtime, purchase status and vetted status for each owned game (migrations 12 and 14). `purchased` is `1` when the game is in the profile's purchased list. `vetted` is `0` when Steam returns the app only with unvetted apps included; it defaults to `1`. |
-| `profile_library_settings` | `profile_id` PK (FK `profiles`), `include_unvetted_apps`, `include_played_free_games`, `updated_at` | Per-profile library sync options (migration 13). `1` or `0`; a profile with no row uses both on. Removed with its profile by Clear data. |
+| `profile_library_settings` | `profile_id` PK (FK `profiles`), `include_unvetted_apps`, `include_played_free_games`, `updated_at` | Per-profile library sync options (migration 13). `1` or `0`; a profile with no row uses both on. Removed with its profile by **Delete profile data**. |
 | `achievements` | `appid`, `apiname`, `global_percent`, `updated_at`; PK (`appid`, `apiname`) | Per-game achievement catalog with global unlock percentage. |
 | `profile_achievements` | `profile_id`, `appid`, `apiname`, `unlocked`, `unlock_time`, `updated_at`; PK (`profile_id`, `appid`, `apiname`) | Per-profile achievement unlock state. |
 | `game_snapshots` | `id` PK, `profile_id`, `appid`, `total_achievements`, `unlocked_achievements`, `completion_percent`, `missing_avg_unlock`, `is_completed`, `synced_at` | Historical per-sync progress snapshots. |

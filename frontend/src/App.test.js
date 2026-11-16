@@ -34,7 +34,12 @@ describe('App setup states', () => {
     render(App)
 
     expect(await screen.findByRole('heading', {name: 'Steam Web API key missing'})).toBeInTheDocument()
-    expect(screen.getByText(/secret-tool store/)).toBeInTheDocument()
+    expect(screen.queryByText(/secret-tool/)).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Steam Web API key')).toHaveAttribute('type', 'password')
+    expect(screen.getByText(/Paste your Steam Web API key\. It is stored only in your Secret Service keyring\./)).toBeInTheDocument()
+    expect(screen.queryByText(/Create one at/)).not.toBeInTheDocument()
+    expect(screen.getByRole('link', {name: 'Get a Steam Web API key'})).toHaveAttribute('href', 'https://steamcommunity.com/dev/apikey')
+    expect(screen.getByLabelText('Steam Web API key')).toHaveFocus()
 
     await fireEvent.click(screen.getByRole('button', {name: 'Retry key lookup'}))
 
@@ -79,6 +84,315 @@ describe('App setup states', () => {
   })
 })
 
+// SaveAPIKey is covered here on its own, not in the shared error table below: its error is shown by the key form, App
+// rethrows instead of setting its banner, and no beginAction is involved.
+describe('App API key', () => {
+  const profilePreview = {steamId64: '76561198000000000', displayName: 'Test Player', avatarUrl: ''}
+  const keyField = () => screen.getByLabelText('Steam Web API key')
+  const pendingCall = () => {
+    const pending = {}
+    pending.fn = vi.fn(() => new Promise((resolve) => {
+      pending.resolve = resolve
+    }))
+    return pending
+  }
+
+  test('saves a key from the missing-key screen (trimmed) and moves on to the profile screen', async () => {
+    const saveKey = vi.fn(async () => {})
+    __setWailsMocks({
+      GetAppState: vi.fn().mockResolvedValueOnce(missingKeyState()).mockResolvedValue(profileSetupState()),
+      SaveAPIKey: saveKey
+    })
+    const user = userEvent.setup()
+
+    render(App)
+    await user.type(await screen.findByLabelText('Steam Web API key'), '  steam-key  ')
+    await user.click(screen.getByRole('button', {name: 'Save key'}))
+
+    expect(saveKey).toHaveBeenCalledWith('steam-key')
+    expect(await screen.findByRole('heading', {name: 'Connect your profile'})).toBeInTheDocument()
+  })
+
+  test('a rejected SaveAPIKey is shown once by the key form, clears the input, and keeps the key out of the text', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => missingKeyState()),
+      SaveAPIKey: rejecting()
+    })
+    const user = userEvent.setup()
+
+    render(App)
+    const input = await screen.findByLabelText('Steam Web API key')
+    await user.type(input, 'steam-key')
+    await user.click(screen.getByRole('button', {name: 'Save key'}))
+
+    expect(await screen.findByText(failureMessage)).toBeInTheDocument()
+    expect(screen.getAllByText(failureMessage)).toHaveLength(1)
+    expect(input).toHaveValue('')
+    expect(input).toHaveFocus()
+    expect(document.body.textContent).not.toContain('steam-key')
+    expect(screen.getByRole('heading', {name: 'Steam Web API key missing'})).toBeInTheDocument()
+  })
+
+  test('a failed save that drops focus puts focus back in the key field', async () => {
+    // Submit with Enter so the field keeps focus while it is disabled (jsdom does not blur on disable). The handler
+    // blurs it before rejecting, as WebKit does, so the form must refocus once the field is enabled; focus() on a
+    // still-disabled field does nothing.
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => missingKeyState()),
+      SaveAPIKey: vi.fn(async () => {
+        document.activeElement?.blur()
+        throw new Error(failureMessage)
+      })
+    })
+    const user = userEvent.setup()
+
+    render(App)
+    const input = await screen.findByLabelText('Steam Web API key')
+    await user.type(input, 'steam-key{Enter}')
+
+    expect(await screen.findByText(failureMessage)).toBeInTheDocument()
+    expect(input).toBeEnabled()
+    expect(input).toHaveFocus()
+  })
+
+  test('Retry key lookup and the key form refuse work while a save is pending', async () => {
+    const save = pendingCall()
+    const retry = vi.fn(async () => profileSetupState())
+    __setWailsMocks({
+      GetAppState: vi.fn().mockResolvedValueOnce(missingKeyState()).mockResolvedValue(profileSetupState()),
+      SaveAPIKey: save.fn,
+      RetryAPIKey: retry
+    })
+    const user = userEvent.setup()
+
+    render(App)
+    await user.type(await screen.findByLabelText('Steam Web API key'), 'steam-key')
+    await user.click(screen.getByRole('button', {name: 'Save key'}))
+
+    expect(await screen.findByRole('button', {name: 'Saving…'})).toBeDisabled()
+    expect(keyField()).toBeDisabled()
+    expect(screen.getByRole('button', {name: 'Retry key lookup'})).toBeDisabled()
+    await user.click(screen.getByRole('button', {name: 'Retry key lookup'}))
+    expect(retry).not.toHaveBeenCalled()
+
+    // A submit that reaches the form (what Enter does) is refused while the save is pending.
+    await fireEvent.submit(keyField().closest('form'))
+    expect(save.fn).toHaveBeenCalledOnce()
+
+    save.resolve()
+    expect(await screen.findByRole('heading', {name: 'Connect your profile'})).toBeInTheDocument()
+  })
+
+  test('profile screen: the Replace key form links to the Steam key page', async () => {
+    __setWailsMocks({GetAppState: vi.fn(async () => profileSetupState())})
+    const user = userEvent.setup()
+
+    render(App)
+    await user.click(await screen.findByRole('button', {name: 'Replace key'}))
+
+    expect(screen.getByRole('link', {name: 'Get a Steam Web API key'})).toHaveAttribute('href', 'https://steamcommunity.com/dev/apikey')
+  })
+
+  test('profile screen: Replace key saves, drops the stale preview, keeps the profile input, and Validate works again', async () => {
+    const validate = vi.fn(async () => profilePreview)
+    const saveKey = vi.fn(async () => {})
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => profileSetupState()),
+      ValidateProfile: validate,
+      SaveAPIKey: saveKey
+    })
+    const user = userEvent.setup()
+
+    render(App)
+    const profileInput = await screen.findByPlaceholderText(/SteamID64/)
+    await user.type(profileInput, 'test-player')
+    await user.click(screen.getByRole('button', {name: 'Validate'}))
+    expect(await screen.findByText('Profile found')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', {name: 'Replace key'}))
+    expect(keyField()).toHaveFocus()
+    await user.type(keyField(), 'new-key')
+    await user.click(screen.getByRole('button', {name: 'Save key'}))
+
+    expect(saveKey).toHaveBeenCalledWith('new-key')
+    await waitFor(() => expect(screen.queryByLabelText('Steam Web API key')).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('button', {name: 'Replace key'})).toHaveFocus())
+    expect(screen.queryByText('Profile found')).not.toBeInTheDocument()
+    expect(profileInput).toHaveValue('test-player')
+    expect(screen.getByRole('button', {name: 'Replace key'})).toHaveAttribute('aria-expanded', 'false')
+
+    await user.click(screen.getByRole('button', {name: 'Validate'}))
+    expect(validate).toHaveBeenCalledTimes(2)
+    expect(validate).toHaveBeenLastCalledWith('test-player')
+    expect(await screen.findByText('Profile found')).toBeInTheDocument()
+  })
+
+  test('a successful key save clears an earlier Validate error', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => profileSetupState()),
+      ValidateProfile: vi.fn().mockRejectedValueOnce(new Error('Steam profile not found')),
+      SaveAPIKey: vi.fn(async () => {})
+    })
+    const user = userEvent.setup()
+
+    render(App)
+    await user.type(await screen.findByPlaceholderText(/SteamID64/), 'nobody')
+    await user.click(screen.getByRole('button', {name: 'Validate'}))
+    expect(await screen.findByText('Steam profile not found')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', {name: 'Replace key'}))
+    await user.type(keyField(), 'new-key')
+    await user.click(screen.getByRole('button', {name: 'Save key'}))
+
+    await waitFor(() => expect(screen.queryByText('Steam profile not found')).not.toBeInTheDocument())
+  })
+
+  test('a failed key save on the profile screen keeps the form open with its error', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => profileSetupState()),
+      SaveAPIKey: rejecting()
+    })
+    const user = userEvent.setup()
+
+    render(App)
+    await user.click(await screen.findByRole('button', {name: 'Replace key'}))
+    const input = keyField()
+    await user.type(input, 'bad-key')
+    await user.click(screen.getByRole('button', {name: 'Save key'}))
+
+    expect(await screen.findByText(failureMessage)).toBeInTheDocument()
+    expect(screen.getAllByText(failureMessage)).toHaveLength(1)
+    expect(input).toHaveValue('')
+    expect(input).toHaveFocus()
+    expect(screen.getByRole('button', {name: 'Replace key'})).toHaveAttribute('aria-expanded', 'true')
+    expect(keyField()).toBe(input)
+    expect(document.body.textContent).not.toContain('bad-key')
+  })
+
+  test('Validate and Save and sync are blocked while a key save is pending, including Enter in the profile input', async () => {
+    const validate = vi.fn(async () => profilePreview)
+    const save = pendingCall()
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => profileSetupState()),
+      ValidateProfile: validate,
+      SaveAPIKey: save.fn
+    })
+    const user = userEvent.setup()
+
+    render(App)
+    const profileInput = await screen.findByPlaceholderText(/SteamID64/)
+    await user.type(profileInput, 'test-player')
+    await user.click(screen.getByRole('button', {name: 'Validate'}))
+    expect(await screen.findByText('Profile found')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', {name: 'Replace key'}))
+    await user.type(keyField(), 'new-key')
+    await user.click(screen.getByRole('button', {name: 'Save key'}))
+
+    expect(await screen.findByRole('button', {name: 'Saving…'})).toBeDisabled()
+    expect(screen.getByRole('button', {name: 'Replace key'})).toBeDisabled()
+    expect(screen.getByRole('button', {name: 'Validate'})).toBeDisabled()
+    expect(screen.getByRole('button', {name: 'Save and sync'})).toBeDisabled()
+    await fireEvent.keyDown(profileInput, {key: 'Enter'})
+    expect(validate).toHaveBeenCalledOnce()
+
+    save.resolve()
+    await waitFor(() => expect(screen.queryByLabelText('Steam Web API key')).not.toBeInTheDocument())
+    expect(screen.queryByText('Profile found')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', {name: 'Validate'})).toBeEnabled()
+  })
+
+  test('the profile key form is disabled while a profile is being validated', async () => {
+    let resolveValidate
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => profileSetupState()),
+      ValidateProfile: vi.fn(() => new Promise((resolve) => {
+        resolveValidate = resolve
+      }))
+    })
+    const user = userEvent.setup()
+
+    render(App)
+    await user.type(await screen.findByPlaceholderText(/SteamID64/), 'test-player')
+    await user.click(screen.getByRole('button', {name: 'Validate'}))
+    await user.click(screen.getByRole('button', {name: 'Replace key'}))
+
+    expect(keyField()).toBeDisabled()
+    expect(screen.getByRole('button', {name: 'Save key'})).toBeDisabled()
+
+    resolveValidate(profilePreview)
+    expect(await screen.findByText('Profile found')).toBeInTheDocument()
+    expect(keyField()).toBeEnabled()
+  })
+
+  test('the profile key form is disabled while the profile is being saved', async () => {
+    const saveProfile = pendingCall()
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => profileSetupState()),
+      ValidateProfile: vi.fn(async () => profilePreview),
+      SaveProfile: saveProfile.fn
+    })
+    const user = userEvent.setup()
+
+    render(App)
+    await user.type(await screen.findByPlaceholderText(/SteamID64/), 'test-player')
+    await user.click(screen.getByRole('button', {name: 'Validate'}))
+    expect(await screen.findByText('Profile found')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', {name: 'Save and sync'}))
+    await user.click(screen.getByRole('button', {name: 'Replace key'}))
+
+    expect(keyField()).toBeDisabled()
+    expect(screen.getByRole('button', {name: 'Save key'})).toBeDisabled()
+
+    saveProfile.resolve(dashboardState())
+    expect(await screen.findByRole('heading', {name: 'Dashboard'})).toBeInTheDocument()
+  })
+
+  test('Settings has no Steam key section; key replacement is only on the profile screen', async () => {
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState())})
+    const user = userEvent.setup()
+
+    render(App)
+    await user.click(await screen.findByRole('button', {name: 'Settings'}))
+
+    expect(await screen.findByRole('heading', {name: 'Settings'})).toBeInTheDocument()
+    expect(screen.queryByRole('button', {name: 'Replace key'})).not.toBeInTheDocument()
+    expect(screen.queryByText('Stored in Secret Service.')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Steam Web API key')).not.toBeInTheDocument()
+  })
+
+  test('after Remove profile, the profile screen can replace the key and then validate', async () => {
+    const saveKey = vi.fn(async () => {})
+    const validate = vi.fn(async () => profilePreview)
+    const clear = vi.fn(async () => profileSetupState())
+    __setWailsMocks({
+      GetAppState: vi.fn().mockResolvedValueOnce(dashboardState()).mockResolvedValue(profileSetupState()),
+      ClearActiveUserData: clear,
+      SaveAPIKey: saveKey,
+      ValidateProfile: validate
+    })
+    const user = userEvent.setup()
+
+    render(App)
+    const dialog = await openClearDialog(user)
+    await user.type(within(dialog).getByLabelText(/Type this exact value/), '76561198000000000')
+    await user.click(within(dialog).getByRole('button', {name: 'Remove profile'}))
+    expect(clear).toHaveBeenCalledWith(false, false)
+    expect(await screen.findByRole('heading', {name: 'Connect your profile'})).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', {name: 'Replace key'}))
+    await user.type(keyField(), '  new-key  ')
+    await user.click(screen.getByRole('button', {name: 'Save key'}))
+    expect(saveKey).toHaveBeenCalledWith('new-key')
+    await waitFor(() => expect(screen.queryByLabelText('Steam Web API key')).not.toBeInTheDocument())
+
+    await user.type(screen.getByPlaceholderText(/SteamID64/), 'test-player')
+    await user.click(screen.getByRole('button', {name: 'Validate'}))
+    expect(validate).toHaveBeenCalledWith('test-player')
+    expect(await screen.findByText('Profile found')).toBeInTheDocument()
+  })
+})
+
 describe('App dashboard views', () => {
   test('switches views and filters suggestions by tag', async () => {
     __setWailsMocks({GetAppState: vi.fn(async () => dashboardState())})
@@ -119,7 +433,7 @@ describe('App dashboard views', () => {
     await user.click(screen.getByRole('button', {name: 'Settings'}))
     expect(await screen.findByRole('heading', {name: 'Settings'})).toBeInTheDocument()
     expect(screen.getByText('/tmp/steam-achievement-tracker')).toBeInTheDocument()
-    expect(screen.getByRole('button', {name: 'Clear data'})).toBeInTheDocument()
+    expect(screen.getByRole('button', {name: 'Remove profile'})).toBeInTheDocument()
   })
 
   test('searches within the active view and shows empty states', async () => {
@@ -179,17 +493,18 @@ describe('App dashboard views', () => {
     render(App)
 
     await user.click(await screen.findByRole('button', {name: 'Settings'}))
-    await user.click(screen.getByRole('button', {name: 'Clear data'}))
+    await user.click(screen.getByRole('button', {name: 'Remove profile'}))
 
-    const dialog = screen.getByRole('dialog', {name: 'Clear active user data?'})
+    const dialog = screen.getByRole('dialog', {name: 'Remove active profile?'})
     expect(within(dialog).getByText('76561198000000000')).toBeInTheDocument()
     expect(within(dialog).getByRole('button', {name: 'Copy confirmation value'})).toBeInTheDocument()
-    expect(within(dialog).getByRole('button', {name: 'Clear data'})).toBeDisabled()
+    expect(within(dialog).getByRole('button', {name: 'Remove profile'})).toBeDisabled()
 
     await user.type(within(dialog).getByLabelText(/Type this exact value/), '76561198000000000')
-    await user.click(within(dialog).getByRole('button', {name: 'Clear data'}))
+    await user.click(within(dialog).getByRole('button', {name: 'Remove profile'}))
 
     expect(clear).toHaveBeenCalledOnce()
+    expect(clear).toHaveBeenCalledWith(false, false)
     await waitFor(() => expect(screen.getByRole('heading', {name: 'Connect your profile'})).toBeInTheDocument())
   })
 
@@ -693,7 +1008,7 @@ describe('App Wails call failures', () => {
       act: async (user) => {
         const dialog = await openClearDialog(user)
         await user.type(within(dialog).getByLabelText(/Type this exact value/), '76561198000000000')
-        await user.click(within(dialog).getByRole('button', {name: 'Clear data'}))
+        await user.click(within(dialog).getByRole('button', {name: 'Remove profile'}))
       }
     }
   ]
@@ -899,6 +1214,35 @@ describe('App clear-data confirmation', () => {
     expect(clear).not.toHaveBeenCalled()
   })
 
+  test('Cancel returns focus to the Remove profile button that opened the dialog', async () => {
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState()), ClearActiveUserData: vi.fn()})
+    const user = userEvent.setup()
+
+    render(App)
+    await openClearDialog(user)
+    await user.click(screen.getByRole('button', {name: 'Cancel'}))
+
+    expect(screen.getByRole('button', {name: 'Remove profile'})).toHaveFocus()
+  })
+
+  test('a failed clear re-reads the app state, because the backend may already have deleted the key', async () => {
+    const getState = vi.fn().mockResolvedValueOnce(dashboardState()).mockResolvedValue(missingKeyState())
+    __setWailsMocks({GetAppState: getState, ClearActiveUserData: rejecting()})
+    const user = userEvent.setup()
+
+    render(App)
+    const dialog = await openClearDialog(user)
+    await user.click(within(dialog).getByRole('switch', {name: 'Delete API key'}))
+    await user.type(within(dialog).getByLabelText(/Type this exact value/), '76561198000000000')
+    await user.click(within(dialog).getByRole('button', {name: 'Remove profile and key'}))
+
+    expect(await screen.findByText(failureMessage)).toBeInTheDocument()
+    await waitFor(() => expect(getState).toHaveBeenCalledTimes(2))
+    expect(await screen.findByRole('heading', {name: 'Steam Web API key missing'})).toBeInTheDocument()
+    // The dialog closes on failure so its backdrop does not hide the error banner.
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
   test.each([
     ['the display name', 'Test Player'],
     ['a value with a trailing space', '76561198000000000 '],
@@ -912,11 +1256,11 @@ describe('App clear-data confirmation', () => {
     const dialog = await openClearDialog(user)
     await user.type(within(dialog).getByLabelText(/Type this exact value/), typed)
 
-    expect(within(dialog).getByRole('button', {name: 'Clear data'})).toBeDisabled()
+    expect(within(dialog).getByRole('button', {name: 'Remove profile'})).toBeDisabled()
     await user.keyboard('{Enter}')
 
     expect(clear).not.toHaveBeenCalled()
-    expect(screen.getByRole('dialog', {name: 'Clear active user data?'})).toBeInTheDocument()
+    expect(screen.getByRole('dialog', {name: 'Remove active profile?'})).toBeInTheDocument()
   })
 
   test('Enter confirms once the exact value is typed', async () => {
@@ -930,6 +1274,29 @@ describe('App clear-data confirmation', () => {
 
     expect(clear).toHaveBeenCalledOnce()
     await waitFor(() => expect(screen.getByRole('heading', {name: 'Connect your profile'})).toBeInTheDocument())
+  })
+
+  // Each toggle maps to one boolean argument. Deleting the key returns a state without a key, so the setup screen takes over.
+  test.each([
+    {label: 'both toggles off', toggles: [], args: [false, false], button: 'Remove profile', next: profileSetupState, heading: 'Connect your profile'},
+    {label: 'profile data only', toggles: ['Delete profile data'], args: [true, false], button: 'Remove profile and data', next: profileSetupState, heading: 'Connect your profile'},
+    {label: 'API key only', toggles: ['Delete API key'], args: [false, true], button: 'Remove profile and key', next: missingKeyState, heading: 'Steam Web API key missing'},
+    {label: 'both toggles on', toggles: ['Delete profile data', 'Delete API key'], args: [true, true], button: 'Remove profile, data and key', next: missingKeyState, heading: 'Steam Web API key missing'}
+  ])('sends the toggle choices for $label and shows the screen the returned state selects', async ({toggles, args, button, next, heading}) => {
+    const clear = vi.fn(async () => next())
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState()), ClearActiveUserData: clear})
+    const user = userEvent.setup()
+
+    render(App)
+    const dialog = await openClearDialog(user)
+    for (const name of toggles) await user.click(within(dialog).getByRole('switch', {name}))
+    await user.type(within(dialog).getByLabelText(/Type this exact value/), '76561198000000000')
+    await user.click(within(dialog).getByRole('button', {name: button}))
+
+    expect(clear).toHaveBeenCalledOnce()
+    expect(clear).toHaveBeenCalledWith(...args)
+    expect(await screen.findByRole('heading', {name: heading})).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 })
 

@@ -91,3 +91,28 @@ describe('SettingsView library sync', () => {
     await waitFor(() => expect(unvettedBox()).toBeChecked())
   })
 })
+
+describe('SettingsView danger zone', () => {
+  test('describes removing the profile and the two choices', () => {
+    render(SettingsView, {props: {state: stateWith(undefined)}})
+
+    expect(screen.getByRole('heading', {name: 'Remove active profile'})).toBeInTheDocument()
+    expect(screen.getByText('Remove the active profile. You choose whether to also delete its data and the API key.')).toBeInTheDocument()
+    expect(screen.getByRole('button', {name: 'Remove profile'})).toBeEnabled()
+  })
+
+  test('opens the confirmation through onClearData', async () => {
+    const onClearData = vi.fn()
+    render(SettingsView, {props: {state: stateWith(undefined), onClearData}})
+
+    await fireEvent.click(screen.getByRole('button', {name: 'Remove profile'}))
+
+    expect(onClearData).toHaveBeenCalledOnce()
+  })
+
+  test('shows Removing… and disables the button while clearing', () => {
+    render(SettingsView, {props: {state: stateWith(undefined), clearingData: true}})
+
+    expect(screen.getByRole('button', {name: 'Removing…'})).toBeDisabled()
+  })
+})

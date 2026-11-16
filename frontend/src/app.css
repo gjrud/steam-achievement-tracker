@@ -42,17 +42,6 @@
     margin: 0;
   }
 
-  .setup-panel pre {
-    margin: 20px 0;
-    padding: 16px;
-    border-radius: 14px;
-    background: #09111a;
-    border: 1px solid #26384d;
-    color: #d7e8ff;
-    overflow: auto;
-    white-space: pre-wrap;
-  }
-
   .setup-error {
     color: #f4fbff;
   }
@@ -65,6 +54,9 @@
     flex-wrap: wrap;
   }
 
+  /* Native paint is dropped (WebKitGTK draws its own focus treatment under auto appearance), so every input shows one
+     accent border and a thin ring. Checkboxes reset this in the switch rules (.setting-row input[type="checkbox"]).
+     Unverified in WebKit. */
   input {
     flex: 1 1 340px;
     min-width: 0;
@@ -73,12 +65,35 @@
     border-radius: 12px;
     color: #e8f3ff;
     background: #101c2a;
+    -webkit-appearance: none;
+    appearance: none;
     outline: none;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
   }
 
   input:focus {
     border-color: #66c0f4;
-    box-shadow: 0 0 0 3px rgba(102, 192, 244, 0.16);
+    box-shadow: 0 0 0 2px rgba(102, 192, 244, 0.25);
+  }
+
+  input:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  /* Wraps the API key input. The label grows like the input it holds, so the Save button stays on the same row. */
+  .key-field {
+    flex: 1 1 340px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .key-field .key-label {
+    color: #8ea7be;
+    font-weight: 600;
+    white-space: nowrap;
   }
 
   button {
@@ -613,21 +628,10 @@
     border-radius: 12px;
     color: #e8f3ff;
     background: #101c2a;
-    /* type=search gets native searchfield paint (WebKitGTK adds its own inner ring on focus). Turning it off leaves
-       one focus state: the accent border plus the thin ring below. */
-    -webkit-appearance: none;
-    appearance: none;
-    outline: none;
-    transition: border-color 120ms ease, box-shadow 120ms ease;
   }
 
-  /* Single accent border and one thin, soft ring, the same accent as the other text fields. No outline is drawn on
-     top, so there is no stacked ring. Keyboard focus is still visible: the border and ring change on focus. */
-  .search-input:focus {
-    border-color: #66c0f4;
-    box-shadow: 0 0 0 2px rgba(102, 192, 244, 0.25);
-  }
-
+  /* type=search: the global input rule drops its native paint and sets the focus ring. These pseudo-elements are the
+     search-only parts (the native decoration and the clear button). */
   .search-input::-webkit-search-decoration,
   .search-input::-webkit-search-cancel-button {
     -webkit-appearance: none;
@@ -694,6 +698,35 @@
   .link-button:hover {
     color: #c7e8fb;
     text-decoration: underline;
+  }
+
+  .key-link {
+    color: #66c0f4;
+    font-size: 13px;
+    font-weight: 800;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .key-link:hover {
+    color: #c7e8fb;
+    text-decoration: underline;
+  }
+
+  .key-link:focus-visible {
+    outline: 2px solid #66c0f4;
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* The key-page link and its domain note share one size. The note sits on its own line under the link. */
+  .key-note {
+    font-size: 13px;
+  }
+
+  .key-hint {
+    display: block;
+    margin-top: 4px;
   }
 
   .tag-filter-list button {
@@ -1120,6 +1153,24 @@
     margin-top: 14px;
   }
 
+  /* Children of the key blocks drop their default paragraph margins; siblings are spaced by one 14px gap. */
+  .api-key-setup > * {
+    margin: 0;
+  }
+
+  .api-key-setup > * + * {
+    margin-top: 14px;
+  }
+
+  .api-key-setup {
+    margin-top: 20px;
+  }
+
+  /* The missing-key screen's retry row follows the key form (or the error line), so it gets its own gap. */
+  .setup-panel > .button-row {
+    margin-top: 14px;
+  }
+
   .setting-row {
     display: flex;
     align-items: flex-start;
@@ -1196,6 +1247,8 @@
     margin: 4px 0 0;
   }
 
+  /* overflow: auto lets a short window scroll the dialog instead of clipping its top edge (grid centring pushes an
+     overflowing child above the viewport, where nothing can scroll to). */
   .modal-backdrop {
     position: fixed;
     inset: 0;
@@ -1203,12 +1256,15 @@
     display: grid;
     place-items: center;
     padding: 20px;
+    overflow: auto;
     background: rgba(3, 8, 14, 0.72);
     backdrop-filter: blur(4px);
   }
 
   .confirm-modal {
     width: min(560px, 100%);
+    max-height: calc(100vh - 40px);
+    overflow: auto;
     padding: 20px;
     border-radius: 20px;
     background: linear-gradient(180deg, #152538, #101b29);
@@ -1217,11 +1273,35 @@
     text-align: left;
   }
 
+  /* Focused on open so Escape and Tab start inside the dialog. The dialog is a container, so it draws no ring. */
+  .confirm-modal:focus {
+    outline: none;
+  }
+
   .confirm-modal-head h2 {
     margin: 0;
     color: #f4fbff;
     font-size: 24px;
     line-height: 1.2;
+  }
+
+  /* States what the confirm button does. The box holds three lines so it does not jump as the text changes. The
+     red-ish accent marks the outcomes that delete something: either switch on. min-height includes the padding
+     (border-box), hence the 16px. */
+  .confirm-outcome {
+    margin: 14px 0 0;
+    min-height: calc(4.5em + 16px);
+    padding: 8px 12px;
+    border-left: 3px solid #2d4560;
+    border-radius: 0 10px 10px 0;
+    background: rgba(45, 69, 96, 0.22);
+    color: #dbe9f6;
+    line-height: 1.5;
+  }
+
+  .confirm-outcome.destructive {
+    border-left-color: #ff9a8e;
+    background: rgba(255, 84, 84, 0.1);
   }
 
   .confirm-token-block {
@@ -1289,6 +1369,7 @@
 
   .confirm-actions {
     display: flex;
+    flex-wrap: wrap;
     justify-content: flex-end;
     gap: 10px;
     margin-top: 18px;
@@ -1476,5 +1557,16 @@
 
     .game-grid {
       grid-template-columns: 1fr;
+    }
+
+    /* Narrow screens: label above the key input, so the input keeps its width. */
+    .key-field {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+
+    .key-field input {
+      flex: 0 0 auto;
     }
   }

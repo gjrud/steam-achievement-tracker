@@ -1,10 +1,11 @@
 const defaultHandlers = {
-  ClearActiveUserData: async () => missingHandler('ClearActiveUserData'),
+  ClearActiveUserData: async (deleteProfileData, deleteAPIKey) => missingHandler('ClearActiveUserData'),
   DisableGame: async () => missingHandler('DisableGame'),
   EnableGame: async () => missingHandler('EnableGame'),
   GetAppState: async () => missingHandler('GetAppState'),
   MarkGamePreviouslyCompleted: async () => missingHandler('MarkGamePreviouslyCompleted'),
   RetryAPIKey: async () => missingHandler('RetryAPIKey'),
+  SaveAPIKey: async () => missingHandler('SaveAPIKey'),
   SaveProfile: async () => missingHandler('SaveProfile'),
   SetLibrarySettings: async () => missingHandler('SetLibrarySettings'),
   SyncNow: async () => missingHandler('SyncNow'),
@@ -27,13 +28,15 @@ export function __resetWailsMocks() {
 }
 
 // Parameter lists mirror the generated bindings exactly; the drift test compares argument counts.
-export const ClearActiveUserData = () => handlers.ClearActiveUserData()
+// Booleans select what else to delete: profile data and the Secret Service API key. Both false keeps everything.
+export const ClearActiveUserData = (deleteProfileData, deleteAPIKey) => handlers.ClearActiveUserData(deleteProfileData, deleteAPIKey)
 // Game actions take (appID, groupID): groupID selects one achievement set of the game.
 export const DisableGame = (appID, groupID) => handlers.DisableGame(appID, groupID)
 export const EnableGame = (appID, groupID) => handlers.EnableGame(appID, groupID)
 export const GetAppState = () => handlers.GetAppState()
 export const MarkGamePreviouslyCompleted = (appID, groupID) => handlers.MarkGamePreviouslyCompleted(appID, groupID)
 export const RetryAPIKey = () => handlers.RetryAPIKey()
+export const SaveAPIKey = (key) => handlers.SaveAPIKey(key)
 export const SaveProfile = (preview) => handlers.SaveProfile(preview)
 export const SetLibrarySettings = (includeUnvettedApps, includePlayedFreeGames) => handlers.SetLibrarySettings(includeUnvettedApps, includePlayedFreeGames)
 export const SyncNow = () => handlers.SyncNow()

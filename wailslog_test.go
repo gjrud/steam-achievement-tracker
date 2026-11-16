@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"log"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -41,5 +44,12 @@ func TestLogWriterForwardsSlogToStdLogOutput(t *testing.T) {
 	}
 	if strings.Contains(first.String(), "after swap") {
 		t.Fatalf("first buffer still receives output after SetOutput: %q", first.String())
+	}
+}
+
+// Wails logs bound-method call arguments, which include the API key, at Debug. The logger must keep Debug disabled.
+func TestWailsLoggerDisablesDebug(t *testing.T) {
+	if newWailsLogger(io.Discard).Enabled(context.Background(), slog.LevelDebug) {
+		t.Fatal("Wails logger enables Debug; bound-call arguments (including the API key) would be logged")
 	}
 }

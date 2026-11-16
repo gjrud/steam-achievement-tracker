@@ -434,7 +434,9 @@ describe('App sync events', () => {
 
   // Each action runs while the dashboard reports a sync. A rejection must leave the banner in place and the
   // dashboard must still follow sync:changed until the run finishes. RetryAPIKey and SaveProfile are not listed:
-  // they render only in setup views, which the dashboard's syncing state never reaches.
+  // they render only in setup views, which the dashboard's syncing state never reaches. SaveAPIKey is not listed
+  // either: its error is shown by the key form, not this banner, and it never calls beginAction, so there is no
+  // banner or read hold to check. Its live-sync behaviour has its own test below.
   const runningOnly = (gamesSynced) => dashboardState({latestSyncRun: syncRun({status: 'running', finishedAt: '', gamesSynced})})
   const cardMenuAction = (label) => async () => {
     await fireEvent.contextMenu(hadesCard())
@@ -539,26 +541,28 @@ describe('App sync events', () => {
   test('a failed clear-data action keeps its banner while later events refresh the sync', async () => {
     const getState = vi.fn()
       .mockResolvedValueOnce(syncingState(1))
-      .mockResolvedValueOnce(finishedState())
+      .mockResolvedValue(finishedState())
     __setWailsMocks({GetAppState: getState, ClearActiveUserData: rejecting()})
 
     render(App)
     await settle()
 
     await fireEvent.click(screen.getByRole('button', {name: 'Settings'}))
-    await fireEvent.click(screen.getByRole('button', {name: 'Clear data'}))
-    const dialog = screen.getByRole('dialog', {name: 'Clear active user data?'})
+    await fireEvent.click(screen.getByRole('button', {name: 'Remove profile'}))
+    const dialog = screen.getByRole('dialog', {name: 'Remove active profile?'})
     await fireEvent.input(within(dialog).getByLabelText(/Type this exact value/), {target: {value: '76561198000000000'}})
-    await fireEvent.click(within(dialog).getByRole('button', {name: 'Clear data'}))
+    await fireEvent.click(within(dialog).getByRole('button', {name: 'Remove profile'}))
     await settle()
     expect(screen.getByText(failureMessage)).toBeInTheDocument()
 
+    // The failed clear re-reads the state once (the backend may have deleted the key first). The banner survives it.
+    expect(getState).toHaveBeenCalledTimes(2)
     await advance(1000)
-    expect(getState).toHaveBeenCalledTimes(1)
+    expect(getState).toHaveBeenCalledTimes(2)
 
     emitSyncChanged()
     await settle()
-    expect(getState).toHaveBeenCalledTimes(2)
+    expect(getState).toHaveBeenCalledTimes(3)
     expect(screen.getByText(failureMessage)).toBeInTheDocument()
   })
 })

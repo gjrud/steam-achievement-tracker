@@ -8,6 +8,7 @@
     GetAppState,
     MarkGamePreviouslyCompleted,
     RetryAPIKey,
+    SaveAPIKey,
     SaveProfile,
     SetLibrarySettings,
     SyncNow,
@@ -41,6 +42,10 @@
   let preview = null
   let validating = false
   let saving = false
+  // savingKey covers a SaveAPIKey call. It lives here (not in the form) so a remounted form still sees it. It is not
+  // a beginAction: the key form only shows on screens where no sync is live, so there are no reads to hold, and a
+  // failed save must leave the banner alone (the form shows its own error).
+  let savingKey = false
   let activeView = 'suggestions'
   let viewSearch = ''
   let activeTagFilter = ''
@@ -188,7 +193,8 @@
 
   async function validateProfile() {
     const input = profileInput.trim()
-    if (!input) return
+    // The Enter key in the profile input calls this directly, so the save guard lives here too, not only on the button.
+    if (!input || savingKey) return
     validating = true
     preview = null
     error = ''
@@ -203,7 +209,7 @@
   }
 
   async function saveProfile() {
-    if (!preview) return
+    if (!preview || savingKey) return
     saving = true
     const token = beginAction()
     try {
@@ -214,6 +220,23 @@
     } finally {
       saving = false
       endAction()
+    }
+  }
+
+  // saveApiKey stores the key with no beginAction (see savingKey for why). On success the stored key changed, so the profile
+  // preview (validated with the old key) is dropped, an earlier Validate error is cleared, and state is re-read. On
+  // failure it rethrows: the form shows the error, and this banner stays untouched.
+  async function saveApiKey(key) {
+    if (savingKey) throw new Error('A save is already in progress')
+    savingKey = true
+    try {
+      await SaveAPIKey(key)
+      preview = null
+      error = ''
+      refreshError = false
+      requestRefresh()
+    } finally {
+      savingKey = false
     }
   }
 
@@ -263,13 +286,15 @@
     clearConfirmInput = ''
   }
 
-  async function confirmClearActiveUserData() {
+  // options comes from the modal: {deleteProfileData, deleteAPIKey}. Deleting the key leaves the returned state without
+  // a key, so the missing-key screen takes over and the modal closes with the dashboard.
+  async function confirmClearActiveUserData(options) {
     if (clearingData || !state?.profile) return
     if (clearConfirmInput !== clearConfirmText) return
     clearingData = true
     const token = beginAction()
     try {
-      const nextState = await ClearActiveUserData()
+      const nextState = await ClearActiveUserData(Boolean(options?.deleteProfileData), Boolean(options?.deleteAPIKey))
       if (applyActionState(token, nextState)) {
         activeView = 'suggestions'
         activeTagFilter = ''
@@ -280,6 +305,12 @@
       }
     } catch (err) {
       if (token === stateRequestToken) error = formatMessage(err)
+      // Close the dialog so the error banner is not hidden behind its backdrop.
+      clearConfirmOpen = false
+      clearConfirmInput = ''
+      // The backend deletes the key before the later steps, so a failed call can still have removed the key. Re-read
+      // the state so the screen matches it; the banner is kept (refreshError is false, so a successful read keeps it).
+      requestRefresh()
     } finally {
       clearingData = false
       endAction()
@@ -384,7 +415,7 @@
 {:else if state?.initError}
   <SetupView mode="startup-error" state={state} error={error} onRetry={retryKey} />
 {:else if !state?.apiKeyPresent}
-  <SetupView mode="missing-key" state={state} error={error} onRetry={retryKey} />
+  <SetupView mode="missing-key" state={state} error={error} onRetry={retryKey} savingKey={savingKey} onSaveKey={saveApiKey} />
 {:else if !state?.profileExists}
   <SetupView
     mode="profile"
@@ -394,8 +425,10 @@
     preview={preview}
     validating={validating}
     saving={saving}
+    savingKey={savingKey}
     onValidate={validateProfile}
     onSave={saveProfile}
+    onSaveKey={saveApiKey}
     onProfileInput={(value) => (profileInput = value)}
   />
 {:else}
