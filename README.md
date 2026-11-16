@@ -108,7 +108,7 @@ On Windows, the release has two amd64 files:
 - `steam-achievement-tracker-<version>-windows-amd64-setup.exe`: user-scope NSIS installer. It needs no administrator rights, installs to `%LocalAppData%\Programs\Steam Achievement Tracker`, and adds a Start Menu shortcut (no desktop icon). Uninstalling removes the program files and the shortcut. It keeps your data, cache, and saved API key.
 - `steam-achievement-tracker-<version>-windows-amd64-portable.exe`: runs without installing. It uses the same data directory as the installer, so you can switch between them.
 
-Windows releases are not code-signed yet. SmartScreen may show "Windows protected your PC". Choose **More info**, then **Run anyway**. Check the file against `SHA256SUMS` on the release page first if you want to verify it (`Get-FileHash <file> -Algorithm SHA256` in PowerShell).
+Windows releases are not code-signed. SmartScreen keeps warning for unsigned apps until downloads build reputation, and signing alone would not remove the warning at first. SmartScreen may show "Windows protected your PC". Choose **More info**, then **Run anyway**. Check the file against `SHA256SUMS` on the release page first if you want to verify it (`Get-FileHash <file> -Algorithm SHA256` in PowerShell).
 
 On Linux, the packages install the binary, the `.desktop` entry, and the hicolor app icons (`scalable` SVG and 512x512 PNG). The desktop shell takes the window and taskbar icon from that entry, which is named after the application id (`io.github.gjrud.steam-achievement-tracker`) so it matches the window. The AppImage cannot install such an entry itself: AppImageLauncher renames it, so on KDE the taskbar and menu icons are right but the window title bar may show a generic icon.
 
@@ -186,7 +186,7 @@ wails3 task windows:create:nsis:installer  # bin\steam-achievement-tracker-amd64
 wails3 task windows:package                # build + installer
 ```
 
-`VERSION` must start with `X.Y.Z`. Pre-release suffixes (`1.2.3-rc.1`) and a leading `v` are accepted, but Windows resources and NSIS take only the numeric core plus `.0`, so `1.2.3-rc.1` becomes `1.2.3.0`. The full tag name belongs in release filenames, which the release workflow sets. Without `VERSION` the tasks use `0.0.0`. `windows:create:nsis:installer` does not rebuild the exe, so a signed exe can be packaged. The task writes the WebView2 bootstrapper (embedded in the Wails CLI) into `build/windows/nsis`; git ignores it.
+`VERSION` must start with `X.Y.Z`. Pre-release suffixes (`1.2.3-rc.1`) and a leading `v` are accepted, but Windows resources and NSIS take only the numeric core plus `.0`, so `1.2.3-rc.1` becomes `1.2.3.0`. The full tag name belongs in release filenames, which the release workflow sets. Without `VERSION` the tasks use `0.0.0`. `windows:create:nsis:installer` does not rebuild the exe. The task writes the WebView2 bootstrapper (embedded in the Wails CLI) into `build/windows/nsis`; git ignores it.
 
 ### Releasing
 
@@ -209,7 +209,7 @@ The tag must look like `vMAJOR.MINOR.PATCH`, optionally with a suffix (`v1.2.3-r
 4. Runs the Windows job on `windows-latest` (after the tests pass): `wails3 task windows:build`, then the NSIS installer from the same exe. It checks that the exe's ProductVersion matches the tag's numeric core (`1.2.3-rc.1` gives `1.2.3.0`), that the build did not change `go.mod` or `go.sum`, and that exactly the portable exe and the installer exist. The files are renamed to `steam-achievement-tracker-<version>-windows-amd64-portable.exe` and `...-windows-amd64-setup.exe`.
 5. Publishes a GitHub release with the four Linux packages, the two Windows executables, a source archive, `SHA256SUMS`, build provenance attestations, and a changelog of every non-merge commit since the previous release, grouped by conventional-commit type. A final release lists changes since the previous final release; pre-release tags are skipped.
 
-Windows executables are not code-signed yet. The release workflow has marked signing hook points for a later signing service; no signing secrets are used. The Windows packaging path can only be validated by a real run, so test it with an `-rc` tag before a final release.
+Windows executables are not code-signed. The Windows packaging path can only be validated by a real run, so test it with an `-rc` tag before a final release.
 
 Tags matching `v*` are protected by repository rulesets: only admins can create them, and they cannot be moved or deleted. To fix a bad tag, disable the *Release tags: immutable* ruleset in the repository settings, delete the release if one was published (`gh release delete vX.Y.Z --yes`) and the tag, re-push the tag, then re-enable the ruleset. Pushing a tag that already has a release fails at the publish step. Pushing more than three tags at once triggers no workflow runs. The Arch package of a pre-release gets the same version as the final release (nfpm drops the suffix there), so do not rely on pacman upgrading from a pre-release.
 

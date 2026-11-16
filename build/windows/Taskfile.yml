@@ -7,8 +7,7 @@ version: '3'
 #   Windows resources and NSIS need a numeric X.Y.Z.W: pre-release and build metadata are dropped
 #   (0.1.0-rc.1 -> 0.1.0.0). Unset falls back to 0.0.0 (see VERSION_CORE). Full tag names belong in artifact
 #   filenames, which the release workflow sets.
-# - Signing is not done here. Sign bin/steam-achievement-tracker.exe after `build`, then run
-#   `create:nsis:installer` (no rebuild) and sign the installer. Remote signing (SignPath) replaces Wails' local tasks.
+# - Code signing is not used (no signing tasks here).
 
 includes:
   common: ../Taskfile.yml
@@ -60,7 +59,7 @@ tasks:
       - task: create:nsis:installer
 
   create:nsis:installer:
-    summary: Creates the NSIS installer from bin/<app>.exe (does not rebuild, so a signed exe can be packaged)
+    summary: Creates the NSIS installer from bin/<app>.exe (does not rebuild the exe)
     dir: build/windows/nsis
     preconditions:
       - sh: 'test -f "{{.ROOT_DIR}}/{{.BIN_DIR}}/{{.APP_NAME}}.exe"'

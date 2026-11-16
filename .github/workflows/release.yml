@@ -6,8 +6,7 @@ name: Release
 #   Both:    a source archive and SHA256SUMS.
 # The tagged commit must already be on main: merge first, then tag main.
 #
-# Windows binaries are unsigned for the first release. Signing (SignPath) is not wired up
-# yet; the hook points are marked in package-windows. Add the secrets/steps there later.
+# Windows binaries are not code-signed (SmartScreen keeps warning until a build earns reputation).
 on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+*']
@@ -190,16 +189,9 @@ jobs:
           CGO_ENABLED: "1"
         run: wails3 task windows:build
 
-      # SIGNING HOOK (not implemented): sign bin/steam-achievement-tracker.exe here, before the
-      # installer is built, so the installer packages the signed binary. Remote signing (SignPath)
-      # goes in this position as a step with its own secrets. No signing secrets are used yet.
-
       # Packages bin/steam-achievement-tracker.exe without rebuilding it.
       - name: Build NSIS installer
         run: wails3 task windows:create:nsis:installer
-
-      # SIGNING HOOK (not implemented): sign bin/steam-achievement-tracker-amd64-installer.exe here,
-      # after the installer is built and before the staging step below.
 
       # Build runs `go mod tidy`; the release must be built from the tagged module files.
       - name: Module files unchanged by the build
