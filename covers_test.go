@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gjrud/steam-achievement-tracker/internal/appdata"
+	"github.com/gjrud/steam-achievement-tracker/internal/appdata/appdatatest"
 	"github.com/gjrud/steam-achievement-tracker/internal/logging"
 	zk "github.com/zalando/go-keyring"
 )
@@ -52,7 +53,7 @@ func TestCoverServiceRejectsNonPositiveAppIDEvenWhenFileExists(t *testing.T) {
 // It only detects a regression (unlocked read of the app paths) under `go test -race`; without the race detector
 // the unsynchronized read usually passes silently.
 func TestCoverServiceReadsPathsSafelyWhileInitializing(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	appdatatest.Isolate(t)
 	t.Cleanup(logging.Fallback)
 	zk.MockInit()
 	app := NewApp()

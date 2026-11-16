@@ -3,10 +3,9 @@ package main
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"testing"
 
+	"github.com/gjrud/steam-achievement-tracker/internal/appdata/appdatatest"
 	"github.com/gjrud/steam-achievement-tracker/internal/logging"
 	"github.com/wailsapp/wails/v3/pkg/application"
 	zk "github.com/zalando/go-keyring"
@@ -50,11 +49,7 @@ func TestAppLiteralContextIsBackground(t *testing.T) {
 // directory's parent should be. ServiceStartup must return nil so the app still starts, and the failure must reach
 // the UI through GetAppState().InitError.
 func TestServiceStartupInitFailureReturnsNilAndReportsInitError(t *testing.T) {
-	blocked := filepath.Join(t.TempDir(), "not-a-dir")
-	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("HOME", blocked)
+	appdatatest.Block(t)
 	t.Cleanup(logging.Fallback)
 	zk.MockInit()
 	app := NewApp()

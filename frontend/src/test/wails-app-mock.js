@@ -28,7 +28,7 @@ export function __resetWailsMocks() {
 }
 
 // Parameter lists mirror the generated bindings exactly; the drift test compares argument counts.
-// Booleans select what else to delete: profile data and the Secret Service API key. Both false keeps everything.
+// Booleans select what else to delete: profile data and the system keyring API key. Both false keeps everything.
 export const ClearActiveUserData = (deleteProfileData, deleteAPIKey) => handlers.ClearActiveUserData(deleteProfileData, deleteAPIKey)
 // Game actions take (appID, groupID): groupID selects one achievement set of the game.
 export const DisableGame = (appID, groupID) => handlers.DisableGame(appID, groupID)

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gjrud/steam-achievement-tracker/internal/appdata"
+	"github.com/gjrud/steam-achievement-tracker/internal/fsretry"
 )
 
 const (
@@ -320,20 +321,21 @@ func (c *Cache) writeCover(imageAppID int64, fileName string, body io.Reader) (s
 	}
 	written, copyErr := io.Copy(out, io.LimitReader(body, maxCoverBytes+1))
 	closeErr := out.Close()
+	// The temp file is closed above; removing it before Close would fail on Windows.
 	if copyErr != nil {
-		os.Remove(tmp)
+		_ = fsretry.Remove(tmp)
 		return "", copyErr
 	}
 	if written > maxCoverBytes {
-		os.Remove(tmp)
+		_ = fsretry.Remove(tmp)
 		return "", fmt.Errorf("cover download exceeded %d bytes", maxCoverBytes)
 	}
 	if closeErr != nil {
-		os.Remove(tmp)
+		_ = fsretry.Remove(tmp)
 		return "", closeErr
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+	if err := fsretry.Rename(tmp, path); err != nil {
+		_ = fsretry.Remove(tmp)
 		return "", err
 	}
 	_ = os.Chmod(path, 0o600)
@@ -341,11 +343,12 @@ func (c *Cache) writeCover(imageAppID int64, fileName string, body io.Reader) (s
 }
 
 // removeOtherCovers deletes known cover files other than keep (e.g. a stale
-// hero_capsule.jpg once a library capsule is stored). Errors are ignored.
+// hero_capsule.jpg once a library capsule is stored). Errors are ignored. A file the cover server still has open
+// is retried briefly on Windows (see fsretry) and otherwise left in place.
 func (c *Cache) removeOtherCovers(imageAppID int64, keep string) {
 	for _, known := range knownCoverFiles {
 		if known.fileName != keep {
-			os.Remove(c.coverPath(imageAppID, known.fileName))
+			_ = fsretry.Remove(c.coverPath(imageAppID, known.fileName))
 		}
 	}
 }

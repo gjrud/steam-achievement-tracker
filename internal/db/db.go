@@ -12,6 +12,7 @@ import (
 
 	"github.com/gjrud/steam-achievement-tracker/internal/appdata"
 	"github.com/gjrud/steam-achievement-tracker/internal/config"
+	"github.com/gjrud/steam-achievement-tracker/internal/fsretry"
 )
 
 type migration struct {
@@ -29,8 +30,7 @@ type schemaState struct {
 }
 
 func OpenAndMigrate(paths appdata.Paths) (*sql.DB, error) {
-	dsn := fmt.Sprintf("file:%s?_busy_timeout=5000&_foreign_keys=on", paths.DB)
-	conn, err := sql.Open("sqlite3", dsn)
+	conn, err := sql.Open("sqlite3", sqliteDSN(paths.DB))
 	if err != nil {
 		return nil, err
 	}
@@ -199,20 +199,32 @@ func backupDB(conn *sql.DB, paths appdata.Paths) error {
 	}
 	defer in.Close()
 	outPath := filepath.Join(paths.Backups, fmt.Sprintf("steam-achievement-tracker-%d.db", time.Now().UnixNano()))
+	if err := writeBackupFile(in, outPath); err != nil {
+		return err
+	}
+	return os.Chmod(outPath, 0o600)
+}
+
+// writeBackupFile creates outPath exclusively, copies in to it and syncs it. The file is closed before any
+// removal: on Windows an open file cannot be deleted, so the partial copy is removed only after Close.
+// A file that could not be created (for example one that already exists) is never removed.
+func writeBackupFile(in io.Reader, outPath string) error {
 	out, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	if _, err := io.Copy(out, in); err != nil {
-		os.Remove(outPath)
-		return err
+	_, copyErr := io.Copy(out, in)
+	if copyErr == nil {
+		copyErr = out.Sync()
 	}
-	if err := out.Sync(); err != nil {
-		os.Remove(outPath)
-		return err
+	if closeErr := out.Close(); copyErr == nil {
+		copyErr = closeErr
 	}
-	return os.Chmod(outPath, 0o600)
+	if copyErr != nil {
+		_ = fsretry.Remove(outPath)
+		return copyErr
+	}
+	return nil
 }
 
 func secureDBFiles(paths appdata.Paths) {

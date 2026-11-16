@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gjrud/steam-achievement-tracker/internal/appdata/appdatatest"
 	"github.com/gjrud/steam-achievement-tracker/internal/config"
 	"github.com/gjrud/steam-achievement-tracker/internal/keyring"
 	"github.com/gjrud/steam-achievement-tracker/internal/logging"
@@ -33,10 +34,10 @@ const (
 	testSteamID        = "76561198000000001"
 )
 
-// openTestApp points HOME at a temp dir and initializes the App there. The keyring must already be mocked.
+// openTestApp points the XDG base directories at temp dirs and initializes the App there. The keyring must already be mocked.
 func openTestApp(t *testing.T) *App {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	appdatatest.Isolate(t)
 	t.Cleanup(logging.Fallback)
 	app := NewApp()
 	if err := app.ensureInitialized(); err != nil {
@@ -46,14 +47,14 @@ func openTestApp(t *testing.T) *App {
 	return app
 }
 
-// newTestApp opens an App with an empty mocked Secret Service.
+// newTestApp opens an App with an empty mocked system keyring.
 func newTestApp(t *testing.T) *App {
 	t.Helper()
 	zk.MockInit()
 	return openTestApp(t)
 }
 
-// newTestAppWithKey opens an App whose Secret Service already holds key.
+// newTestAppWithKey opens an App whose system keyring already holds key.
 func newTestAppWithKey(t *testing.T, key string) *App {
 	t.Helper()
 	zk.MockInit()
@@ -214,10 +215,6 @@ func TestGetAppStateWithoutKeyOrProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAppState: %v", err)
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
 	if state.APIKeyPresent || state.APIKeyError != "" {
 		t.Fatalf("api key = present %v err %q, want missing without error", state.APIKeyPresent, state.APIKeyError)
 	}
@@ -227,9 +224,14 @@ func TestGetAppStateWithoutKeyOrProfile(t *testing.T) {
 	if state.SyncInProgress || state.InitError != "" {
 		t.Fatalf("SyncInProgress = %v InitError = %q, want idle and no init error", state.SyncInProgress, state.InitError)
 	}
-	dataDir := filepath.Join(home, config.DataDirName)
-	if state.DataDir != dataDir || state.LogFile != filepath.Join(dataDir, "logs", "app.log") {
-		t.Fatalf("DataDir = %q LogFile = %q, want paths under %q", state.DataDir, state.LogFile, dataDir)
+	// openTestApp pointed the XDG_* variables at temp dirs; the app must report paths under them.
+	wantDataDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), config.AppDirName)
+	wantCacheDir := filepath.Join(os.Getenv("XDG_CACHE_HOME"), config.AppDirName)
+	wantLogDir := filepath.Join(os.Getenv("XDG_STATE_HOME"), config.AppDirName, "logs")
+	if state.DataDir != wantDataDir || state.CacheDir != wantCacheDir || state.LogDir != wantLogDir ||
+		state.LogFile != filepath.Join(wantLogDir, "app.log") {
+		t.Fatalf("DataDir = %q CacheDir = %q LogDir = %q LogFile = %q, want %q, %q, %q, under XDG dirs",
+			state.DataDir, state.CacheDir, state.LogDir, state.LogFile, wantDataDir, wantCacheDir, wantLogDir)
 	}
 	raw, err := json.Marshal(state)
 	if err != nil {
@@ -861,7 +863,7 @@ func TestRetryAPIKeyPicksUpKeyAddedAfterStartup(t *testing.T) {
 func TestRequireAPIKeyTracksKeyringState(t *testing.T) {
 	app := newTestAppWithKey(t, "first-key")
 
-	zk.MockInit() // key removed from the Secret Service
+	zk.MockInit() // key removed from the system keyring
 	if key, err := app.requireAPIKey(); key != "" || !errors.Is(err, keyring.ErrMissing) {
 		t.Fatalf("requireAPIKey with key removed = %q, %v; want empty and ErrMissing", key, err)
 	}
@@ -963,12 +965,8 @@ func TestSaveProfileUpdatesExistingAndSwitchesActive(t *testing.T) {
 }
 
 func TestInitFailureIsReportedAndBlocksActions(t *testing.T) {
-	// A regular file where the data directory's parent should be makes appdata.Ensure fail.
-	blocked := filepath.Join(t.TempDir(), "not-a-dir")
-	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("HOME", blocked)
+	// The XDG base directories sit under a regular file, so appdata.Ensure fails.
+	appdatatest.Block(t)
 	t.Cleanup(logging.Fallback)
 	zk.MockInit()
 	app := &App{}
@@ -1862,12 +1860,8 @@ func TestSaveAPIKeyWithoutActiveProfileIsUsedByNextRequests(t *testing.T) {
 
 // Init failure: SaveAPIKey returns the init error, stores nothing, and the error does not contain the input.
 func TestSaveAPIKeyInitFailureStoresNothing(t *testing.T) {
-	// A regular file where the data directory's parent should be makes appdata.Ensure fail.
-	blocked := filepath.Join(t.TempDir(), "not-a-dir")
-	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("HOME", blocked)
+	// The XDG base directories sit under a regular file, so appdata.Ensure fails.
+	appdatatest.Block(t)
 	t.Cleanup(logging.Fallback)
 	zk.MockInit()
 

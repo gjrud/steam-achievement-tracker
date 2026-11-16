@@ -95,7 +95,7 @@
       />
       <div>
         <label for="clear-delete-api-key">Delete API key</label>
-        <p id="clear-delete-api-key-hint" class="muted">Removes the saved key from the system keyring (Secret Service). The app can't sync until you enter a key again.</p>
+        <p id="clear-delete-api-key-hint" class="muted">Removes the saved key from the system keyring (Secret Service on Linux, Credential Manager on Windows). The app can't sync until you enter a key again.</p>
       </div>
     </div>
 

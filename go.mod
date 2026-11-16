@@ -3,6 +3,7 @@ module github.com/gjrud/steam-achievement-tracker
 go 1.26.2
 
 require (
+	github.com/adrg/xdg v0.5.3
 	github.com/mattn/go-sqlite3 v1.14.53
 	github.com/wailsapp/wails/v3 v3.1.0
 	github.com/zalando/go-keyring v0.2.8

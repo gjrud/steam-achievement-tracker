@@ -36,7 +36,7 @@ describe('App setup states', () => {
     expect(await screen.findByRole('heading', {name: 'Steam Web API key missing'})).toBeInTheDocument()
     expect(screen.queryByText(/secret-tool/)).not.toBeInTheDocument()
     expect(screen.getByLabelText('Steam Web API key')).toHaveAttribute('type', 'password')
-    expect(screen.getByText(/Paste your Steam Web API key\. It is stored only in your Secret Service keyring\./)).toBeInTheDocument()
+    expect(screen.getByText(/Paste your Steam Web API key\. It is stored only in your system keyring \(Secret Service on Linux, Credential Manager on Windows\)\./)).toBeInTheDocument()
     expect(screen.queryByText(/Create one at/)).not.toBeInTheDocument()
     expect(screen.getByRole('link', {name: 'Get a Steam Web API key'})).toHaveAttribute('href', 'https://steamcommunity.com/dev/apikey')
     expect(screen.getByLabelText('Steam Web API key')).toHaveFocus()
@@ -357,7 +357,7 @@ describe('App API key', () => {
 
     expect(await screen.findByRole('heading', {name: 'Settings'})).toBeInTheDocument()
     expect(screen.queryByRole('button', {name: 'Replace key'})).not.toBeInTheDocument()
-    expect(screen.queryByText('Stored in Secret Service.')).not.toBeInTheDocument()
+    expect(screen.queryByText(/stored in/i)).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Steam Web API key')).not.toBeInTheDocument()
   })
 
@@ -432,7 +432,7 @@ describe('App dashboard views', () => {
 
     await user.click(screen.getByRole('button', {name: 'Settings'}))
     expect(await screen.findByRole('heading', {name: 'Settings'})).toBeInTheDocument()
-    expect(screen.getByText('/tmp/steam-achievement-tracker')).toBeInTheDocument()
+    expect(screen.getByText('/xdg/data/steam-achievement-tracker')).toBeInTheDocument()
     expect(screen.getByRole('button', {name: 'Remove profile'})).toBeInTheDocument()
   })
 

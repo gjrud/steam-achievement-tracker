@@ -1,6 +1,9 @@
 # This file contains the configuration for this project.
-# When you update `info` or `fileAssociations`, run `wails3 task common:update:build-assets` to update the assets.
-# Note that this will overwrite any changes you have made to the assets.
+# Do NOT run `wails3 task common:update:build-assets` in this repo: it overwrites the customized Linux assets (nfpm,
+# desktop file). Windows info.json and manifest are rendered from `info` at build time (build/windows/Taskfile.yml,
+# generate:resources). After changing `info`, re-render only the NSIS helper by hand: run
+# `wails3 update build-assets -name steam-achievement-tracker -binaryname steam-achievement-tracker -productversion 0.0.0 -config build/config.yml -dir tmp/wails-scratch/nsh`
+# and copy windows/nsis/wails_tools.nsh to build/windows/nsis/.
 version: '3'
 
 # This information is used to generate the build assets.

@@ -2,20 +2,21 @@ package main
 
 import (
 	"io"
-	"log"
 	"log/slog"
+
+	"github.com/gjrud/steam-achievement-tracker/internal/logging"
 )
 
-// logWriter forwards each write to the standard library logger's current output. Wails's own logger writes to
-// stderr, so main hands it a slog handler on top of logWriter to put its messages in the app log file.
+// logWriter forwards each write to the app log file. Wails's own logger writes to stderr, so main hands it a slog
+// handler on top of logWriter to put its messages in the app log file.
 //
-// The output is resolved on every Write, not when the writer is built: logging.Init swaps log's output inside
-// ServiceStartup, after main has created the application, so capturing it earlier would send Wails messages to
-// the wrong place.
+// The file is resolved on every Write, through logging.Writer, not when the writer is built: logging.Init opens the
+// file inside ServiceStartup, after main has created the application. Until then, and after logging.Fallback, writes
+// go to stderr. Writes take the logging package lock, so they cannot reach a file that Init or Fallback has closed.
 type logWriter struct{}
 
 func (logWriter) Write(p []byte) (int, error) {
-	return log.Writer().Write(p)
+	return logging.Writer().Write(p)
 }
 
 // newWailsLogger returns the logger handed to Wails. It keeps warnings and errors only: at Info Wails logs one line

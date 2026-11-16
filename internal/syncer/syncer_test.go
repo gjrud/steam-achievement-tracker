@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -2063,13 +2064,14 @@ func testPaths(t *testing.T) appdata.Paths {
 	t.Helper()
 	root := t.TempDir()
 	return appdata.Paths{
-		Root:       root,
-		DB:         root + "/test.db",
-		Backups:    root + "/backups",
-		Cache:      root + "/cache",
-		GameImages: root + "/cache/images/games",
-		Logs:       root + "/logs",
-		LogFile:    root + "/logs/app.log",
+		DataDir:    root,
+		CacheDir:   filepath.Join(root, "cache"),
+		StateDir:   root,
+		DB:         filepath.Join(root, "test.db"),
+		Backups:    filepath.Join(root, "backups"),
+		GameImages: filepath.Join(root, "cache", "images", "games"),
+		Logs:       filepath.Join(root, "logs"),
+		LogFile:    filepath.Join(root, "logs", "app.log"),
 	}
 }
 

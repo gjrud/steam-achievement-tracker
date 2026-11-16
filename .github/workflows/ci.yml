@@ -19,9 +19,16 @@ env:
   WAILS_VERSION: v3.1.0
 
 jobs:
-  test:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
+  # Real work. Linux runs the full frontend + Wails pipeline; Windows runs the
+  # Go checks only (no npm, no Wails CLI, no GTK).
+  test-matrix:
+    name: test-matrix (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -29,7 +36,11 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - uses: actions/setup-node@v7
+      # ---- Linux only -------------------------------------------------------
+
+      - name: Setup Node
+        if: runner.os == 'Linux'
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -37,12 +48,14 @@ jobs:
 
       # CGO deps for Wails v3 on Linux (GTK4 + WebKitGTK 6.0) and go-sqlite3.
       - name: Install system packages
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev
 
       - name: Install frontend dependencies
+        if: runner.os == 'Linux'
         run: npm ci
         working-directory: frontend
 
@@ -51,25 +64,95 @@ jobs:
       # embeds frontend/dist. Break the cycle with a placeholder dist; the real
       # build below overwrites it.
       - name: Install Wails CLI
+        if: runner.os == 'Linux'
         run: go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
 
       - name: Generate Wails bindings
+        if: runner.os == 'Linux'
         run: |
           mkdir -p frontend/dist
           touch frontend/dist/.gitkeep
           wails3 generate bindings
 
       - name: Build frontend
+        if: runner.os == 'Linux'
         run: npm run build
         working-directory: frontend
 
       - name: Frontend tests
+        if: runner.os == 'Linux'
         run: npm test
         working-directory: frontend
 
-      - name: Go vet
+      - name: Go vet (Linux)
+        if: runner.os == 'Linux'
         run: go vet ./...
 
       # Race detector on: some tests only catch regressions under -race.
-      - name: Go tests
+      - name: Go tests (Linux)
+        if: runner.os == 'Linux'
         run: go test -race ./...
+
+      # ---- Windows only -----------------------------------------------------
+
+      # main.go embeds all:frontend/dist, so the Go packages need the directory
+      # to exist even though no frontend build runs on Windows.
+      - name: Placeholder frontend dist (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p frontend/dist
+          touch frontend/dist/.gitkeep
+
+      # go-sqlite3 is cgo; windows-latest ships MinGW gcc. Fail early with a
+      # clear message if it is missing.
+      - name: Verify C compiler (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          which gcc
+          gcc --version
+
+      - name: Go vet (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+        run: go vet ./...
+
+      - name: Go tests with race detector (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race ./...
+
+      # Smoke-build the production exe with the release flags (-tags production, GUI subsystem). Tests and vet do not
+      # build it, so release-only breakage would otherwise surface only at tag time. Output goes to a temp dir.
+      - name: Production build smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+        run: go build -tags production -ldflags "-w -s -H windowsgui" -o "$RUNNER_TEMP/smoke.exe" .
+
+  # Single required status check. Branch protection on main requires `test`.
+  # Passes only when every matrix leg succeeded; `always()` keeps it from being
+  # skipped (and thus silently passing) when a matrix leg fails.
+  test:
+    name: test
+    needs: test-matrix
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all matrix legs to succeed
+        shell: bash
+        env:
+          RESULT: ${{ needs.test-matrix.result }}
+        run: |
+          if [ "$RESULT" != "success" ]; then
+            echo "test-matrix result: $RESULT (expected success)" >&2
+            exit 1
+          fi
+          echo "test-matrix: success"

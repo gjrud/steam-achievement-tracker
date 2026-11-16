@@ -3,8 +3,13 @@ package main
 import (
 	"embed"
 	"log"
+	"os"
+	"path/filepath"
+	"runtime"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+
+	"github.com/gjrud/steam-achievement-tracker/internal/appdata"
 )
 
 //go:embed all:frontend/dist
@@ -17,6 +22,17 @@ func main() {
 	// Create the backend. Its exported methods are bound to the frontend through the service below.
 	backend := NewApp()
 
+	// WebView2 fails hard if its profile folder cannot be created, which happens before the in-app startup error
+	// screen can show. Create the folder here. If that fails, leave the option empty so Wails uses its default profile.
+	// Windows only: nothing uses a WebView2 profile on Linux, so no folder is created there.
+	webviewPath := ""
+	if runtime.GOOS == "windows" {
+		webviewPath = filepath.Join(appdata.Resolve().CacheDir, "webview")
+		if err := os.MkdirAll(webviewPath, 0o700); err != nil {
+			webviewPath = ""
+		}
+	}
+
 	app := application.New(application.Options{
 		Name:        "steam-achievement-tracker",
 		Description: "Track Steam achievement progress for your public library",
@@ -28,6 +44,13 @@ func main() {
 		// Logger replaces Wails's default: LogLevel is ignored and the default release logger, which discards
 		// everything, is not used. See newWailsLogger for the level.
 		Logger: newWailsLogger(logWriter{}),
+		Windows: application.WindowsOptions{
+			// WebView2 profile (browser cache and state) under the app's cache directory, created above. Wails' default
+			// is %AppData%\<exe name>, and releases rename the portable exe per version, so each version would start a
+			// new profile and orphan the old one. This path is fixed. Ignored on Linux. The cache directory is kept on
+			// uninstall (build/windows/nsis/project.nsi).
+			WebviewUserDataPath: webviewPath,
+		},
 		Linux: application.LinuxOptions{
 			// Reverse-DNS GTK application id. GTK sends it as the Wayland app_id, and Wails derives the program name
 			// (X11 class) from it. The packaged .desktop file and icons use the same name (APP_ID in

@@ -1,8 +1,13 @@
 name: Release
 
-# Pushing a version tag (vX.Y.Z or vX.Y.Z-suffix) publishes a GitHub release with
-# AppImage, deb, rpm and Arch packages, a source archive and SHA256SUMS.
+# Pushing a version tag (vX.Y.Z or vX.Y.Z-suffix) publishes a GitHub release with:
+#   Linux:   AppImage, deb, rpm and Arch packages (job: package, ubuntu-24.04)
+#   Windows: NSIS user-scope installer and portable exe (job: package-windows, windows-latest)
+#   Both:    a source archive and SHA256SUMS.
 # The tagged commit must already be on main: merge first, then tag main.
+#
+# Windows binaries are unsigned for the first release. Signing (SignPath) is not wired up
+# yet; the hook points are marked in package-windows. Add the secrets/steps there later.
 on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+*']
@@ -129,8 +134,126 @@ jobs:
             bin/*.pkg.tar.zst
           if-no-files-found: error
 
+  package-windows:
+    needs: test
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # npm ci itself runs inside the windows:build task (frontend install step).
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # Bindings generation compiles main.go, which embeds all:frontend/dist. The real
+      # frontend build (run by the windows:build task) overwrites it.
+      - name: Placeholder frontend dist
+        run: |
+          mkdir -p frontend/dist
+          touch frontend/dist/.gitkeep
+
+      - name: Install Wails CLI
+        run: |
+          go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # gcc: CGO build. makensis: NSIS installer. windows-latest should have both; the
+      # NSIS install is a fallback. Fails fast if either is still missing.
+      - name: Verify toolchain (gcc, NSIS)
+        run: |
+          gcc --version
+          if ! command -v makensis >/dev/null 2>&1; then
+            choco install nsis -y --no-progress
+            echo 'C:\Program Files (x86)\NSIS' >> "$GITHUB_PATH"
+            export PATH="/c/Program Files (x86)/NSIS:$PATH"
+          fi
+          makensis -VERSION
+
+      - name: Set version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      # Builds the frontend (npm run build) and the exe. Production: GUI subsystem, no console.
+      # go-sqlite3 is cgo; the build needs MinGW gcc on PATH (windows:build checks it).
+      - name: Build Windows executable
+        env:
+          CGO_ENABLED: "1"
+        run: wails3 task windows:build
+
+      # SIGNING HOOK (not implemented): sign bin/steam-achievement-tracker.exe here, before the
+      # installer is built, so the installer packages the signed binary. Remote signing (SignPath)
+      # goes in this position as a step with its own secrets. No signing secrets are used yet.
+
+      # Packages bin/steam-achievement-tracker.exe without rebuilding it.
+      - name: Build NSIS installer
+        run: wails3 task windows:create:nsis:installer
+
+      # SIGNING HOOK (not implemented): sign bin/steam-achievement-tracker-amd64-installer.exe here,
+      # after the installer is built and before the staging step below.
+
+      # Build runs `go mod tidy`; the release must be built from the tagged module files.
+      - name: Module files unchanged by the build
+        run: git diff --exit-code -- go.mod go.sum
+
+      - name: Check exe and installer exist
+        run: |
+          shopt -s nullglob
+          all=(bin/*.exe)
+          if (( ${#all[@]} != 2 )); then
+            echo "::error::expected exactly two .exe files in bin, found ${#all[@]}"
+            ls -la bin
+            exit 1
+          fi
+          for f in bin/steam-achievement-tracker.exe bin/steam-achievement-tracker-amd64-installer.exe; do
+            if [[ ! -f "$f" ]]; then
+              echo "::error::missing $f"
+              ls -la bin
+              exit 1
+            fi
+          done
+
+      # An empty or stale VERSION does not make packaging fail, so check the result.
+      # Windows resources take X.Y.Z.W: pre-release and build metadata are dropped
+      # (0.1.0-rc.1 -> 0.1.0.0), so compare against the numeric core plus '.0'.
+      - name: Package version matches the tag
+        shell: pwsh
+        run: |
+          $core = ($env:VERSION -split '[-+]')[0]
+          $want = "$core.0"
+          $got = "$((Get-Item 'bin/steam-achievement-tracker.exe').VersionInfo.ProductVersion)".Trim()
+          if ($got -ne $want) {
+            Write-Host "::error::exe ProductVersion '$got' does not match tag version '$want'"
+            exit 1
+          }
+          Write-Host "exe ProductVersion matches: $got"
+
+      # Final names carry the full tag version (pre-release suffix included). The release job
+      # uploads these files as-is.
+      - name: Stage artifacts
+        run: |
+          mkdir -p dist-windows
+          mv bin/steam-achievement-tracker.exe "dist-windows/steam-achievement-tracker-${VERSION}-windows-amd64-portable.exe"
+          mv bin/steam-achievement-tracker-amd64-installer.exe "dist-windows/steam-achievement-tracker-${VERSION}-windows-amd64-setup.exe"
+          ls -la dist-windows
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-packages
+          path: dist-windows/*.exe
+          if-no-files-found: error
+
   release:
-    needs: package
+    needs: [package, package-windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -146,10 +269,34 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # Both downloads go into the same flat dist/ (artifacts hold files only, no subdirectories).
       - uses: actions/download-artifact@v8
         with:
           name: linux-packages
           path: dist
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-packages
+          path: dist
+
+      - name: Check release files are flat and present
+        run: |
+          if [[ -n "$(find dist -mindepth 1 -type d)" ]]; then
+            echo "::error::dist/ contains subdirectories; release globs expect only files"
+            find dist -mindepth 1 -type d
+            exit 1
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          for f in "dist/steam-achievement-tracker-${version}-windows-amd64-portable.exe" \
+                   "dist/steam-achievement-tracker-${version}-windows-amd64-setup.exe"; do
+            if [[ ! -f "$f" ]]; then
+              echo "::error::missing $f"
+              ls -la dist
+              exit 1
+            fi
+          done
+          ls -la dist
 
       - name: Source archive
         run: |

@@ -1,0 +1,112 @@
+version: '3'
+
+# Windows (amd64) build, portable executable and NSIS installer.
+#
+# - Native build only: run on a Windows host with MinGW gcc on PATH (go-sqlite3 needs CGO). No cross-compile.
+# - VERSION env var is the only version source (CI sets it to the tag without "v"). Never hardcode it here.
+#   Windows resources and NSIS need a numeric X.Y.Z.W: pre-release and build metadata are dropped
+#   (0.1.0-rc.1 -> 0.1.0.0). Unset falls back to 0.0.0 (see VERSION_CORE). Full tag names belong in artifact
+#   filenames, which the release workflow sets.
+# - Signing is not done here. Sign bin/steam-achievement-tracker.exe after `build`, then run
+#   `create:nsis:installer` (no rebuild) and sign the installer. Remote signing (SignPath) replaces Wails' local tasks.
+
+includes:
+  common: ../Taskfile.yml
+
+vars:
+  # Numeric core of VERSION (X.Y.Z): strip a leading "v", pre-release and build metadata. Unset -> 0.0.0.
+  VERSION_CORE: '{{(splitList "+" (splitList "-" (trimPrefix "v" (env "VERSION" | default "0.0.0")) | first) | first)}}'
+  # Four-part numeric version for the .exe version resource (info.json, manifest).
+  WIN_VERSION: '{{.VERSION_CORE}}.0'
+
+tasks:
+  build:
+    summary: Builds the Windows executable (native amd64, CGO). Production has no console window.
+    deps:
+      - task: common:go:mod:tidy
+      - task: common:build:frontend
+        vars:
+          BUILD_FLAGS:
+            ref: .BUILD_FLAGS
+          DEV:
+            ref: .DEV
+    preconditions:
+      - sh: '{{if eq OS "windows"}}gcc --version{{else}}exit 1{{end}}'
+        msg: "windows:build must run on a Windows host with MinGW gcc on PATH (CGO). Cross-compiling from Linux or macOS is not supported."
+      - sh: '[[ "{{.VERSION_CORE}}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]'
+        msg: "VERSION must start with X.Y.Z (optional leading v, pre-release and build metadata allowed), got '{{.VERSION_CORE}}'. Set VERSION, e.g. VERSION=1.2.3 or v1.2.3-rc.1."
+    cmds:
+      - task: generate:resources
+      # The .syso is linked into every build of this package, so it must not outlive this task. The deferred cleanup
+      # runs even when a later command fails.
+      - defer: { task: cleanup:syso }
+      - task: generate:syso
+      - go build {{.BUILD_FLAGS}} -o "{{.OUTPUT}}"
+    vars:
+      DEV: '{{.DEV | default "false"}}'
+      OUTPUT: '{{.BIN_DIR}}/{{.APP_NAME}}.exe'
+      # Dev: console window and no -H windowsgui, so logs show. Production: GUI subsystem, trimmed.
+      BUILD_FLAGS: '{{if eq .DEV "true"}}-buildvcs=false -gcflags=all="-l"{{else}}-tags production -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui"{{end}}'
+    env:
+      GOOS: windows
+      GOARCH: amd64
+      CGO_ENABLED: '1'
+
+  package:
+    summary: Builds the executable and creates the user-scope NSIS installer
+    deps:
+      - task: build
+    cmds:
+      - task: create:nsis:installer
+
+  create:nsis:installer:
+    summary: Creates the NSIS installer from bin/<app>.exe (does not rebuild, so a signed exe can be packaged)
+    dir: build/windows/nsis
+    preconditions:
+      - sh: 'test -f "{{.ROOT_DIR}}/{{.BIN_DIR}}/{{.APP_NAME}}.exe"'
+        msg: "bin/{{.APP_NAME}}.exe not found. Run `wails3 task windows:build` first."
+      - sh: '[[ "{{.VERSION_CORE}}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]'
+        msg: "VERSION must start with X.Y.Z (optional leading v, pre-release and build metadata allowed), got '{{.VERSION_CORE}}'. Set VERSION, e.g. VERSION=1.2.3 or v1.2.3-rc.1."
+    cmds:
+      # Writes the WebView2 bootstrapper into build/windows/nsis. It is embedded in the wails3 CLI, so nothing is
+      # downloaded. The file is git-ignored (*.exe in .gitignore).
+      - wails3 generate webview2bootstrapper -dir "{{.ROOT_DIR}}/build/windows/nsis"
+      # User scope: installs to %LOCALAPPDATA%\Programs\<product>, no UAC prompt. INFO_PRODUCTVERSION must be X.Y.Z;
+      # project.nsi appends .0 for VIProductVersion.
+      - |
+        {{if eq OS "windows"}}
+        makensis -DWAILS_INSTALL_SCOPE=user -DREQUEST_EXECUTION_LEVEL=user -DINFO_PRODUCTVERSION={{.VERSION_CORE}} -DARG_WAILS_AMD64_BINARY="{{.ROOT_DIR}}\{{.BIN_DIR}}\{{.APP_NAME}}.exe" project.nsi
+        {{else}}
+        makensis -DWAILS_INSTALL_SCOPE=user -DREQUEST_EXECUTION_LEVEL=user -DINFO_PRODUCTVERSION={{.VERSION_CORE}} -DARG_WAILS_AMD64_BINARY="{{.ROOT_DIR}}/{{.BIN_DIR}}/{{.APP_NAME}}.exe" project.nsi
+        {{end}}
+    # Output: bin/<app>-amd64-installer.exe (OutFile in project.nsi).
+
+  run:
+    summary: Runs the built Windows executable
+    cmds:
+      - '{{.BIN_DIR}}/{{.APP_NAME}}.exe'
+
+  generate:resources:
+    summary: Renders info.json and wails.exe.manifest with WIN_VERSION into .task/resources (git-ignored)
+    internal: true
+    dir: build
+    cmds:
+      # Only the windows/ outputs are used here. The command also writes the other platforms' templates into
+      # .task/resources; they are ignored. Never point it at build/ (it overwrites the customized Linux assets).
+      # -productdescription: the Windows FileDescription is the short app name, not the long config.yml description.
+      - wails3 update build-assets -name "{{.APP_NAME}}" -binaryname "{{.APP_NAME}}" -productversion "{{.WIN_VERSION}}" -productdescription "Steam Achievement Tracker" -config config.yml -dir "{{.ROOT_DIR}}/.task/resources" -silent
+
+  cleanup:syso:
+    summary: Removes the generated Windows resource object from the package directory
+    internal: true
+    cmds:
+      - cmd: powershell -NoProfile -Command "Remove-Item -ErrorAction SilentlyContinue *.syso"
+        platforms: [windows]
+      - cmd: rm -f *.syso
+        platforms: [linux, darwin]
+
+  generate:syso:
+    summary: Generates the Windows resource object (icon, manifest, version info) linked into the executable
+    internal: true
+    cmds:
+      - wails3 generate syso -arch amd64 -icon build/windows/icon.ico -manifest .task/resources/windows/wails.exe.manifest -info .task/resources/windows/info.json -out wails_windows_amd64.syso
