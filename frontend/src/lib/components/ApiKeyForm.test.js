@@ -2,6 +2,13 @@ import {cleanup, fireEvent, render, screen, waitFor} from '@testing-library/svel
 import userEvent from '@testing-library/user-event'
 import {afterEach, describe, expect, test, vi} from 'vitest'
 import ApiKeyForm from './ApiKeyForm.svelte'
+import {__failBrowserOpen, __openedUrls} from '../../test/wails-runtime-mock.js'
+
+const KEY_PAGE_URL = 'https://steamcommunity.com/dev/apikey'
+
+function keyLink() {
+  return screen.getByRole('link', {name: 'Get a Steam Web API key'})
+}
 
 afterEach(() => {
   cleanup()
@@ -177,5 +184,76 @@ describe('ApiKeyForm', () => {
 
     await fireEvent.submit(keyField().closest('form'))
     expect(onSave).not.toHaveBeenCalled()
+  })
+
+  test('renders a link to the Steam key page with a real href', () => {
+    render(ApiKeyForm)
+
+    expect(keyLink()).toHaveAttribute('href', KEY_PAGE_URL)
+    expect(keyLink()).toHaveAttribute('rel', 'noopener noreferrer')
+  })
+
+  test('shows the localhost domain note next to the key-page link, described by the link', () => {
+    render(ApiKeyForm)
+
+    const note = screen.getByText('When Steam asks for a domain name, enter localhost.')
+    expect(note).toBeInTheDocument()
+    expect(note).toHaveClass('muted')
+    expect(keyLink()).toHaveAccessibleDescription('When Steam asks for a domain name, enter localhost.')
+  })
+
+  test('shows the localhost note on every context where the link shows', () => {
+    const {unmount} = render(ApiKeyForm, {props: {saving: true}})
+    expect(screen.getByText('enter localhost.', {exact: false})).toBeInTheDocument()
+    unmount()
+
+    render(ApiKeyForm, {props: {disabled: true, autofocus: true, showLabel: true}})
+    expect(screen.getByText('enter localhost.', {exact: false})).toBeInTheDocument()
+  })
+
+  test('two forms on screen each describe their own link with their own note', () => {
+    render(ApiKeyForm)
+    render(ApiKeyForm)
+
+    const links = screen.getAllByRole('link', {name: 'Get a Steam Web API key'})
+    expect(links).toHaveLength(2)
+    expect(links[0].getAttribute('aria-describedby')).not.toBe(links[1].getAttribute('aria-describedby'))
+    links.forEach((link) => expect(link).toHaveAccessibleDescription('When Steam asks for a domain name, enter localhost.'))
+  })
+
+  test('clicking the link opens the key page once through the runtime and prevents webview navigation', async () => {
+    render(ApiKeyForm)
+
+    // dispatchEvent (not user.click) so the returned event reports whether default navigation was prevented.
+    const event = new MouseEvent('click', {bubbles: true, cancelable: true})
+    keyLink().dispatchEvent(event)
+
+    expect(event.defaultPrevented).toBe(true)
+    await waitFor(() => expect(__openedUrls()).toEqual([KEY_PAGE_URL]))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  test('shows the fallback message when the browser cannot be opened, without an unhandled rejection', async () => {
+    __failBrowserOpen(new Error('no browser'))
+    const user = userEvent.setup()
+    render(ApiKeyForm)
+
+    await user.click(keyLink())
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(`Could not open the browser. Visit ${KEY_PAGE_URL}`)
+    expect(__openedUrls()).toEqual([KEY_PAGE_URL])
+  })
+
+  test('the link stays clickable while saving or disabled', async () => {
+    const user = userEvent.setup()
+    const {unmount} = render(ApiKeyForm, {props: {saving: true}})
+
+    await user.click(keyLink())
+    expect(__openedUrls()).toEqual([KEY_PAGE_URL])
+    unmount()
+
+    render(ApiKeyForm, {props: {disabled: true}})
+    await user.click(keyLink())
+    expect(__openedUrls()).toEqual([KEY_PAGE_URL, KEY_PAGE_URL])
   })
 })

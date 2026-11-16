@@ -33,11 +33,13 @@ var errShuttingDown = errors.New("shutting down")
 // refetches GetAppState when it arrives.
 const syncChangedEvent = "sync:changed"
 
-// readSteamAPIKey and storeSteamAPIKey are the keyring calls the App makes. Tests swap them to count reads and to
-// simulate store failures or ordering; production uses the keyring package. Tests restore them with t.Cleanup.
+// readSteamAPIKey, storeSteamAPIKey and deleteSteamAPIKey are the keyring calls the App makes. Tests swap them to count
+// reads and to simulate store or delete failures or ordering; production uses the keyring package. Tests restore them
+// with t.Cleanup.
 var (
-	readSteamAPIKey  = keyring.GetSteamAPIKey
-	storeSteamAPIKey = keyring.SetSteamAPIKey
+	readSteamAPIKey   = keyring.GetSteamAPIKey
+	storeSteamAPIKey  = keyring.SetSteamAPIKey
+	deleteSteamAPIKey = keyring.DeleteSteamAPIKey
 )
 
 type App struct {
@@ -296,7 +298,23 @@ func (a *App) SyncNow() (AppState, error) {
 	return a.GetAppState()
 }
 
-func (a *App) ClearActiveUserData() (AppState, error) {
+// ClearActiveUserData removes the active profile from the app. The two flags are independent:
+//
+//   - deleteProfileData=false: the profile is deactivated (DeactivateProfile). Its games, achievements, sync history,
+//     settings and cached images are kept, and reconnecting the same SteamID64 shows them immediately; SaveProfile
+//     still starts its usual sync.
+//   - deleteProfileData=true: the profile and its data are deleted (ClearProfileData), and cached images that no
+//     remaining profile shows are removed from disk.
+//   - deleteAPIKey=true: the Steam Web API key is deleted from the Secret Service and the cached key state is reset,
+//     so the app shows the missing-key screen. Without it the key is kept.
+//
+// The key is deleted first, before any profile change. A key deletion error is returned with nothing changed: no
+// data touched and the key cache unchanged. If a later step fails after the key was deleted, the key stays deleted
+// and the app shows the missing-key screen, from which the key can be entered again. ClearProfileData commits its
+// transaction before cached images are removed, so a data failure before that commit leaves the profile and its data
+// intact; a failure removing images after the commit leaves the data deleted, and some cached images may remain on
+// disk. Lock order: keyMu, then mu.
+func (a *App) ClearActiveUserData(deleteProfileData, deleteAPIKey bool) (AppState, error) {
 	if err := a.ensureInitialized(); err != nil {
 		return AppState{}, err
 	}
@@ -304,6 +322,17 @@ func (a *App) ClearActiveUserData() (AppState, error) {
 	repo, profile, err := a.activeRepoAndProfile()
 	if err != nil {
 		return AppState{}, err
+	}
+	if deleteAPIKey {
+		if err := a.clearSteamAPIKey(); err != nil {
+			return AppState{}, err
+		}
+	}
+	if !deleteProfileData {
+		if err := repo.DeactivateProfile(); err != nil {
+			return AppState{}, err
+		}
+		return a.GetAppState()
 	}
 	a.mu.Lock()
 	paths := a.paths
@@ -316,6 +345,22 @@ func (a *App) ClearActiveUserData() (AppState, error) {
 		return AppState{}, err
 	}
 	return a.GetAppState()
+}
+
+// clearSteamAPIKey deletes the key from the Secret Service and resets the cached key state. The cache changes only
+// after the keyring delete succeeds, so a failed delete leaves the key state as it was.
+func (a *App) clearSteamAPIKey() error {
+	a.keyMu.Lock()
+	defer a.keyMu.Unlock()
+	if err := deleteSteamAPIKey(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.steamAPIKey = ""
+	a.apiKeyPresent = false
+	a.apiKeyError = ""
+	return nil
 }
 
 // MarkGamePreviouslyCompleted toggles the manual previously-completed flag on one achievement set (appID, groupID) of the active profile.

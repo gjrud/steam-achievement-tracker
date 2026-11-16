@@ -43,7 +43,8 @@
   let validating = false
   let saving = false
   // savingKey covers a SaveAPIKey call. It lives here (not in the form) so a remounted form still sees it. It is not
-  // a beginAction: the unlock prompt can stay open for a long time, and holding reads would freeze live sync progress.
+  // a beginAction: the key form only shows on screens where no sync is live, so there are no reads to hold, and a
+  // failed save must leave the banner alone (the form shows its own error).
   let savingKey = false
   let activeView = 'suggestions'
   let viewSearch = ''
@@ -222,7 +223,7 @@
     }
   }
 
-  // saveApiKey stores the key with no beginAction (see savingKey). On success the stored key changed, so the profile
+  // saveApiKey stores the key with no beginAction (see savingKey for why). On success the stored key changed, so the profile
   // preview (validated with the old key) is dropped, an earlier Validate error is cleared, and state is re-read. On
   // failure it rethrows: the form shows the error, and this banner stays untouched.
   async function saveApiKey(key) {
@@ -285,13 +286,15 @@
     clearConfirmInput = ''
   }
 
-  async function confirmClearActiveUserData() {
+  // options comes from the modal: {deleteProfileData, deleteAPIKey}. Deleting the key leaves the returned state without
+  // a key, so the missing-key screen takes over and the modal closes with the dashboard.
+  async function confirmClearActiveUserData(options) {
     if (clearingData || !state?.profile) return
     if (clearConfirmInput !== clearConfirmText) return
     clearingData = true
     const token = beginAction()
     try {
-      const nextState = await ClearActiveUserData()
+      const nextState = await ClearActiveUserData(Boolean(options?.deleteProfileData), Boolean(options?.deleteAPIKey))
       if (applyActionState(token, nextState)) {
         activeView = 'suggestions'
         activeTagFilter = ''
@@ -302,6 +305,12 @@
       }
     } catch (err) {
       if (token === stateRequestToken) error = formatMessage(err)
+      // Close the dialog so the error banner is not hidden behind its backdrop.
+      clearConfirmOpen = false
+      clearConfirmInput = ''
+      // The backend deletes the key before the later steps, so a failed call can still have removed the key. Re-read
+      // the state so the screen matches it; the banner is kept (refreshError is false, so a successful read keeps it).
+      requestRefresh()
     } finally {
       clearingData = false
       endAction()
@@ -444,9 +453,7 @@
     {gameActionLoading}
     {clearingData}
     {savingSettings}
-    {savingKey}
     onSyncNow={syncNow}
-    onSaveKey={saveApiKey}
     onSetLibrarySettings={saveLibrarySettings}
     onActiveViewChange={changeView}
     onViewSearch={(value) => (viewSearch = value)}

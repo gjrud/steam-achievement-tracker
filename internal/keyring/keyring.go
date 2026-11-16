@@ -24,9 +24,11 @@ var ErrNotStored = errors.New("steam web api key was not stored: the Secret Serv
 
 // zkSet and zkGet are the go-keyring calls SetSteamAPIKey makes. Tests swap them to simulate a silent non-store
 // or a failing read-back; production uses go-keyring directly.
+// zkDelete is the go-keyring call DeleteSteamAPIKey makes. Tests swap it to simulate a failing backend.
 var (
-	zkSet = zk.Set
-	zkGet = zk.Get
+	zkSet    = zk.Set
+	zkGet    = zk.Get
+	zkDelete = zk.Delete
 )
 
 func GetSteamAPIKey() (string, error) {
@@ -66,6 +68,15 @@ func SetSteamAPIKey(key string) (string, error) {
 		return "", ErrNotStored
 	}
 	return trimmed, nil
+}
+
+// DeleteSteamAPIKey removes the Steam Web API key item from the Secret Service. An absent item is success, so the
+// call is idempotent. Any other backend error is wrapped and never includes the key.
+func DeleteSteamAPIKey() error {
+	if err := zkDelete(config.AppID, config.KeyringUser); err != nil && !errors.Is(err, zk.ErrNotFound) {
+		return fmt.Errorf("delete api key: %w", err)
+	}
+	return nil
 }
 
 // isInvalidKeyRune reports whether r may not appear inside a key: any whitespace, control, or format character

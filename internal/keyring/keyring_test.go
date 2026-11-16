@@ -26,6 +26,69 @@ func swapZKGet(t *testing.T, fn func(service, user string) (string, error)) {
 	t.Cleanup(func() { zkGet = prev })
 }
 
+func swapZKDelete(t *testing.T, fn func(service, user string) error) {
+	t.Helper()
+	prev := zkDelete
+	zkDelete = fn
+	t.Cleanup(func() { zkDelete = prev })
+}
+
+func TestDeleteSteamAPIKeyRemovesStoredKey(t *testing.T) {
+	zk.MockInit()
+	if err := zk.Set(config.AppID, config.KeyringUser, "abc123"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	if err := DeleteSteamAPIKey(); err != nil {
+		t.Fatalf("DeleteSteamAPIKey() error = %v, want nil", err)
+	}
+	got, err := GetSteamAPIKey()
+	if !errors.Is(err, ErrMissing) {
+		t.Fatalf("GetSteamAPIKey() after delete = %q, %v; want ErrMissing", got, err)
+	}
+}
+
+func TestDeleteSteamAPIKeyWhenAbsentIsSuccess(t *testing.T) {
+	zk.MockInit()
+
+	if err := DeleteSteamAPIKey(); err != nil {
+		t.Fatalf("DeleteSteamAPIKey() with no item error = %v, want nil", err)
+	}
+	if err := DeleteSteamAPIKey(); err != nil {
+		t.Fatalf("second DeleteSteamAPIKey() error = %v, want nil", err)
+	}
+}
+
+func TestDeleteSteamAPIKeyPassesThroughBackendErrors(t *testing.T) {
+	backendErr := errors.New("secret service unavailable")
+	swapZKDelete(t, func(service, user string) error { return backendErr })
+
+	err := DeleteSteamAPIKey()
+	if !errors.Is(err, backendErr) {
+		t.Fatalf("DeleteSteamAPIKey() error = %v, want wrapped backend error", err)
+	}
+	if errors.Is(err, ErrMissing) {
+		t.Fatalf("backend error must not map to ErrMissing: %v", err)
+	}
+}
+
+func TestDeleteSteamAPIKeyErrorNeverContainsKey(t *testing.T) {
+	const sentinel = "SENTINEL"
+	zk.MockInit()
+	if err := zk.Set(config.AppID, config.KeyringUser, sentinel+"-key"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	swapZKDelete(t, func(service, user string) error { return errors.New("delete refused") })
+
+	err := DeleteSteamAPIKey()
+	if err == nil {
+		t.Fatal("DeleteSteamAPIKey() error = nil, want an error")
+	}
+	if strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("error text %q contains the key", err.Error())
+	}
+}
+
 func TestSetSteamAPIKeyRoundTripStoresTrimmedKey(t *testing.T) {
 	zk.MockInit()
 

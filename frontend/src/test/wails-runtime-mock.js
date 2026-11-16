@@ -22,6 +22,32 @@ export const Events = {
   }
 }
 
+// Browser.OpenURL records the URL instead of opening anything. __failBrowserOpen makes the next calls reject, the way
+// the runtime rejects when no browser can be launched.
+let openedUrls = []
+let browserOpenError = null
+
+export const Browser = {
+  OpenURL(url) {
+    openedUrls.push(String(url))
+    if (browserOpenError) return Promise.reject(browserOpenError)
+    return Promise.resolve()
+  }
+}
+
+export function __openedUrls() {
+  return [...openedUrls]
+}
+
+export function __failBrowserOpen(error) {
+  browserOpenError = error
+}
+
+export function __resetBrowser() {
+  openedUrls = []
+  browserOpenError = null
+}
+
 // __emitWailsEvent delivers synchronously to a snapshot of the listeners, so a callback may unsubscribe safely.
 export function __emitWailsEvent(name, data) {
   const set = listeners.get(name)

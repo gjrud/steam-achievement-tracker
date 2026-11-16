@@ -72,8 +72,8 @@ export async function openHadesMenu() {
 
 export async function openClearDialog(user) {
   await user.click(await screen.findByRole('button', {name: 'Settings'}))
-  await user.click(screen.getByRole('button', {name: 'Clear data'}))
-  return screen.getByRole('dialog', {name: 'Clear active user data?'})
+  await user.click(screen.getByRole('button', {name: 'Remove profile'}))
+  return screen.getByRole('dialog', {name: 'Remove active profile?'})
 }
 
 export function baseState() {

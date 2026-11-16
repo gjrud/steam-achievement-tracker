@@ -1,6 +1,16 @@
+<script context="module">
+  // Counts form instances so each one gets its own domain-hint id.
+  let formCount = 0
+</script>
+
 <script>
   import {onMount, tick} from 'svelte'
+  import {Browser} from '@wailsio/runtime'
   import {formatMessage} from '../format.js'
+  // Where the user generates a key. A plain <a href> would navigate the webview itself, so clicks are routed to the
+  // system browser; the real href stays for accessibility and copy/paste.
+  const KEY_PAGE_URL = 'https://steamcommunity.com/dev/apikey'
+  const hintId = `key-domain-hint-${++formCount}`
   // saving: a save is in flight (App-wide, so a remounted form still sees it). disabled: the caller blocks saving for
   // another reason (profile validate/save in progress).
   export let saving = false
@@ -15,6 +25,7 @@
   // field), and it is never copied into `error` or rendered as text.
   let key = ''
   let error = ''
+  let linkError = ''
   let input = null
 
   $: blocked = saving || disabled
@@ -23,6 +34,17 @@
   onMount(() => {
     if (autofocus) input?.focus()
   })
+
+  // The link is not part of saving, so it stays clickable while saving or disabled. A failed open is shown inline; the
+  // rejection is caught here so it never surfaces as an unhandled promise rejection.
+  async function openKeyPage() {
+    linkError = ''
+    try {
+      await Browser.OpenURL(KEY_PAGE_URL)
+    } catch {
+      linkError = `Could not open the browser. Visit ${KEY_PAGE_URL}`
+    }
+  }
 
   // onSave rejects on failure (App rethrows); the error is shown here so the banner stays free of duplicates.
   async function submit() {
@@ -51,4 +73,6 @@
   </label>
   <button class="primary" type="submit" disabled={!canSave}>{saving ? 'Saving…' : 'Save key'}</button>
 </form>
+<p class="key-note"><a class="key-link" href={KEY_PAGE_URL} rel="noopener noreferrer" aria-describedby={hintId} on:click|preventDefault={openKeyPage}>Get a Steam Web API key</a><span id={hintId} class="key-hint muted">When Steam asks for a domain name, enter localhost.</span></p>
+{#if linkError}<p class="error-text" role="alert">{linkError}</p>{/if}
 {#if error}<p class="error-text" role="alert">{error}</p>{/if}

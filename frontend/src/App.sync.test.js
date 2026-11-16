@@ -541,72 +541,29 @@ describe('App sync events', () => {
   test('a failed clear-data action keeps its banner while later events refresh the sync', async () => {
     const getState = vi.fn()
       .mockResolvedValueOnce(syncingState(1))
-      .mockResolvedValueOnce(finishedState())
+      .mockResolvedValue(finishedState())
     __setWailsMocks({GetAppState: getState, ClearActiveUserData: rejecting()})
 
     render(App)
     await settle()
 
     await fireEvent.click(screen.getByRole('button', {name: 'Settings'}))
-    await fireEvent.click(screen.getByRole('button', {name: 'Clear data'}))
-    const dialog = screen.getByRole('dialog', {name: 'Clear active user data?'})
+    await fireEvent.click(screen.getByRole('button', {name: 'Remove profile'}))
+    const dialog = screen.getByRole('dialog', {name: 'Remove active profile?'})
     await fireEvent.input(within(dialog).getByLabelText(/Type this exact value/), {target: {value: '76561198000000000'}})
-    await fireEvent.click(within(dialog).getByRole('button', {name: 'Clear data'}))
+    await fireEvent.click(within(dialog).getByRole('button', {name: 'Remove profile'}))
     await settle()
     expect(screen.getByText(failureMessage)).toBeInTheDocument()
 
+    // The failed clear re-reads the state once (the backend may have deleted the key first). The banner survives it.
+    expect(getState).toHaveBeenCalledTimes(2)
     await advance(1000)
-    expect(getState).toHaveBeenCalledTimes(1)
+    expect(getState).toHaveBeenCalledTimes(2)
 
     emitSyncChanged()
     await settle()
-    expect(getState).toHaveBeenCalledTimes(2)
+    expect(getState).toHaveBeenCalledTimes(3)
     expect(screen.getByText(failureMessage)).toBeInTheDocument()
-  })
-})
-
-describe('App API key save during a sync', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-  })
-
-  afterEach(() => {
-    cleanup()
-    vi.clearAllTimers()
-    vi.useRealTimers()
-  })
-
-  // A save with the unlock prompt still open must not hold reads (no beginAction), so sync:changed keeps updating the
-  // dashboard while the save is pending.
-  test('live sync updates keep arriving while a key save is pending', async () => {
-    let resolveKey
-    const getState = vi.fn()
-      .mockResolvedValueOnce(syncingState(1))
-      .mockResolvedValue(syncingState(3))
-    __setWailsMocks({
-      GetAppState: getState,
-      SaveAPIKey: vi.fn(() => new Promise((resolve) => {
-        resolveKey = resolve
-      }))
-    })
-
-    render(App)
-    await settle()
-    await fireEvent.click(screen.getByRole('button', {name: 'Settings'}))
-    await fireEvent.click(screen.getByRole('button', {name: 'Replace key'}))
-    await fireEvent.input(screen.getByLabelText('Steam Web API key'), {target: {value: 'steam-key'}})
-    await fireEvent.click(screen.getByRole('button', {name: 'Save key'}))
-    await settle()
-    expect(screen.getByRole('button', {name: 'Saving…'})).toBeDisabled()
-
-    emitSyncChanged()
-    await settle()
-    expect(getState).toHaveBeenCalledTimes(2)
-    expect(screen.getByText('Syncing 3 / 6')).toBeInTheDocument()
-
-    resolveKey()
-    await settle()
-    expect(screen.queryByLabelText('Steam Web API key')).not.toBeInTheDocument()
   })
 })
 
