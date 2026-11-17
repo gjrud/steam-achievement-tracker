@@ -43,6 +43,24 @@ All methods take a `context.Context` first. Every request is built with that con
 
 Legacy means the pre-IPlayerService path, used only as a fallback by the syncer (see [syncer.md](syncer.md#per-game-refresh)). Remove these methods together with the legacy sync path once Steam documents `GetGameAchievements`.
 
+## Data sources
+
+This table maps each kind of data to the endpoint that provides it. Parameters are in the table above and in the sections below.
+
+| Data | Endpoint | Key sent | Notes |
+| --- | --- | --- | --- |
+| Profile name and avatar | `ISteamUser/GetPlayerSummaries/v2` | yes | Used during profile validation and stored as `profiles.avatar_url`. |
+| Vanity name to SteamID64 | `ISteamUser/ResolveVanityURL/v1` | yes | Used for vanity names and `/id/<name>` URLs. |
+| Owned games, names, playtime, library capsule file name, purchased and vetted status | `IPlayerService/GetOwnedGames/v0001` (up to three calls) | yes | Unvetted apps are included unless the profile's **Include unvetted apps** setting is off, and played free games follow **Include played free games**. Any failed or unusable answer fails the run before a game is synced. See [Library fetch](#library-fetch-getownedgames). |
+| Achievement schema, sets, global unlock percentages | `IPlayerService/GetGameAchievements/v1` | yes | The main path. One call returns the whole schema of an app, including each achievement's `player_percent_unlocked`. |
+| Unlocked achievements of the profile | `IPlayerService/GetUserAchievements/v1` | yes | Main path. Needs the profile's game stats to be public. |
+| Legacy schema, unlock and percentage data | `ISteamUserStats/GetSchemaForGame/v2`, `ISteamUserStats/GetPlayerAchievements/v1`, `ISteamUserStats/GetGlobalAchievementPercentagesForApp/v0002` | yes (the percentages call sends none) | Fallback only, when `GetGameAchievements` fails with an error that is not transient or with an EResult error, and the game has no stored set data (`Repo.HasSetData` is false; see [syncer.md](syncer.md#per-game-refresh)). |
+| Store item assets (library, hero, header and main capsule file names) | `IStoreBrowseService/GetItems/v1` | no | One app per call. Only for stale DLC covers and for base games without a usable owned-games capsule. See [covers.md](covers.md). |
+| Cover image files | `https://shared.akamai.steamstatic.com/store_item_assets/` (primary) and `https://shared.steamstatic.com/store_item_assets/` (fallback) | no | Downloaded to the cover cache. See [covers.md](covers.md). |
+| Steam avatar image | The `avatarfull` (or `avatarmedium`) URL from `ISteamUser/GetPlayerSummaries/v2` | no | Not fetched by the Go client. The webview loads it as an `<img>` in the profile card. The URL is stored in `profiles.avatar_url`. |
+
+Nothing is sent to a non-Steam service.
+
 ### Public types
 
 - `PlayerSummary{SteamID64, DisplayName, AvatarURL}`. `AvatarURL` is `avatarfull`, falling back to `avatarmedium`.

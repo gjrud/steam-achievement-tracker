@@ -118,7 +118,8 @@ Created by `migrate`, not by a migration.
 
 ### `profiles`
 
-One row per connected Steam account.
+One row per connected Steam account. Removing a profile without **Delete profile data** keeps its row, so connecting the
+same SteamID64 again restores its data (see [app-service.md](app-service.md)).
 
 | Column | Type | Null | Key | Notes |
 | --- | --- | --- | --- | --- |
@@ -267,6 +268,10 @@ Rows are removed only by `ClearProfileData`. No pruning exists, so the table gro
 ### `sync_runs`
 
 One row per sync run.
+
+A `running` row with no live sync is one whose final status could not be saved (`FinishSyncRun` failed). The app reports
+that run as `failed` with a stale-run message when it reads the row, and leaves the row as it is. The next app start sets
+such rows to `canceled` (`CancelRunningSyncRuns`). See [syncer.md](syncer.md#run-statuses).
 
 | Column | Type | Null | Key | Default | Notes |
 | --- | --- | --- | --- | --- | --- |

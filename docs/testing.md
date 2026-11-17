@@ -1,7 +1,7 @@
 # Testing
 
-Test strategy, layout, helpers and commands. The README has a short user-facing version
-(`Testing`). This file lists what each suite covers and how to add tests.
+Test strategy, layout, helpers and commands. The user guide ([../README.md](../README.md)) has no testing section.
+This file lists what each suite covers and how to add tests.
 
 Strategy in one paragraph: Go tests drive the package APIs against real SQLite databases and a
 real on-disk image cache, and fake only the Steam HTTP endpoints. Isolation comes from temp
@@ -180,8 +180,8 @@ first-out, so `Fallback` must be registered after the `TempDir` or `Isolate` cal
 
 ## Race detector
 
-`go test -race` is part of the CI race check (the Linux and Windows legs both run it). README
-and `covers_test.go` note that some regressions appear only under `-race`:
+`go test -race` is part of the CI race check (the Linux and Windows legs both run it). Some regressions appear only
+under `-race`, and the tests below are written to catch them:
 
 - `TestCoverServiceReadsPathsSafelyWhileInitializing` reads the app paths while
   `ensureInitialized` writes them. Its comment says that without the race detector the
@@ -189,11 +189,11 @@ and `covers_test.go` note that some regressions appear only under `-race`:
 - `TestWriteRacingInitAndFallback` (logging) hammers `Writer` while `Init` and `Fallback` swap the
   logger. It mainly guards against a deadlock (60 s timeout) and against writes reaching a released
   file. `-race` adds detection of data races in the logger swap.
-- Sync cancellation: README lists it with the cover service as a race-only check. The cancellation paths are
-  exercised in `internal/syncer/syncer_test.go` by `TestFullSyncCancellationPersistsFailedRun` and
-  `TestFullSyncCancelAfterAllGamesDispatchedFailsRun`, which cancel with four workers in flight. The App-side
-  sync state is covered by `app_test.go` `TestSyncNowStartsSyncAndRejectsSecondStart` and by
-  `app_events_test.go` `TestSyncEmitsChangedEventsEndingAfterFlagClears`.
+- Sync cancellation: the cancellation paths are exercised in `internal/syncer/syncer_test.go` by
+  `TestFullSyncCancellationPersistsFailedRun` and `TestFullSyncCancelAfterAllGamesDispatchedFailsRun`, which cancel with
+  four workers in flight. The App-side sync state is covered by `app_test.go`
+  `TestSyncNowStartsSyncAndRejectsSecondStart` and by `app_events_test.go`
+  `TestSyncEmitsChangedEventsEndingAfterFlagClears`.
 
 ## Benchmark
 
@@ -210,10 +210,9 @@ diagnostic. It has no threshold and CI does not run it.
   false timeouts under load)
 - `exclude-files`: `^frontend/`, `bindings`, `^main\.go$`
 
-Run it per package, because whole-module runs report false timeouts. The README suggests writing
-the report to `tmp/gremlins/<pkg>.json` (`tmp/` is git-ignored). A run where more than about 5%
-of mutants time out should be rerun with a higher coefficient before it is trusted. Gremlins
-results are not a gate and no coverage threshold exists.
+Run it per package, because whole-module runs report false timeouts. Write the report to
+`tmp/gremlins/<pkg>.json` (`tmp/` is git-ignored). A run where more than about 5% of mutants time out should be rerun
+with a higher coefficient before it is trusted. Gremlins results are not a gate and no coverage threshold exists.
 
 ## Frontend tests
 

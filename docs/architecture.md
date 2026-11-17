@@ -2,11 +2,27 @@
 
 This document describes how the Steam Achievement Tracker is put together: the layers, the startup and shutdown
 sequence, how the frontend talks to the Go backend, and the rules for errors, secrets and concurrency. It describes the
-code as of writing. The user guide is [../README.md](../README.md); the code is the source of truth.
+code as of writing. The user guide, [../README.md](../README.md), covers what the app does for users; the code is the
+source of truth.
 
 The app is a Wails v3 desktop application for Linux and Windows 10+ (amd64). The Go backend lives at the repository
 root (`main.go`, `app.go`, `covers.go`, `wailslog.go`) and in `internal/`. The Svelte 5 frontend lives in `frontend/`
 and is embedded into the binary from `frontend/dist`.
+
+## Stack
+
+| Concern | Technology |
+| --- | --- |
+| Desktop shell | [Wails v3](https://v3.wails.io) (`v3.1.0`). Linux: GTK 4 + WebKitGTK 6.0 through CGO. Windows 10+ amd64: WebView2. |
+| Backend | Go 1.26 (`go.mod`: 1.26.2). Exported `App` methods are bound to the frontend as a Wails service. |
+| Local storage | SQLite through `github.com/mattn/go-sqlite3` (CGO; SQLite is compiled in, no system library needed), WAL mode. |
+| Secrets | `github.com/zalando/go-keyring`: Secret Service (D-Bus) on Linux, Windows Credential Manager on Windows. |
+| Logging | Standard `log` with `gopkg.in/natefinch/lumberjack.v2` rotation. The Wails `slog` logger is bridged into it (`wailslog.go`). |
+| Frontend | Svelte 5 + Vite 8, talking to Go through generated Wails bindings and `@wailsio/runtime` `3.1.0`. The code imports the generated bindings from `frontend/bindings/`; no Wails v2 `wailsjs` runtime is used. |
+| Frontend tests | Vitest 5, Testing Library, jsdom. |
+| Build and packaging | Wails v3 CLI over [Task](https://taskfile.dev) (`Taskfile.yml`, `build/`). nfpm for deb, rpm and Arch packages, AppImage through `wails3 generate appimage`, Windows portable exe and NSIS user-scope installer (`build/windows/`). |
+
+Build steps and the release workflow are in [build-and-release.md](build-and-release.md).
 
 ## Layers
 

@@ -145,6 +145,65 @@ Pure functions. The modules import only from each other. Each has an exported li
 `tagTone` values are `success`, `info`, `accent`, `warn`, `danger` and `neutral`. `toneClass`
 prefixes them with `tone-`.
 
+### Sync band wording
+
+`syncBand` (`lib/sync.js`) builds the profile card's band from the latest run. The user guide describes the states in
+plain words. These are the strings the code produces:
+
+| Run state | Icon | Headline | Second line |
+| --- | --- | --- | --- |
+| `running`, total known | spin | `Syncing X / Y` | `detail` empty; time reads `Started <relative time>` |
+| `running`, total not known yet | spin | `Sync running` | `detail` empty; time reads `Started <relative time>` |
+| Run flag set, no run record yet | spin | `Sync starting` | `Starting sync…`, no time |
+| No run stored | clock | `No sync yet` | `Press Sync now to fetch your library` |
+| `success` | check | `All games synced` | `X / Y games`, omitted when the total is 0 |
+| `partial` | warn | `Partial sync · N failed`, or `Partial sync` when N is 0 | `X / Y games synced` |
+| `failed` | warn | `Sync failed · 1 error` or `Sync failed · N errors`, or `Sync failed` when N is 0 | `X / Y games synced` |
+| `canceled` | stop | `Sync canceled` | `X / Y games synced` |
+| Any other status | stop | The status text, or `Unknown` | `X / Y games synced` |
+
+`countsOf` (`lib/sync.js`) returns an empty string whenever the run's total is 0, for every finished state, not only
+`success`. The counts part of the second line is then omitted, and the band shows the headline and time only.
+
+Time: a finished run is dated by `finishedAt` (or `startedAt` when that is missing); a running run by `startedAt`. An
+unparseable or missing time gives no time text. `formatRelativeTime` (`lib/format.js`) reads `just now` under a minute,
+`N min ago` under an hour, `1 hour ago` or `N hours ago` under a day, and `1 day ago` or `N days ago` under seven days.
+From seven days on it shows the absolute date and time from `formatDateTime`. `ProfileCard.svelte` also sets that
+absolute time as the hover title and re-evaluates the relative text every 30 s. Its live region changes only on a state
+transition, never with counts or time.
+
+### Dashboard counters
+
+`SummaryStats.svelte` shows three groups: **Library** (`All games`, `Purchased`), **Completed** (`Completed games`,
+`Completed sets`) and **Unlocked** (`Achievements`). A completed counter shows `vetted (total)` only when some counted
+entries are unvetted. Its hover title and screen-reader text say `N vetted of M total`. The header stacks below 1180 px
+(`@media (max-width: 1180px)` in `app.css`).
+
+### Tag order and labels
+
+`lib/tag.js` keeps the chip order in `suggestionTagOptions`. Cards and filter chips sort their tags by that list, with
+`completed` first. Unknown tags come last in their stored order. The labels come from `tagLabel`:
+
+| Key | Label |
+| --- | --- |
+| `new_achievements_added` | New achievements added |
+| `almost_there` | Almost there |
+| `in_progress` | In progress |
+| `untouched` | Untouched |
+| `unvetted` | Unvetted |
+| `no_achievements` | No achievements |
+| `set` | Set |
+| `dlc` | DLC |
+| `dlc_not_owned` | Not owned |
+| `missing_achievements_in_dlc` | Achievements in DLC |
+| `missing_cover_art` | Missing cover art |
+| `sync_warning` | Sync error |
+| `completed` | Completed (first on completed cards, not in the chip list) |
+
+`gameTags` hides `new_achievements_added` and `missing_achievements_in_dlc` on completed cards, even when a stored tag
+is present. The backend's own read order differs (see [repository.md](repository.md)); the frontend order is the one
+users see.
+
 ## Components (lib/components)
 
 | Component | Role |
@@ -173,7 +232,8 @@ frontend.
 ## Incremental card grid
 
 `IncrementalGrid.svelte` keeps the DOM small for large libraries. Constants are declared in a
-`<script context="module">` block so tests can import them:
+`<script context="module">` block so tests can import them. Only the Not completed and Completed tabs use it
+(`DashboardShell.svelte`); `SyncErrorsView` and `DisabledView` render every row.
 
 | Constant | Value | Meaning |
 | --- | --- | --- |
@@ -185,7 +245,7 @@ frontend.
 Behavior:
 
 - `limit` starts at `INITIAL`. `resetKey` (trimmed search text plus tag filter) resets it. Other
-  refreshes keep the grown limit.
+  refreshes keep the grown limit. Switching tabs remounts the grid, so it also starts at `INITIAL`.
 - The `{#each}` renders `items.slice(0, limit)` and uses `entryKey` as the key.
 - A "Show more (shown of total)" button and a spacer sit after the grid. The spacer's height
   reserves the space of unmounted rows so the document keeps its full height. It is computed from

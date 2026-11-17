@@ -98,13 +98,13 @@ Calling it twice is safe. A nil `lifeCancel` (an `App` built as a literal in tes
 
 ## Initialization: ensureInitialized
 
-`ensureInitialized` is called at the start of every bound method except `RetryAPIKey`. `RetryAPIKey` re-reads the keyring
-first (`refreshAPIKey` does not call `ensureInitialized`), then reaches it only through `GetAppState`. A key read before
-init is replaced by the init read when init succeeds. `ensureInitialized` holds `initMu` for the whole sequence. If `initialized` is
-already true it returns. If not, it runs these steps:
+`ensureInitialized` is called at the start of every bound method except `RetryAPIKey`. `RetryAPIKey` re-reads the
+keyring first (`refreshAPIKey` does not call `ensureInitialized`), then reaches it only through `GetAppState`. A key
+read before init is replaced by the init read when init succeeds. `ensureInitialized` holds `initMu` for the whole
+sequence. If `initialized` is already true it returns. If not, it runs these steps:
 
-1. `appdata.Resolve()`, then `appdata.Ensure(paths)`. On failure: `logging.Fallback()`, record `create app directories: ...`
-   as the init error, return it.
+1. `appdata.Resolve()`, then `appdata.Ensure(paths)`. On failure: `logging.Fallback()`, record
+   `create app directories: ...` as the init error, return it.
 2. `logging.Init(paths.LogFile)`.
 3. `dbinit.OpenAndMigrate(paths)`. On failure: record the init error, return it.
 4. `repository.New(db)`, then `CancelRunningSyncRuns("app restarted before sync completed")`. Failure is logged only.
@@ -135,8 +135,8 @@ the generated bindings and in the frontend mock. "state" means the method return
 | `EnableGame` | `appID int64`, `groupID int64` | state, `error` | Clears `disabled` and its reason on one set, then recomputes its tags. | `no active profile`, DB errors. No check that the set exists. |
 
 Every method except `GetAppState` and `RetryAPIKey` can return the init error from `ensureInitialized`. Those two return
-the base state with `initError` set and no error. The `groupID` selects one achievement set of a game. Group `0` is the base set. The frontend passes the set's group id
-on every game action.
+the base state with `initError` set and no error. The `groupID` selects one achievement set of a game. Group `0` is the
+base set. The frontend passes the set's group id on every game action.
 
 ### GetAppState details
 
@@ -152,13 +152,15 @@ method re-reads the run under `mu`. If the run is no longer `running`, that row 
 `failed`, error `sync ended but its final status could not be saved`, and no finish time is shown.
 
 `syncStillRunning` reports the sync as over when the flag was cleared since the snapshot, or when the latest run of the
-active profile is above the baseline and has a final status. Under `mu` it re-reads `syncInProgress`, `syncProfileID`, `syncBaselineKnown` and `syncBaselineRunID`. It does not re-read
-the run from the database: `latest` is the run from the dashboard read in `GetAppState`.
+active profile is above the baseline and has a final status. Under `mu` it re-reads `syncInProgress`, `syncProfileID`,
+`syncBaselineKnown` and `syncBaselineRunID`. It does not re-read the run from the database: `latest` is the run from the
+dashboard read in `GetAppState`.
 
 ## Profile validation and vanity resolution
 
-`ValidateProfile` gets the key from `requireAPIKey`, which re-reads the keyring first (`refreshAPIKey`), builds a `steam.Client` with it, applies `steamBaseURL` if set, and calls
-`ResolveProfileInput`. That function in `internal/steam` accepts:
+`ValidateProfile` gets the key from `requireAPIKey`, which re-reads the keyring first (`refreshAPIKey`), builds a
+`steam.Client` with it, applies `steamBaseURL` if set, and calls `ResolveProfileInput`. That function in
+`internal/steam` accepts:
 
 | Input | Result |
 | --- | --- |
@@ -171,9 +173,9 @@ the run from the database: `latest` is the run from the dashboard read in `GetAp
 Input is trimmed first. An empty input is an error. `GetPlayerSummary` then fetches the display name and avatar
 (`avatarfull`, falling back to `avatarmedium`). No profile row is written by validation.
 
-The code treats a URL without a scheme, such as `steamcommunity.com/id/name`, as a vanity name. It does not parse with a
-host, so the whole string goes to the vanity lookup and fails. The README feature list names `steamcommunity.com/id/...`
-URLs without a scheme, which this code does not accept. The examples in the user guide use `https://`.
+The code treats a URL without a scheme, such as `steamcommunity.com/id/name`, as a vanity name, so the whole string goes
+to the vanity lookup and fails. The user guide asks for URLs with a scheme (`https://`). Any URL with a host is parsed
+(an error if no `/profiles/` or `/id/` segment matches), and anything else goes to the vanity lookup.
 
 `SaveProfile` takes the preview as given. It checks only that `steamId64` is not empty. It does not check the format
 and does not call Steam. The frontend passes back the object returned by `ValidateProfile`.
@@ -186,8 +188,8 @@ and does not call Steam. The frontend passes back the object returned by `Valida
 2. Under `mu`: returns quietly when a sync runs and `force` is false, returns `errSyncAlreadyInProgress` when it runs
    and `force` is true, otherwise sets `syncInProgress`, the cancel func, and `syncWG`.
 3. Emits `sync:changed`.
-4. Validates the state. Each early failure calls `endSync` (so the flag is cleared and the event is emitted):
-   no repo, no key (`keyring.ErrMissing`), a failed active-profile read, no active profile, client build failure (a failed
+4. Validates the state. Each early failure calls `endSync` (so the flag is cleared and the event is emitted): no repo,
+   no key (`keyring.ErrMissing`), a failed active-profile read, no active profile, client build failure (a failed
    library settings read), or failure to read the latest run.
 5. Records the profile's latest run id as the baseline.
 6. Starts a goroutine: `syncer.Service{Repo, Steam, Images: images.New(paths), OnChange: emitSyncChanged}.FullSync`.

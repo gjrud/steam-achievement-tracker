@@ -1,9 +1,81 @@
 # Build, packaging and release
 
-How the app is built, packaged and released. The user-facing install and release steps are in
-the README (`Build & run`, `Releasing`). This file describes the files behind them.
-Testing commands are in [testing.md](testing.md); frontend build details are in
-[frontend.md](frontend.md).
+How the app is built, packaged and released: the prerequisites, the local build commands, the packaging files, the
+CI and release workflows, and the release procedure ([Cutting a release](#cutting-a-release)). The user-facing install
+steps are in the [user guide](../README.md#install). Testing commands are in [testing.md](testing.md); frontend build
+details are in [frontend.md](frontend.md).
+
+## Prerequisites
+
+Development requirements. CI and the release workflow pin the same versions where they can (see
+[Upgrading Wails](#upgrading-wails)).
+
+- Go 1.26.2 or newer (`go.mod`). The Go image in `build/docker/Dockerfile.cross` uses `golang:1.26-trixie`.
+- Node.js 22.22.2 or newer on the 22.x line, 24.15 or newer on 24.x, or 26 or newer, with npm. Vite 8 alone needs
+  20.19+ or 22.12+; the test tooling (Vitest 5, jsdom 31) sets the stricter floor. CI uses Node 22.
+- The Wails v3 CLI, `wails3`, at the version in `go.mod` (`v3.1.0`):
+
+  ```sh
+  go install github.com/wailsapp/wails/v3/cmd/wails3@v3.1.0
+  ```
+
+- Linux build dependencies for Wails and CGO: a C compiler, `pkg-config`, the GTK 4 development headers and the
+  WebKitGTK 6.0 development headers. On Debian and Ubuntu:
+  `build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev`.
+- CGO for `github.com/mattn/go-sqlite3`. It compiles its own bundled SQLite, so only a C compiler is needed, not a
+  system SQLite library.
+- For real sync testing on either OS: a system keyring (Secret Service on Linux), a Steam Web API key, network access,
+  and a public Steam profile. The same applies to the compiled app.
+- Windows: Go, Node.js 22 and the Wails CLI as above; MinGW-w64 `gcc` on `PATH` for CGO; NSIS (`makensis`) for the
+  installer. The Windows build runs only on a Windows host. Cross-compiling from Linux or macOS is not supported.
+
+Run `wails3 doctor` to check the local Wails dependencies.
+
+## Local builds
+
+Run these from the repository root. Wails runs the frontend install, frontend build and bindings generation for you (see
+[Task files](#task-files)).
+
+```sh
+wails3 dev     # development mode: runs the app with the Vite dev server
+wails3 build   # production binary: bin/steam-achievement-tracker (bin\steam-achievement-tracker.exe on Windows)
+```
+
+`wails3 build` and `wails3 package` build for the current OS only. `wails3 task --list-all` lists every task.
+
+Linux packages (AppImage, deb, rpm and Arch) go to `bin/`:
+
+```sh
+VERSION=0.0.0-dev wails3 package
+```
+
+The package version comes only from the `VERSION` environment variable, which `build/linux/nfpm/nfpm.yaml` expands
+(`version: ${VERSION}`). The repository stores no version. Without `VERSION`, packaging still succeeds but produces a
+wrong version (a deb shows `0.0.0~rc0-1`), so always set it. Use the version without the `v` prefix, for example `1.2.3`
+or `1.2.3-rc.1`. A bare `bin/steam-achievement-tracker` runs, but has no menu entry or icon until a package installs it.
+
+The deb, rpm and Arch packages declare the GTK 4 and WebKitGTK 6.0 runtime packages as dependencies (see
+`build/linux/nfpm/nfpm.yaml`). They do not depend on a Secret Service provider, so install one separately. The AppImage
+step downloads `linuxdeploy`, so it needs network access.
+
+Windows (run on a Windows host with the dependencies above). Set `VERSION` first; in PowerShell:
+
+```powershell
+$env:VERSION = "0.0.0-dev"
+wails3 task windows:build                  # bin\steam-achievement-tracker.exe (GUI subsystem, no console)
+wails3 task windows:create:nsis:installer  # bin\steam-achievement-tracker-amd64-installer.exe, from the existing exe
+wails3 task windows:package                # build + installer
+```
+
+`VERSION` must start with `X.Y.Z`. Pre-release suffixes (`1.2.3-rc.1`) and a leading `v` are accepted, but Windows
+resources and NSIS take only the numeric core plus `.0`, so `1.2.3-rc.1` becomes `1.2.3.0`. The full tag name belongs in
+release filenames, which the release workflow sets. Without `VERSION` the tasks use `0.0.0`.
+`windows:create:nsis:installer` does not rebuild the exe. It writes the WebView2 bootstrapper (embedded in the Wails
+CLI) into `build/windows/nsis`, which git ignores.
+
+Generated bindings: after adding, removing or changing an exported `App` method, run `wails3 generate bindings` from the
+repository root. It writes `frontend/bindings/` (git-ignored). `wails3 dev` and `wails3 build` regenerate it too. Do not
+edit those files by hand.
 
 ## Task files
 
@@ -129,12 +201,18 @@ The header of `build/config.yml` warns not to run `common:update:build-assets` i
 - `scripts.postinstall`: `build/linux/nfpm/scripts/postinstall.sh`. It refreshes the desktop
   database, the hicolor icon cache, and the MIME database. The MIME step refers to
   `x-scheme-handler` custom URL schemes, but the app registers none (see Surprises below).
+- There is no pre-remove or post-remove script. Removing a package deletes only the installed files. The app's data,
+  cache, state folders and the keyring item stay, which matches the user guide.
 
 ### AppImage (build/linux/appimage)
 
 `create:appimage` uses `wails3 generate appimage`, not the script in this folder. The directory
 also holds `build.sh`, a `linuxdeploy` script that no task calls. The `.gitignore` entries for
 `linuxdeploy*` and `*.AppDir/` match what that script produces. See Surprises below.
+
+An AppImage cannot install the desktop entry and icons that the window uses. AppImageLauncher renames
+the entry, so on KDE the taskbar and menu icons are right but the window title bar may show a generic
+icon. The packages install the entry and icons directly, and the user guide notes the difference.
 
 ## Docker cross-compile image (build/docker/Dockerfile.cross)
 
@@ -144,8 +222,8 @@ compiler, or for another architecture). It is built once with
 
 - Base `golang:1.26-trixie`. Installs GTK 4 and WebKitGTK 6.0 development packages, GTK 3 and
   webkit2gtk-4.1 development packages (both checked with pkg-config), Node.js and npm (`build.sh`
-  runs `npm` when `frontend/dist` is missing), and garble (`GARBLE_VERSION=v0.16.0`). Zig 0.14.0 is downloaded and its SHA-256 checked against Zig's
-  index. A macOS SDK is downloaded for Darwin targets.
+  runs `npm` when `frontend/dist` is missing), and garble (`GARBLE_VERSION=v0.16.0`). Zig 0.14.0 is
+  downloaded and its SHA-256 checked against Zig's index. A macOS SDK is downloaded for Darwin targets.
 - `ENTRYPOINT /usr/local/bin/build.sh <os> <arch>` builds `bin/<app>-<os>-<arch>`, with
   `-tags production` (plus `EXTRA_TAGS`, and `wails_obfuscated` when `OBFUSCATED=true`).
 - Only the Linux targets are reachable from the Taskfiles. The Darwin and Windows wrappers are
@@ -170,10 +248,56 @@ compiler, or for another architecture). It is built once with
 - Job `test` (`needs: test-matrix`, `if: always()`, 5 min): passes only when the matrix succeeded.
   This is the required status check. Branch protection requires `test`, not the matrix legs.
 
+## Cutting a release
+
+Releases are built by `.github/workflows/release.yml` when a version tag is pushed. The tag is the only place the
+version is written.
+
+1. Merge the work into `main`. The repository allows only squash merges.
+2. Tag the tip of `main` and push the tag:
+
+   ```sh
+   git switch main && git pull
+   git tag -a v1.2.3 -m "v1.2.3"
+   git push origin v1.2.3
+   ```
+
+The tag must look like `vMAJOR.MINOR.PATCH`, optionally with a suffix (`v1.2.3-rc.1`). A suffix marks the release as a
+pre-release. The workflow then:
+
+1. Checks that the tagged commit is an ancestor of `origin/main`; otherwise nothing is published. Because only squash
+   merges are allowed, a tag on a PR-branch commit can never pass: tag the squashed commit on `main` instead. Tags are
+   immutable, so after a rejected tag either use the next version or follow the bad-tag procedure below.
+2. Runs the same checks as `ci.yml`.
+3. Runs `wails3 package` on Ubuntu 24.04, with the tag without its `v` as `VERSION`. It checks that the AppImage, deb,
+   rpm and Arch packages exist, that the deb version matches the tag, and that the build did not change `go.mod` or
+   `go.sum`.
+4. Runs the Windows job on `windows-latest` after the tests pass: `wails3 task windows:build`, then the NSIS installer
+   from the same exe. It checks that the exe's ProductVersion matches the tag's numeric core (`1.2.3-rc.1` gives
+   `1.2.3.0`), that the build did not change `go.mod` or `go.sum`, and that exactly the portable exe and the installer
+   exist. The files are renamed to `steam-achievement-tracker-<version>-windows-amd64-portable.exe` and
+   `...-windows-amd64-setup.exe`.
+5. Publishes a GitHub release with the four Linux packages, the two Windows executables, a source archive, `SHA256SUMS`,
+   build provenance attestations, and a changelog of every non-merge commit since the previous release, grouped by
+   conventional-commit type (see [Changelog](#changelog-githubscriptschangelogsh)). A final release lists changes since
+   the previous final release; pre-release tags are skipped.
+
+Windows executables are not code-signed, and that is deliberate: SmartScreen keeps warning until a build earns
+reputation, so signing was ruled out. Do not add signing steps. The Windows packaging path can only be validated by a
+real run, so test it with an `-rc` tag before a final release.
+
+Tags matching `v*` are protected by repository rulesets: only admins can create them, and they cannot be moved or
+deleted. To fix a bad tag, disable the *Release tags: immutable* ruleset in the repository settings, delete the release
+if one was published (`gh release delete vX.Y.Z --yes`) and the tag, re-push the tag, then re-enable the ruleset.
+Pushing a tag that already has a release fails at the publish step. Pushing more than three tags at once triggers no
+workflow runs. The Arch package of a pre-release gets the same version as the final release (nfpm drops the suffix
+there), so do not rely on pacman upgrading from a pre-release.
+
 ## Release (.github/workflows/release.yml)
 
-Trigger: a push of a tag matching `v[0-9]+.[0-9]+.[0-9]+*`. The `verify` job then checks the tag
-against `vMAJOR.MINOR.PATCH[-prerelease]`. Concurrency does not cancel (`cancel-in-progress: false`).
+The job-by-job reference for the release workflow. Trigger: a push of a tag matching
+`v[0-9]+.[0-9]+.[0-9]+*`. The `verify` job then checks the tag against `vMAJOR.MINOR.PATCH[-prerelease]`.
+Concurrency does not cancel (`cancel-in-progress: false`).
 
 | Job | Runs on | Steps |
 | --- | --- | --- |
@@ -216,7 +340,7 @@ Weekly updates for three ecosystems. The Go and npm groups cover minor and patch
 - Source of truth: the tag. The release workflow sets `VERSION=${GITHUB_REF_NAME#v}`. Locally,
   set `VERSION` yourself (`VERSION=0.0.0-dev wails3 package`). The repo does not store a version.
 - `nfpm.yaml` expands `${VERSION}`. Without it, packaging still succeeds with a wrong version
-  (the README records the resulting deb version as `0.0.0~rc0-1`), and no step fails. That silence is why the
+  (a deb built without `VERSION` shows `0.0.0~rc0-1`), and no step fails. That silence is why the
   release job checks the deb version.
 - Windows: `VERSION_CORE` and `WIN_VERSION` as above. `1.2.3-rc.1` becomes `1.2.3.0` in the exe and
   NSIS. Release artifact names keep the full version.
@@ -265,8 +389,8 @@ The Wails version appears in these places. Change all of them together:
    version (`go 1.26.2`).
 
 Changing a workflow or `changelog.sh` is a release change. Test it with a `-rc` pre-release tag
-before a final tag, because `v*` tags are immutable under the repository ruleset (README,
-`Releasing`).
+before a final tag, because `v*` tags are immutable under the repository ruleset (see
+[Cutting a release](#cutting-a-release)).
 
 ## Surprises and inconsistencies
 

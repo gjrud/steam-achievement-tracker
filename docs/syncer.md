@@ -279,7 +279,7 @@ The URL rules, the capsule chain and the freshness intervals are in [covers.md](
 
 ## Surprising behaviour
 
-Points a maintainer should know. These follow from the code, not from the README.
+Points a maintainer should know. They follow from the code as written.
 
 - **An empty achievement schema wipes the game's entries.** `GetGameAchievements` with an `x-eresult` of 1 (or no header) and a body without achievements, such as `{"response":{}}`, is decoded as "no achievements". `syncGame` then takes the `saveGameWithoutAchievements` path, which deletes this profile's unlock rows for the game (`profile_achievements`), deletes the shared `achievements` rows of the game only where no profile references them, and deletes all of the game's entries except group 0. No warning is recorded. The same holds for an empty 2xx body. `GetOwnedGames` guards against this, `GetGameAchievements` does not.
 - **An unusable user-achievement response reads as zero progress.** `GetUserAchievements` with `{"response":{}}` (EResult 1 or 42) returns no unlocks. Entries are then written with 0 unlocked achievements and are not warned.
@@ -289,7 +289,7 @@ Points a maintainer should know. These follow from the code, not from the README
 - **`partial` covers total failure.** A run where every game failed is `partial`, not `failed`. Only run-level errors make it `failed`.
 - **Counts appear late.** `games_total` is written with the first progress write, so the first game's progress is the first time the run shows a total.
 - **Two copies of the score formula.** `syncer.suggestionScore` and `repository.suggestionScoreOrFallback` both use `0.5/0.5`. Change both together.
-- **`In progress` depends on playtime.** The tag uses `playtime_forever > 0`. A game with playtime and no unlocked achievements is `in_progress`. The README describes this as "the game has progress"; the code means "has playtime".
+- **`In progress` depends on playtime.** The tag uses `playtime_forever > 0`. A game with playtime and no unlocked achievements is `in_progress`. The user guide describes the tag in the same terms, "the game has playtime", so the two agree; the tag is not based on unlocked achievements.
 
 ## Tests
 

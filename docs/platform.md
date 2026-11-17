@@ -85,6 +85,34 @@ Gotchas:
 - Tests that use `Isolate` or `Block` must not call `t.Parallel`, because they change process
   environment variables.
 
+## Files on disk
+
+Every file the app writes, and the code that creates it. `<data>`, `<cache>` and `<state>` are the three roots from the
+path layout above.
+
+| Path | Created by | Purpose |
+| --- | --- | --- |
+| `<data>/` | `appdata.Ensure` at startup | Data root, mode `0700`. |
+| `<data>/steam-achievement-tracker.db` | DB open and migration (`db.OpenAndMigrate`) | SQLite database: profiles, games, achievements, flags, tags, snapshots and sync history. See [database.md](database.md). |
+| `<data>/steam-achievement-tracker.db-wal`, `...-shm` | SQLite WAL mode | Write-ahead log and shared memory, present while the database is open. |
+| `<data>/backups/` | `appdata.Ensure` at startup (also the migration backup) | Backup folder, mode `0700`. |
+| `<data>/backups/steam-achievement-tracker-<unix-ns>.db` | Migration, before a schema change to a database that already has tables | Point-in-time copy of the database. Not created for a new database. See [database.md](database.md#backup-before-migration). |
+| `<cache>/` | `appdata.Ensure` at startup | Cache root, mode `0700`. |
+| `<cache>/images/games/` | `appdata.Ensure`, cover writes | Cover cache root. |
+| `<cache>/images/games/<appid>/library_600x900.jpg`, `hero_capsule.jpg`, `header.jpg`, `main_capsule.jpg` | Cover refresh (`images.Cache`) | Cached Steam images for one app, or for the DLC app id of a DLC set. See [covers.md](covers.md). |
+| `<cache>/webview/` | `main.go`, at every startup (Windows only) | Browser profile (cache and state) of the app window. Created before the window opens; kept on uninstall. |
+| `<state>/logs/` | `appdata.Ensure` at startup, and `logging.Init` | Log folder, mode `0700`. |
+| `<state>/logs/app.log` | `logging.Init` | Current log: app messages plus Wails warnings and errors. |
+| `<state>/logs/app-*.log` | Log rotation (lumberjack) | Rotated logs. Each up to 5 MB, with up to 5 backups kept. |
+
+The Steam Web API key is not a file. It is one keyring item outside the app folders: Secret Service with
+`service=steam-achievement-tracker`, `username=steam-web-api-key` on Linux, and a Credential Manager generic credential
+named `steam-achievement-tracker:steam-web-api-key` on Windows. `keyring.SetSteamAPIKey` writes it when the user saves the
+key, and only `ClearActiveUserData(_, true)` deletes it (see [app-service.md](app-service.md)).
+
+Deleting the cache folder is safe. The next sync downloads the covers again. The `cover_images` rows then point at missing
+files, and `NeedsRefresh` treats a missing file as stale (see [covers.md](covers.md)).
+
 ## internal/keyring
 
 Stores the Steam Web API key only in the OS keyring, through `github.com/zalando/go-keyring`:
