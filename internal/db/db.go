@@ -11,7 +11,6 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/gjrud/steam-achievement-tracker/internal/appdata"
-	"github.com/gjrud/steam-achievement-tracker/internal/config"
 	"github.com/gjrud/steam-achievement-tracker/internal/fsretry"
 )
 
@@ -26,7 +25,6 @@ type schemaState struct {
 	userVersion   int
 	hasMigrations bool
 	hasUserTables bool
-	isLegacyV1    bool
 }
 
 func OpenAndMigrate(paths appdata.Paths) (*sql.DB, error) {
@@ -53,12 +51,20 @@ func OpenAndMigrate(paths appdata.Paths) (*sql.DB, error) {
 	return conn, nil
 }
 
+// migrate brings the database to latestVersion(). Each migration and its schema_migrations row run in one
+// transaction with the user_version bump, so a failure leaves the previous schema in place.
 func migrate(conn *sql.DB, paths appdata.Paths) error {
+	target := latestVersion()
 	state, err := inspectSchema(conn)
 	if err != nil {
 		return err
 	}
-	if schemaCurrent(state) {
+	// Checked before any backup or migration: a database stamped above the latest known version would skip future
+	// migrations silently, and a downgrade must not touch it either.
+	if newer := max(state.version, state.userVersion); newer > target {
+		return fmt.Errorf("database schema version %d is newer than this build supports (%d)", newer, target)
+	}
+	if schemaCurrent(state, target) {
 		return nil
 	}
 	if err := backupBeforeMigration(conn, paths, state); err != nil {
@@ -73,21 +79,28 @@ func migrate(conn *sql.DB, paths appdata.Paths) error {
 	if err := ensureMigrationsTable(tx); err != nil {
 		return err
 	}
-	current, err := recordLegacyBaseline(tx, state)
-	if err != nil {
+	if err := applyMigrations(tx, state.version); err != nil {
 		return err
 	}
-	if err := applyMigrations(tx, current); err != nil {
-		return err
-	}
-	if err := setUserVersion(tx, config.SchemaVersion); err != nil {
+	if err := setUserVersion(tx, target); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func schemaCurrent(state schemaState) bool {
-	return state.version >= config.SchemaVersion && state.hasMigrations && state.userVersion >= config.SchemaVersion
+// latestVersion is the highest version in migrations, the version a fully migrated database reports.
+func latestVersion() int {
+	latest := 0
+	for _, m := range migrations {
+		if m.version > latest {
+			latest = m.version
+		}
+	}
+	return latest
+}
+
+func schemaCurrent(state schemaState, target int) bool {
+	return state.version >= target && state.hasMigrations && state.userVersion >= target
 }
 
 func backupBeforeMigration(conn *sql.DB, paths appdata.Paths, state schemaState) error {
@@ -97,21 +110,16 @@ func backupBeforeMigration(conn *sql.DB, paths appdata.Paths, state schemaState)
 	return backupDB(conn, paths)
 }
 
-func ensureMigrationsTable(tx *sql.Tx) error {
-	_, err := tx.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations(
+// schemaMigrationsSQL creates the table that records applied migrations. The test seed reuses it.
+const schemaMigrationsSQL = `CREATE TABLE IF NOT EXISTS schema_migrations(
   version integer primary key,
   name text not null,
   applied_at text not null
-);`)
-	return err
-}
+);`
 
-func recordLegacyBaseline(tx *sql.Tx, state schemaState) (int, error) {
-	if state.hasMigrations || !state.isLegacyV1 {
-		return state.version, nil
-	}
-	_, err := tx.Exec(`insert or ignore into schema_migrations(version, name, applied_at) values(1, 'initial_schema_legacy', ?)`, timestampUTC())
-	return 1, err
+func ensureMigrationsTable(tx *sql.Tx) error {
+	_, err := tx.Exec(schemaMigrationsSQL)
+	return err
 }
 
 func applyMigrations(tx *sql.Tx, current int) error {
@@ -145,6 +153,7 @@ func timestampUTC() string {
 	return time.Now().UTC().Format(time.RFC3339)
 }
 
+// inspectSchema reads the applied version from schema_migrations. A database without that table has version 0.
 func inspectSchema(conn *sql.DB) (schemaState, error) {
 	var state schemaState
 	if err := conn.QueryRow("PRAGMA user_version").Scan(&state.userVersion); err != nil {
@@ -156,13 +165,6 @@ func inspectSchema(conn *sql.DB) (schemaState, error) {
 		if err := conn.QueryRow(`select coalesce(max(version), 0) from schema_migrations`).Scan(&state.version); err != nil {
 			return state, err
 		}
-		return state, nil
-	}
-	state.isLegacyV1 = tableExists(conn, "profile_games") || state.userVersion >= 1
-	if state.isLegacyV1 {
-		state.version = 1
-	} else {
-		state.version = 0
 	}
 	return state, nil
 }
@@ -237,195 +239,10 @@ func secureDBFiles(paths appdata.Paths) {
 
 var migrations = []migration{
 	{version: 1, name: "initial_schema", sql: initialSchemaSQL},
-	{version: 2, name: "manual_game_flags", sql: manualGameFlagsSQL},
-	{version: 3, name: "profile_game_tags", sql: profileGameTagsSQL},
-	{version: 4, name: "profile_game_tags_playtime_fix", sql: profileGameTagsV4SQL},
-	{version: 5, name: "profile_game_tags_threshold_fix", sql: profileGameTagsV5SQL},
-	{version: 6, name: "profile_game_tags_suggestion_score_fix", sql: profileGameTagsV6SQL},
-	{version: 7, name: "profile_game_tags_threshold_40", sql: profileGameTagsV7SQL},
-	{version: 8, name: "profile_scoped_not_owned_flags", sql: profileScopedNotOwnedFlagsSQL},
-	{version: 9, name: "achievement_sets", sql: achievementSetsSQL},
-	{version: 10, name: "dlc_not_owned_sets", sql: dlcNotOwnedSetsSQL},
-	{version: 11, name: "purchased_games", sql: purchasedGamesSQL},
-	{version: 12, name: "profile_owned_games", sql: profileOwnedGamesSQL},
-	{version: 13, name: "profile_library_settings", sql: profileLibrarySettingsSQL},
-	{version: 14, name: "profile_owned_games_vetted", sql: profileOwnedGamesVettedSQL},
 }
 
-// profileOwnedGamesVettedSQL records per profile whether the app is in Steam's vetted list (vetted=1). An unvetted
-// app (vetted=0) is one the library returns only when unvetted apps are included. Rows from before this migration
-// default to 1 (vetted) until the next owned-games sync sets the flag.
-const profileOwnedGamesVettedSQL = `
-ALTER TABLE profile_owned_games ADD COLUMN vetted integer not null default 1;
-`
-
-// profileLibrarySettingsSQL stores the library sync options per profile. A profile without a row uses the
-// defaults (both on), so no backfill is needed. Rows are removed with their profile (see repository.ClearProfileData).
-const profileLibrarySettingsSQL = `
-CREATE TABLE IF NOT EXISTS profile_library_settings(
-  profile_id integer primary key,
-  include_unvetted_apps integer not null default 1,
-  include_played_free_games integer not null default 1,
-  updated_at text not null,
-  foreign key(profile_id) references profiles(id)
-);
-`
-
-// purchasedGamesSQL records whether the game is in the account's purchased list. Rows from before this
-// migration default to 0 (not known to be purchased) until the next owned-games sync sets the flag.
-const purchasedGamesSQL = `
-ALTER TABLE games ADD COLUMN purchased integer not null default 0;
-`
-
-// profileOwnedGamesSQL moves the per-account game facts out of the global games table and into
-// profile_owned_games, keyed by (profile_id, appid): playtime_forever and the purchased flag. Two profiles
-// that own the same app therefore keep their own playtime and purchased state, and syncing one profile never
-// changes the other. Pure games facts (name, achievements, cover) stay in games.
-//
-// Backfill: every (profile_id, appid) entry gets the legacy games.playtime_forever and games.purchased values.
-// The global purchased flag was last written by whichever profile synced, so it is copied to every profile
-// that has the game; the next owned-games sync for each profile sets the real per-profile value.
-//
-// Legacy columns: games.playtime_forever and games.purchased are no longer read or written by app code after
-// this migration. They stay in place (SQLite drop-column is risky). Inserts into games may still take the
-// column defaults, which is harmless.
-//
-// Views and triggers: none exist in the schema, so nothing else depends on the legacy columns. Older
-// migrations (3-10) still mention games.playtime_forever, but they have already run and are not re-executed.
-const profileOwnedGamesSQL = `
-CREATE TABLE IF NOT EXISTS profile_owned_games(
-  profile_id integer not null,
-  appid integer not null,
-  playtime_forever integer not null default 0,
-  purchased integer not null default 0,
-  updated_at text not null,
-  primary key(profile_id, appid),
-  foreign key(profile_id) references profiles(id),
-  foreign key(appid) references games(appid)
-);
-
-INSERT OR IGNORE INTO profile_owned_games(profile_id, appid, playtime_forever, purchased, updated_at)
-SELECT pg.profile_id, pg.appid, coalesce(max(g.playtime_forever), 0), coalesce(max(g.purchased), 0), datetime('now')
-FROM profile_games pg LEFT JOIN games g ON g.appid=pg.appid
-GROUP BY pg.profile_id, pg.appid;
-`
-
-// dlcNotOwnedSetsSQL adds the per-entry DLC ownership fact (sets of DLC the profile does not own are now
-// entries too). Completed entries no longer carry the derived new-achievements and DLC-missing issue tags,
-// so those stale rows are removed here; later syncs and flag changes recompute tags on their own.
-const dlcNotOwnedSetsSQL = `
-ALTER TABLE profile_games ADD COLUMN dlc_not_owned integer not null default 0;
-
-DELETE FROM profile_game_tags
-WHERE tag IN ('new_achievements_added', 'missing_achievements_in_dlc')
-  AND EXISTS (
-    SELECT 1 FROM profile_games pg
-    WHERE pg.profile_id=profile_game_tags.profile_id
-      AND pg.appid=profile_game_tags.appid
-      AND pg.groupid=profile_game_tags.groupid
-      AND pg.is_completed=1
-  );
-`
-
-// achievementSetsSQL rebuilds per-entry tables with groupid in the PK (SQLite cannot alter a PK).
-// Existing rows become group 0 so single-set semantics are preserved.
-const achievementSetsSQL = `
-CREATE TABLE IF NOT EXISTS game_sets(
-  appid integer not null,
-  groupid integer not null,
-  name text not null default '',
-  dlcappid integer not null default 0,
-  sort_order integer not null default 0,
-  updated_at text not null,
-  primary key(appid, groupid),
-  foreign key(appid) references games(appid)
-);
-
-ALTER TABLE achievements ADD COLUMN groupid integer not null default 0;
-ALTER TABLE achievements ADD COLUMN archived integer not null default 0;
-
-ALTER TABLE game_snapshots ADD COLUMN groupid integer not null default 0;
-
-CREATE TABLE profile_games_v9(
-  profile_id integer not null,
-  appid integer not null,
-  groupid integer not null default 0,
-  total_achievements integer not null default 0,
-  unlocked_achievements integer not null default 0,
-  completion_percent real not null default 0,
-  missing_avg_unlock real,
-  suggestion_score real,
-  is_completed integer not null default 0,
-  was_completed integer not null default 0,
-  newly_incomplete integer not null default 0,
-  sync_warning integer not null default 0,
-  last_error text,
-  last_error_at text,
-  last_synced_at text,
-  primary key(profile_id, appid, groupid),
-  foreign key(profile_id) references profiles(id),
-  foreign key(appid) references games(appid)
-);
-INSERT INTO profile_games_v9(profile_id, appid, groupid, total_achievements, unlocked_achievements, completion_percent, missing_avg_unlock, suggestion_score, is_completed, was_completed, newly_incomplete, sync_warning, last_error, last_error_at, last_synced_at)
-SELECT profile_id, appid, 0, total_achievements, unlocked_achievements, completion_percent, missing_avg_unlock, suggestion_score, is_completed, was_completed, newly_incomplete, sync_warning, last_error, last_error_at, last_synced_at
-FROM profile_games;
-DROP TABLE profile_games;
-ALTER TABLE profile_games_v9 RENAME TO profile_games;
-
-CREATE TABLE profile_game_flags_v9(
-  profile_id integer not null,
-  appid integer not null,
-  groupid integer not null default 0,
-  manual_was_completed integer not null default 0,
-  missing_achievements_in_dlc integer not null default 0,
-  disabled integer not null default 0,
-  disabled_reason text,
-  created_at text not null,
-  updated_at text not null,
-  primary key(profile_id, appid, groupid),
-  foreign key(profile_id) references profiles(id),
-  foreign key(appid) references games(appid)
-);
-INSERT INTO profile_game_flags_v9(profile_id, appid, groupid, manual_was_completed, missing_achievements_in_dlc, disabled, disabled_reason, created_at, updated_at)
-SELECT profile_id, appid, 0, manual_was_completed, missing_achievements_in_dlc, disabled, disabled_reason, created_at, updated_at
-FROM profile_game_flags;
-DROP TABLE profile_game_flags;
-ALTER TABLE profile_game_flags_v9 RENAME TO profile_game_flags;
-CREATE INDEX IF NOT EXISTS idx_profile_game_flags_profile_disabled on profile_game_flags(profile_id, disabled);
-
-CREATE TABLE profile_game_tags_v9(
-  profile_id integer not null,
-  appid integer not null,
-  groupid integer not null default 0,
-  tag text not null,
-  score real,
-  reason text,
-  computed_at text not null,
-  primary key(profile_id, appid, groupid, tag),
-  foreign key(profile_id) references profiles(id),
-  foreign key(appid) references games(appid)
-);
-INSERT INTO profile_game_tags_v9(profile_id, appid, groupid, tag, score, reason, computed_at)
-SELECT profile_id, appid, 0, tag, score, reason, computed_at
-FROM profile_game_tags;
-DROP TABLE profile_game_tags;
-ALTER TABLE profile_game_tags_v9 RENAME TO profile_game_tags;
-CREATE INDEX IF NOT EXISTS idx_profile_game_tags_profile_tag on profile_game_tags(profile_id, tag);
-
-CREATE TABLE IF NOT EXISTS cover_images(
-  image_appid integer primary key,
-  kind text not null,
-  file_name text not null,
-  path text,
-  source_url text,
-  checked_at text,
-  downloaded_at text
-);
-INSERT OR IGNORE INTO cover_images(image_appid, kind, file_name, path, source_url, checked_at, downloaded_at)
-SELECT appid, 'library', 'library_600x900.jpg', cover_path, cover_source_url, cover_checked_at, cover_downloaded_at
-FROM games WHERE coalesce(cover_path,'') <> '';
-`
-
+// initialSchemaSQL creates the complete current schema in one step. Nothing older than this layout was ever shipped,
+// so there is no upgrade path from earlier layouts. Later schema changes go in new entries appended to migrations.
 const initialSchemaSQL = `
 CREATE TABLE IF NOT EXISTS settings(
   key text primary key,
@@ -442,25 +259,43 @@ CREATE TABLE IF NOT EXISTS profiles(
   last_synced_at text
 );
 
+-- Shared Steam app metadata. Per-account facts live in profile_owned_games, per-profile game state in
+-- profile_games and profile_game_flags, and cover cache state in cover_images.
 CREATE TABLE IF NOT EXISTS games(
   appid integer primary key,
   name text not null,
-  playtime_forever integer not null default 0,
   has_achievements integer not null default 0,
   achievement_status text not null default 'unknown',
-  disabled integer not null default 0,
-  disabled_reason text,
-  cover_path text,
-  cover_source_url text,
-  cover_checked_at text,
-  cover_downloaded_at text,
   created_at text not null,
   updated_at text not null
 );
 
+CREATE TABLE IF NOT EXISTS game_sets(
+  appid integer not null,
+  groupid integer not null,
+  name text not null default '',
+  dlcappid integer not null default 0,
+  sort_order integer not null default 0,
+  updated_at text not null,
+  primary key(appid, groupid),
+  foreign key(appid) references games(appid)
+);
+
+CREATE TABLE IF NOT EXISTS cover_images(
+  image_appid integer primary key,
+  kind text not null,
+  file_name text not null,
+  path text,
+  source_url text,
+  checked_at text,
+  downloaded_at text
+);
+
+-- One row per (profile, app, groupid) entry. groupid 0 is the base game; other groupids are DLC or set entries.
 CREATE TABLE IF NOT EXISTS profile_games(
   profile_id integer not null,
   appid integer not null,
+  groupid integer not null default 0,
   total_achievements integer not null default 0,
   unlocked_achievements integer not null default 0,
   completion_percent real not null default 0,
@@ -470,18 +305,43 @@ CREATE TABLE IF NOT EXISTS profile_games(
   was_completed integer not null default 0,
   newly_incomplete integer not null default 0,
   sync_warning integer not null default 0,
+  dlc_not_owned integer not null default 0,
   last_error text,
   last_error_at text,
   last_synced_at text,
+  primary key(profile_id, appid, groupid),
+  foreign key(profile_id) references profiles(id),
+  foreign key(appid) references games(appid)
+);
+
+-- Per-profile facts about an owned game. vetted=0 means Steam returns the app only with unvetted apps included.
+CREATE TABLE IF NOT EXISTS profile_owned_games(
+  profile_id integer not null,
+  appid integer not null,
+  playtime_forever integer not null default 0,
+  purchased integer not null default 0,
+  vetted integer not null default 1,
+  updated_at text not null,
   primary key(profile_id, appid),
   foreign key(profile_id) references profiles(id),
   foreign key(appid) references games(appid)
 );
 
+-- Library sync options per profile. A profile without a row uses the defaults (both on).
+CREATE TABLE IF NOT EXISTS profile_library_settings(
+  profile_id integer primary key,
+  include_unvetted_apps integer not null default 1,
+  include_played_free_games integer not null default 1,
+  updated_at text not null,
+  foreign key(profile_id) references profiles(id)
+);
+
 CREATE TABLE IF NOT EXISTS achievements(
   appid integer not null,
   apiname text not null,
+  groupid integer not null default 0,
   global_percent real,
+  archived integer not null default 0,
   updated_at text not null,
   primary key(appid, apiname),
   foreign key(appid) references games(appid)
@@ -503,6 +363,7 @@ CREATE TABLE IF NOT EXISTS game_snapshots(
   id integer primary key autoincrement,
   profile_id integer not null,
   appid integer not null,
+  groupid integer not null default 0,
   total_achievements integer not null,
   unlocked_achievements integer not null,
   completion_percent real not null,
@@ -525,301 +386,38 @@ CREATE TABLE IF NOT EXISTS sync_runs(
   error text,
   foreign key(profile_id) references profiles(id)
 );
-`
 
-const manualGameFlagsSQL = `
+-- Manual and not-owned disables, per profile entry.
 CREATE TABLE IF NOT EXISTS profile_game_flags(
   profile_id integer not null,
   appid integer not null,
+  groupid integer not null default 0,
   manual_was_completed integer not null default 0,
   missing_achievements_in_dlc integer not null default 0,
   disabled integer not null default 0,
   disabled_reason text,
   created_at text not null,
   updated_at text not null,
-  primary key(profile_id, appid),
+  primary key(profile_id, appid, groupid),
   foreign key(profile_id) references profiles(id),
   foreign key(appid) references games(appid)
 );
 
 CREATE INDEX IF NOT EXISTS idx_profile_game_flags_profile_disabled on profile_game_flags(profile_id, disabled);
-`
 
-const profileGameTagsSQL = `
+-- Dashboard issue and suggestion tags, recomputed by the app per profile entry.
 CREATE TABLE IF NOT EXISTS profile_game_tags(
   profile_id integer not null,
   appid integer not null,
+  groupid integer not null default 0,
   tag text not null,
   score real,
   reason text,
   computed_at text not null,
-  primary key(profile_id, appid, tag),
+  primary key(profile_id, appid, groupid, tag),
   foreign key(profile_id) references profiles(id),
   foreign key(appid) references games(appid)
 );
 
 CREATE INDEX IF NOT EXISTS idx_profile_game_tags_profile_tag on profile_game_tags(profile_id, tag);
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'completed', null, 'completed', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=1;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'no_achievements', null, 'no achievements', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=0 AND (pg.total_achievements=0 OR g.has_achievements=0);
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'untouched', null, '0 playtime', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=0 AND pg.total_achievements>0 AND g.has_achievements=1 AND g.playtime_forever<=0;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-    SELECT profile_id, appid, CASE WHEN almost_score >= 40 THEN 'almost_there' ELSE 'in_progress' END, almost_score, reason, datetime('now')
-FROM (
-  SELECT pg.profile_id, pg.appid,
-    coalesce(pg.suggestion_score, pg.completion_percent * 0.50 + coalesce(pg.missing_avg_unlock, 0) * 0.50) AS almost_score,
-    printf('%.1f%% completion, %.1f%% missing avg unlock, suggestion score', pg.completion_percent, coalesce(pg.missing_avg_unlock, 0)) AS reason
-  FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-  WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=0 AND pg.total_achievements>0 AND g.has_achievements=1 AND g.playtime_forever>0
-);
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'new_achievements_added', null, 'previously completed, now incomplete', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.newly_incomplete=1;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'missing_achievements_in_dlc', null, 'manual DLC-missing flag', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND f.missing_achievements_in_dlc=1;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'missing_cover_art', null, 'no cached cover image', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND coalesce(g.cover_path,'')='';
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'sync_warning', null, 'latest sync warning', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.sync_warning=1;
-`
-
-const profileGameTagsV4SQL = `
-DELETE FROM profile_game_tags
-WHERE tag IN ('completed', 'no_achievements', 'untouched', 'in_progress', 'almost_there');
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'completed', null, 'completed', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=1;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'no_achievements', null, 'no achievements', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=0 AND (pg.total_achievements=0 OR g.has_achievements=0);
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'untouched', null, '0 playtime', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=0 AND pg.total_achievements>0 AND g.has_achievements=1 AND g.playtime_forever<=0;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-    SELECT profile_id, appid, CASE WHEN almost_score >= 40 THEN 'almost_there' ELSE 'in_progress' END, almost_score, reason, datetime('now')
-FROM (
-  SELECT pg.profile_id, pg.appid,
-    coalesce(pg.suggestion_score, pg.completion_percent * 0.50 + coalesce(pg.missing_avg_unlock, 0) * 0.50) AS almost_score,
-    printf('%.1f%% completion, %.1f%% missing avg unlock, suggestion score', pg.completion_percent, coalesce(pg.missing_avg_unlock, 0)) AS reason
-  FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-  WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=0 AND pg.total_achievements>0 AND g.has_achievements=1 AND g.playtime_forever>0
-);
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'new_achievements_added', null, 'previously completed, now incomplete', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.newly_incomplete=1;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'missing_achievements_in_dlc', null, 'manual DLC-missing flag', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND f.missing_achievements_in_dlc=1;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'missing_cover_art', null, 'no cached cover image', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND coalesce(g.cover_path,'')='';
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'sync_warning', null, 'latest sync warning', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.sync_warning=1;
-`
-
-const profileGameTagsV6SQL = `
-DELETE FROM profile_game_tags
-WHERE tag IN ('completed', 'no_achievements', 'untouched', 'in_progress', 'almost_there');
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'completed', null, 'completed', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=1;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'no_achievements', null, 'no achievements', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=0 AND (pg.total_achievements=0 OR g.has_achievements=0);
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'untouched', null, '0 playtime', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=0 AND pg.total_achievements>0 AND g.has_achievements=1 AND g.playtime_forever<=0;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-    SELECT profile_id, appid, CASE WHEN almost_score >= 40 THEN 'almost_there' ELSE 'in_progress' END, almost_score, reason, datetime('now')
-FROM (
-  SELECT pg.profile_id, pg.appid,
-    coalesce(pg.suggestion_score, pg.completion_percent * 0.50 + coalesce(pg.missing_avg_unlock, 0) * 0.50) AS almost_score,
-    printf('%.1f%% completion, %.1f%% missing avg unlock, suggestion score', pg.completion_percent, coalesce(pg.missing_avg_unlock, 0)) AS reason
-  FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-  WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=0 AND pg.total_achievements>0 AND g.has_achievements=1 AND g.playtime_forever>0
-);
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'new_achievements_added', null, 'previously completed, now incomplete', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.newly_incomplete=1;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'missing_achievements_in_dlc', null, 'manual DLC-missing flag', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND f.missing_achievements_in_dlc=1;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'missing_cover_art', null, 'no cached cover image', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND coalesce(g.cover_path,'')='';
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'sync_warning', null, 'latest sync warning', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.sync_warning=1;
-`
-
-const profileGameTagsV7SQL = `
-DELETE FROM profile_game_tags
-WHERE tag IN ('completed', 'no_achievements', 'untouched', 'in_progress', 'almost_there');
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'completed', null, 'completed', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=1;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'no_achievements', null, 'no achievements', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=0 AND (pg.total_achievements=0 OR g.has_achievements=0);
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'untouched', null, '0 playtime', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=0 AND pg.total_achievements>0 AND g.has_achievements=1 AND g.playtime_forever<=0;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT profile_id, appid, CASE WHEN almost_score >= 40 THEN 'almost_there' ELSE 'in_progress' END, almost_score, reason, datetime('now')
-FROM (
-  SELECT pg.profile_id, pg.appid,
-    coalesce(pg.suggestion_score, pg.completion_percent * 0.50 + coalesce(pg.missing_avg_unlock, 0) * 0.50) AS almost_score,
-    printf('%.1f%% completion, %.1f%% missing avg unlock, suggestion score', pg.completion_percent, coalesce(pg.missing_avg_unlock, 0)) AS reason
-  FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-  WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=0 AND pg.total_achievements>0 AND g.has_achievements=1 AND g.playtime_forever>0
-);
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'new_achievements_added', null, 'previously completed, now incomplete', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.newly_incomplete=1;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'missing_achievements_in_dlc', null, 'manual DLC-missing flag', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND f.missing_achievements_in_dlc=1;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'missing_cover_art', null, 'no cached cover image', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND coalesce(g.cover_path,'')='';
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'sync_warning', null, 'latest sync warning', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.sync_warning=1;
-`
-
-const profileScopedNotOwnedFlagsSQL = `
-INSERT INTO profile_game_flags(profile_id, appid, disabled, disabled_reason, created_at, updated_at)
-SELECT pg.profile_id, pg.appid, 1, coalesce(g.disabled_reason, 'not_owned'), datetime('now'), datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid
-WHERE g.disabled=1
-  AND pg.profile_id=coalesce(
-    (select profile_id from sync_runs where profile_id is not null order by id desc limit 1),
-    (select cast(value as integer) from settings where key='active_profile_id' limit 1),
-    -1
-  )
-ON CONFLICT(profile_id, appid) DO UPDATE SET
-  disabled=1,
-  disabled_reason=excluded.disabled_reason,
-  updated_at=excluded.updated_at;
-
-UPDATE games SET disabled=0, disabled_reason=null, updated_at=datetime('now') WHERE disabled=1;
-`
-
-const profileGameTagsV5SQL = `
-DELETE FROM profile_game_tags
-WHERE tag IN ('completed', 'no_achievements', 'untouched', 'in_progress', 'almost_there');
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'completed', null, 'completed', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=1;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'no_achievements', null, 'no achievements', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=0 AND (pg.total_achievements=0 OR g.has_achievements=0);
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'untouched', null, '0 playtime', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=0 AND pg.total_achievements>0 AND g.has_achievements=1 AND g.playtime_forever<=0;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-    SELECT profile_id, appid, CASE WHEN almost_score >= 40 THEN 'almost_there' ELSE 'in_progress' END, almost_score, reason, datetime('now')
-FROM (
-  SELECT pg.profile_id, pg.appid,
-    (pg.completion_percent * 0.50 + coalesce(pg.missing_avg_unlock, 0) * 0.35 + (100.0 / (1.0 + ((pg.total_achievements - pg.unlocked_achievements) / 5.0))) * 0.15) AS almost_score,
-    printf('%.1f%% complete, %.1f%% missing avg unlock, %d missing', pg.completion_percent, coalesce(pg.missing_avg_unlock, 0), pg.total_achievements - pg.unlocked_achievements) AS reason
-  FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-  WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.is_completed=0 AND pg.total_achievements>0 AND g.has_achievements=1 AND g.playtime_forever>0
-);
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'new_achievements_added', null, 'previously completed, now incomplete', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.newly_incomplete=1;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'missing_achievements_in_dlc', null, 'manual DLC-missing flag', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND f.missing_achievements_in_dlc=1;
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'missing_cover_art', null, 'no cached cover image', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND coalesce(g.cover_path,'')='';
-
-INSERT OR IGNORE INTO profile_game_tags(profile_id, appid, tag, score, reason, computed_at)
-SELECT pg.profile_id, pg.appid, 'sync_warning', null, 'latest sync warning', datetime('now')
-FROM profile_games pg JOIN games g ON g.appid=pg.appid LEFT JOIN profile_game_flags f ON f.profile_id=pg.profile_id AND f.appid=pg.appid
-WHERE g.disabled=0 AND coalesce(f.disabled,0)=0 AND pg.sync_warning=1;
 `

@@ -37,55 +37,126 @@ func assertFileMode(t *testing.T, path string, want os.FileMode) {
 	}
 }
 
+// brokenMigrationSQL creates a table, then fails on a missing table. Everything in it must roll back.
+const brokenMigrationSQL = `CREATE TABLE migration_probe(id integer primary key);
+INSERT INTO no_such_table VALUES(1);`
+
 func TestMigrationFailureRollsBackToPreviousSchema(t *testing.T) {
 	paths := testPaths(t)
-	seedV9Database(t, paths.DB)
-
-	// Migration 10 runs its ALTER and tag cleanup, then fails on a missing table. Everything must roll back.
-	broken := append([]migration(nil), migrations...)
-	for i := range broken {
-		if broken[i].version == 10 {
-			broken[i].sql = dlcNotOwnedSetsSQL + "\nINSERT INTO no_such_table VALUES(1);"
-		}
-	}
-	replaceMigrations(t, broken)
+	seedV1Database(t, paths.DB)
+	withExtraMigration(t, brokenMigrationSQL)
 
 	conn, err := OpenAndMigrate(paths)
 	if err == nil {
 		conn.Close()
 		t.Fatal("OpenAndMigrate() error = nil, want migration failure")
 	}
-	if !strings.Contains(err.Error(), "migration 010 dlc_not_owned_sets") {
-		t.Fatalf("error = %v, want migration 010 context", err)
+	if !strings.Contains(err.Error(), "migration 002 test_extra") {
+		t.Fatalf("error = %v, want migration 002 context", err)
 	}
 	// The pre-migration backup is taken before the transaction and is kept.
 	if n := len(backupFiles(t, paths)); n != 1 {
 		t.Fatalf("backup count after failed migration = %d, want 1", n)
 	}
 
-	assertRolledBackToV9(t, paths.DB)
+	assertRolledBackToV1(t, paths.DB)
 }
 
-// assertRolledBackToV9 reopens the file directly and checks that schema and rows match the seeded v9 database.
-func assertRolledBackToV9(t *testing.T, path string) {
+// assertRolledBackToV1 reopens the file directly and checks that schema and rows match the seeded v1 database.
+func assertRolledBackToV1(t *testing.T, path string) {
 	t.Helper()
 	raw := openRawDB(t, path)
-	assertUserVersion(t, raw, 9)
-	assertMigration(t, raw, 9)
-	assertCount(t, raw, `select count(*) from schema_migrations where version=10`, 0)
-	assertCount(t, raw, `select count(*) from pragma_table_info('profile_games') where name='dlc_not_owned'`, 0)
-	assertCount(t, raw, `select count(*) from profile_game_tags where profile_id=1 and appid=43 and tag='new_achievements_added'`, 1)
-	assertCount(t, raw, `select count(*) from profile_game_tags where profile_id=1 and appid=43 and tag='missing_achievements_in_dlc'`, 1)
-	assertCount(t, raw, `select count(*) from profile_games`, 3)
+	assertUserVersion(t, raw, 1)
+	assertMigration(t, raw, 1)
+	assertCount(t, raw, `select count(*) from schema_migrations where version=2`, 0)
+	assertCount(t, raw, `select count(*) from sqlite_master where type='table' and name='migration_probe'`, 0)
+	assertCount(t, raw, `select count(*) from profile_games`, 2)
+	assertCount(t, raw, `select count(*) from profile_games where profile_id=1 and appid=42 and total_achievements=10 and unlocked_achievements=7`, 1)
 }
 
-// The version record insert (applyMigration) runs after migration 10's ALTER and tag DELETE. A failure there
-// must roll the whole migration back, not just the record.
+// A database stamped above the latest known version must be refused before any backup or write, so future migrations
+// are not skipped silently and an older build cannot downgrade it. Covers a newer schema_migrations row and a
+// newer user_version alone.
+func TestOpenAndMigrateRejectsNewerSchema(t *testing.T) {
+	cases := []struct {
+		name  string
+		stamp string
+	}{
+		{name: "schema_migrations row above latest", stamp: `INSERT INTO schema_migrations(version, name, applied_at) VALUES(2, 'future', '2026-01-01T00:00:00Z'); PRAGMA user_version = 2;`},
+		{name: "user_version only above latest", stamp: `PRAGMA user_version = 2;`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			paths := testPaths(t)
+			seedV1Database(t, paths.DB)
+			raw := openRawDB(t, paths.DB)
+			if _, err := raw.Exec(tc.stamp); err != nil {
+				t.Fatalf("stamp newer version: %v", err)
+			}
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			before := rawRowCounts(t, paths.DB)
+			if before.userVersion != 2 {
+				t.Fatalf("seed user_version = %d, want 2", before.userVersion)
+			}
+
+			conn, err := OpenAndMigrate(paths)
+			if err == nil {
+				conn.Close()
+				t.Fatal("OpenAndMigrate() error = nil, want newer-schema rejection")
+			}
+			if !strings.Contains(err.Error(), "newer") {
+				t.Fatalf("error = %v, want message containing %q", err, "newer")
+			}
+			if n := len(backupFiles(t, paths)); n != 0 {
+				t.Fatalf("backup count after rejected open = %d, want 0", n)
+			}
+			if after := rawRowCounts(t, paths.DB); after != before {
+				t.Fatalf("database changed after rejected open: before %+v, after %+v", before, after)
+			}
+		})
+	}
+}
+
+// rowCounts summarizes what the newer-schema test must leave untouched.
+type rowCounts struct {
+	userVersion int
+	maxVersion  int
+	migrations  int
+	profiles    int
+	profileGame int
+}
+
+func rawRowCounts(t *testing.T, path string) rowCounts {
+	t.Helper()
+	raw := openRawDB(t, path)
+	return rowCounts{
+		userVersion: countOf(t, raw, `PRAGMA user_version`),
+		maxVersion:  countOf(t, raw, `select coalesce(max(version), 0) from schema_migrations`),
+		migrations:  countOf(t, raw, `select count(*) from schema_migrations`),
+		profiles:    countOf(t, raw, `select count(*) from profiles`),
+		profileGame: countOf(t, raw, `select count(*) from profile_games`),
+	}
+}
+
+func countOf(t *testing.T, conn *sql.DB, query string) int {
+	t.Helper()
+	var n int
+	if err := conn.QueryRow(query).Scan(&n); err != nil {
+		t.Fatalf("query %s: %v", query, err)
+	}
+	return n
+}
+
+// The version record insert (applyMigration) runs after the migration SQL. A failure there must roll the whole
+// migration back, not just the record.
 func TestMigrationFailureOnVersionRecordRollsBack(t *testing.T) {
 	paths := testPaths(t)
-	seedV9Database(t, paths.DB)
+	seedV1Database(t, paths.DB)
+	withExtraMigration(t, `CREATE TABLE migration_probe(id integer primary key);`)
 	setup := openRawDB(t, paths.DB)
-	if _, err := setup.Exec(`CREATE TRIGGER block10 BEFORE INSERT ON schema_migrations WHEN NEW.version=10 BEGIN SELECT RAISE(ABORT,'x'); END;`); err != nil {
+	if _, err := setup.Exec(`CREATE TRIGGER block2 BEFORE INSERT ON schema_migrations WHEN NEW.version=2 BEGIN SELECT RAISE(ABORT,'x'); END;`); err != nil {
 		t.Fatalf("create trigger: %v", err)
 	}
 	if err := setup.Close(); err != nil {
@@ -103,21 +174,15 @@ func TestMigrationFailureOnVersionRecordRollsBack(t *testing.T) {
 	if n := len(backupFiles(t, paths)); n != 1 {
 		t.Fatalf("backup count after failed migration = %d, want 1", n)
 	}
-	assertRolledBackToV9(t, paths.DB)
+	assertRolledBackToV1(t, paths.DB)
 }
 
 // A failed migration must release its transaction. OpenAndMigrate closes the handle on failure, which would hide a
 // leaked transaction, so this test calls migrate directly on the same single-connection pool.
 func TestMigrationFailureReleasesConnection(t *testing.T) {
 	paths := testPaths(t)
-	seedV9Database(t, paths.DB)
-	broken := append([]migration(nil), migrations...)
-	for i := range broken {
-		if broken[i].version == 10 {
-			broken[i].sql = "INSERT INTO no_such_table VALUES(1);"
-		}
-	}
-	replaceMigrations(t, broken)
+	seedV1Database(t, paths.DB)
+	withExtraMigration(t, "INSERT INTO no_such_table VALUES(1);")
 
 	conn, err := sql.Open("sqlite3", sqliteDSN(paths.DB))
 	if err != nil {
@@ -141,75 +206,16 @@ func TestMigrationFailureReleasesConnection(t *testing.T) {
 	}
 }
 
-func TestOpenAndMigrateDetectsLegacySchemaFromProfileGames(t *testing.T) {
-	paths := testPaths(t)
-	legacy := openRawDB(t, paths.DB)
-	// user_version stays 0: the legacy baseline must come from the profile_games table alone.
-	if _, err := legacy.Exec(initialSchemaSQL + `
-		INSERT INTO profiles(id, steam_id64, display_name, created_at, updated_at) VALUES(1, '11111111111111111', 'Unversioned', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');`); err != nil {
-		t.Fatalf("create unversioned legacy schema: %v", err)
-	}
-	if err := legacy.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	conn, err := OpenAndMigrate(paths)
-	if err != nil {
-		t.Fatalf("OpenAndMigrate() error = %v", err)
-	}
-	defer conn.Close()
-
-	assertUserVersion(t, conn, 14)
-	// Recorded as the legacy baseline, so the initial schema is not recorded as a fresh migration.
-	assertCount(t, conn, `select count(*) from schema_migrations where version=1 and name='initial_schema_legacy'`, 1)
-	assertCount(t, conn, `select count(*) from schema_migrations where version=1 and name='initial_schema'`, 0)
-	assertCount(t, conn, `select count(*) from profiles where steam_id64='11111111111111111'`, 1)
-	if n := len(backupFiles(t, paths)); n != 1 {
-		t.Fatalf("backup count = %d, want 1 for unversioned legacy data", n)
-	}
-}
-
-func TestMigrationV8FallsBackToActiveProfileWithoutSyncRuns(t *testing.T) {
-	paths := testPaths(t)
-	seedV7Database(t, paths.DB, `INSERT INTO settings(key, value) VALUES('active_profile_id', '2');`)
-
-	conn, err := OpenAndMigrate(paths)
-	if err != nil {
-		t.Fatalf("OpenAndMigrate() error = %v", err)
-	}
-	defer conn.Close()
-
-	assertUserVersion(t, conn, 14)
-	assertCount(t, conn, `select count(*) from profile_game_flags where profile_id=2 and appid=50 and disabled=1 and disabled_reason='not_owned'`, 1)
-	assertCount(t, conn, `select count(*) from profile_game_flags where profile_id=1 and appid=50`, 0)
-	assertCount(t, conn, `select count(*) from games where appid=50 and disabled=0 and disabled_reason is null`, 1)
-}
-
-func TestMigrationV8WithoutSyncRunsOrActiveProfileScopesToNobody(t *testing.T) {
-	paths := testPaths(t)
-	seedV7Database(t, paths.DB, "")
-
-	conn, err := OpenAndMigrate(paths)
-	if err != nil {
-		t.Fatalf("OpenAndMigrate() error = %v", err)
-	}
-	defer conn.Close()
-
-	assertUserVersion(t, conn, 14)
-	// No scope profile at all: the global flag is cleared and no profile receives the flag.
-	assertCount(t, conn, `select count(*) from profile_game_flags where appid=50`, 0)
-	assertCount(t, conn, `select count(*) from games where appid=50 and disabled=0 and disabled_reason is null`, 1)
-}
-
 func TestOpenAndMigrateSecuresDatabaseAndBackupFiles(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX permission bits are not enforced on Windows")
 	}
 	paths := testPaths(t)
-	seedV9Database(t, paths.DB)
+	seedV1Database(t, paths.DB)
 	if err := os.Chmod(paths.DB, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	withExtraMigration(t, `CREATE TABLE migration_probe(id integer primary key);`)
 
 	conn, err := OpenAndMigrate(paths)
 	if err != nil {

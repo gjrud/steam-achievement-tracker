@@ -128,7 +128,7 @@ Generate a Steam Web API key from Steam's developer page: <https://steamcommunit
 
 Start the app (step 4), paste the key into the key field on the setup screen, and click **Save key**. The app stores it in the system keyring under `service=steam-achievement-tracker`, `username=steam-web-api-key`, and reads only that item:
 
-- **Linux:** Secret Service. Your keyring may ask to unlock first. Keys stored earlier with `secret-tool` under the same names keep working; no migration is needed.
+- **Linux:** Secret Service. Your keyring may ask to unlock first.
 - **Windows:** Windows Credential Manager, as a generic credential named `steam-achievement-tracker:steam-web-api-key`. You can view or delete it under **Credential Manager** > **Windows Credentials** > **Generic Credentials**.
 
 Saving does not start a sync.
@@ -363,7 +363,7 @@ Cover art for a DLC set (and for a base game that falls back to the store) uses 
 
 A store-based capsule is only downloaded when Steam's store API lists it for that app; the app never guesses file names, and only builds the base game's `steam/apps/<appid>/<capsule_filename>` path from the owned-games list. If the cover download or the store lookup fails during a sync and no cover is cached yet, nothing is saved and the cover is retried on the next sync instead of being marked as missing. A cover that the store lists as absent is rechecked after 7 days.
 
-Custom (non-DLC) named sets always use the base game's cover. A DLC set uses its own cover whenever one is cached, and only falls back to the base game's cover while it has none. The fallback is applied when cards are displayed, so a DLC cover that is found later replaces it automatically. The DLC cover is still retried on the normal schedule (next sync, or after 7 days when the store lists it as absent). Right after upgrading, a DLC set may keep a stale **Missing cover art** tag until its game is synced again.
+Custom (non-DLC) named sets always use the base game's cover. A DLC set uses its own cover whenever one is cached, and only falls back to the base game's cover while it has none. The fallback is applied when cards are displayed, so a DLC cover that is found later replaces it automatically. The DLC cover is still retried on the normal schedule (next sync, or after 7 days when the store lists it as absent).
 
 Disable, re-enable, and the manual flags apply to one set card at a time. Disabling one set of a game leaves its sibling sets active.
 
@@ -485,7 +485,7 @@ The cache is disposable. Deleting it only means the covers are downloaded again 
 | `<data>/steam-achievement-tracker.db-wal` | SQLite WAL mode | SQLite write-ahead log while database is active. |
 | `<data>/steam-achievement-tracker.db-shm` | SQLite WAL mode | SQLite shared-memory file while database is active. |
 | `<data>/backups/` | DB migration | Backup directory. |
-| `<data>/backups/steam-achievement-tracker-<unix-ns>.db` | DB migration before schema changes | Point-in-time SQLite DB backup created before migrating an existing user DB. |
+| `<data>/backups/steam-achievement-tracker-<unix-ns>.db` | DB migration before schema changes | Point-in-time SQLite DB backup taken before a schema change is applied to an existing database that already has tables. Not created for a new database. |
 | `<cache>/` | Startup initialization | Cache root. |
 | `<cache>/images/games/` | Startup initialization / cover cache | Game cover cache root. |
 | `<cache>/images/games/<appid>/library_600x900.jpg` | Cover sync | Cached Steam library capsule image for one app (or DLC app id for DLC sets). |
@@ -498,44 +498,27 @@ The cache is disposable. Deleting it only means the covers are downloaded again 
 | `<state>/logs/app-*.log` | Log rotation | Rotated logs; max size is 5 MB with up to 5 backups. |
 | Keyring item: Secret Service `service=steam-achievement-tracker`, `username=steam-web-api-key` (Linux); Credential Manager generic credential `steam-achievement-tracker:steam-web-api-key` (Windows) | Entered in the app (setup screens) | Steam Web API key. Stored outside the app directories by the system keyring. The app deletes it only through **Delete API key** in the Remove profile dialog. |
 
-#### Moving data from the old Linux location
-
-Earlier Linux builds kept everything in `~/.steam-achievement-tracker`. There is no automatic migration. The new version starts with an empty database if it finds none in the data directory, so move your data before the first start of the new version. With the app closed:
-
-```sh
-mkdir -p ~/.local/share/steam-achievement-tracker ~/.cache/steam-achievement-tracker
-mv ~/.steam-achievement-tracker/steam-achievement-tracker.db* ~/.local/share/steam-achievement-tracker/   # db, -wal and -shm, whichever exist
-mv ~/.steam-achievement-tracker/backups ~/.local/share/steam-achievement-tracker/
-mv ~/.steam-achievement-tracker/cache/images ~/.cache/steam-achievement-tracker/
-```
-
-The database and `backups/` are the data you need to keep. Moving `cache/images` keeps the cover images; without it the covers are downloaded again on the next sync. The old `logs/` folder can be dropped or moved to `~/.local/state/steam-achievement-tracker/logs/`. Once the data is in place and the new version works, you can delete `~/.steam-achievement-tracker`.
-
 ### steam-achievement-tracker.db Schema
+
+The database is created by one baseline migration (`initial_schema`). `schema_migrations` records the applied DB migrations; the current schema version is `1`. Before a future migration changes an existing database, the app writes a backup (see Stored Files).
 
 | Table | Columns | Notes |
 | --- | --- | --- |
 | `settings` | `key` PK, `value` | App settings. Stores `active_profile_id`; an empty value means no profile is active (after **Remove profile**). |
-| `schema_migrations` | `version` PK, `name`, `applied_at` | Applied DB migrations. Current schema version is `14`. |
+| `schema_migrations` | `version` PK, `name`, `applied_at` | Applied DB migrations. Current schema version is `1`. |
 | `game_sets` | `appid`, `groupid`, `name`, `dlcappid`, `sort_order`, `updated_at`; PK (`appid`, `groupid`) | Achievement set catalog per game. Group `0` is the base set; `dlcappid` ties a set to a DLC app. |
 | `cover_images` | `image_appid` PK, `kind`, `file_name`, `path`, `source_url`, `checked_at`, `downloaded_at` | Cover image per image app id (the game, or the DLC for DLC sets). `kind` is `library`, `hero`, `header` or `main`. |
 | `profiles` | `id` PK, `steam_id64` unique, `display_name`, `avatar_url`, `created_at`, `updated_at`, `last_synced_at` | Steam profiles known to the app. A profile removed without **Delete profile data** keeps its row, so reconnecting the same SteamID64 restores it. |
-| `games` | `appid` PK, `name`, `playtime_forever`, `purchased`, `has_achievements`, `achievement_status`, `disabled`, `disabled_reason`, `cover_path`, `cover_source_url`, `cover_checked_at`, `cover_downloaded_at`, `created_at`, `updated_at` | Shared Steam app metadata and cover cache metadata. `playtime_forever` and `purchased` are legacy columns (migrations 11 and 12): app code no longer reads or writes them; per-profile values are in `profile_owned_games`. `disabled`/`disabled_reason` are legacy/global fields; current manual disables are profile-scoped. |
-| `profile_games` | `profile_id`, `appid`, `groupid`, `total_achievements`, `unlocked_achievements`, `completion_percent`, `missing_avg_unlock`, `suggestion_score`, `is_completed`, `was_completed`, `newly_incomplete`, `sync_warning`, `last_error`, `last_error_at`, `last_synced_at`, `dlc_not_owned`; PK (`profile_id`, `appid`, `groupid`) | Per-profile entry progress and latest warning state. `dlc_not_owned` is `1` for a DLC-bound set the profile does not own. |
-| `profile_owned_games` | `profile_id`, `appid`, `playtime_forever`, `purchased`, `vetted`, `updated_at`; PK (`profile_id`, `appid`) | Per-profile playtime, purchase status and vetted status for each owned game (migrations 12 and 14). `purchased` is `1` when the game is in the profile's purchased list. `vetted` is `0` when Steam returns the app only with unvetted apps included; it defaults to `1`. |
-| `profile_library_settings` | `profile_id` PK (FK `profiles`), `include_unvetted_apps`, `include_played_free_games`, `updated_at` | Per-profile library sync options (migration 13). `1` or `0`; a profile with no row uses both on. Removed with its profile by **Delete profile data**. |
-| `achievements` | `appid`, `apiname`, `global_percent`, `updated_at`; PK (`appid`, `apiname`) | Per-game achievement catalog with global unlock percentage. |
+| `games` | `appid` PK, `name`, `has_achievements`, `achievement_status`, `created_at`, `updated_at` | Shared Steam app metadata. Per-account playtime and purchase state are in `profile_owned_games`, per-profile disables in `profile_game_flags`, and cover cache state in `cover_images`. |
+| `profile_games` | `profile_id`, `appid`, `groupid`, `total_achievements`, `unlocked_achievements`, `completion_percent`, `missing_avg_unlock`, `suggestion_score`, `is_completed`, `was_completed`, `newly_incomplete`, `sync_warning`, `dlc_not_owned`, `last_error`, `last_error_at`, `last_synced_at`; PK (`profile_id`, `appid`, `groupid`) | Per-profile entry progress and latest warning state. `dlc_not_owned` is `1` for a DLC-bound set the profile does not own. |
+| `profile_owned_games` | `profile_id`, `appid`, `playtime_forever`, `purchased`, `vetted`, `updated_at`; PK (`profile_id`, `appid`) | Per-profile playtime, purchase status and vetted status for each owned game. `purchased` is `1` when the game is in the profile's purchased list. `vetted` is `0` when Steam returns the app only with unvetted apps included; it defaults to `1`. |
+| `profile_library_settings` | `profile_id` PK (FK `profiles`), `include_unvetted_apps`, `include_played_free_games`, `updated_at` | Per-profile library sync options. `1` or `0`; a profile with no row uses both on. Removed with its profile by **Delete profile data**. |
+| `achievements` | `appid`, `apiname`, `groupid`, `global_percent`, `archived`, `updated_at`; PK (`appid`, `apiname`) | Per-game achievement catalog with global unlock percentage. `groupid` is the set the achievement belongs to; `archived` is `1` for achievements excluded from counts. |
 | `profile_achievements` | `profile_id`, `appid`, `apiname`, `unlocked`, `unlock_time`, `updated_at`; PK (`profile_id`, `appid`, `apiname`) | Per-profile achievement unlock state. |
-| `game_snapshots` | `id` PK, `profile_id`, `appid`, `total_achievements`, `unlocked_achievements`, `completion_percent`, `missing_avg_unlock`, `is_completed`, `synced_at` | Historical per-sync progress snapshots. |
+| `game_snapshots` | `id` PK, `profile_id`, `appid`, `groupid`, `total_achievements`, `unlocked_achievements`, `completion_percent`, `missing_avg_unlock`, `is_completed`, `synced_at` | Historical per-sync progress snapshots, per profile entry. |
 | `sync_runs` | `id` PK, `profile_id`, `started_at`, `finished_at`, `status`, `games_total`, `games_synced`, `games_failed`, `error` | Sync run history and progress. Status values are `running`, `success`, `partial`, `failed`, and `canceled`; `canceled` marks a run that was still `running` when the app restarted. A `running` row with no live sync (its final status could not be saved) is shown as `failed` when read, and is set to `canceled` on the next start. |
-| `profile_game_flags` | `profile_id`, `appid`, `manual_was_completed`, `missing_achievements_in_dlc`, `disabled`, `disabled_reason`, `created_at`, `updated_at`; PK (`profile_id`, `appid`) | Manual, profile-scoped game flags. Indexed by (`profile_id`, `disabled`). |
-| `profile_game_tags` | `profile_id`, `appid`, `tag`, `score`, `reason`, `computed_at`; PK (`profile_id`, `appid`, `tag`) | Computed profile-scoped tags used by suggestion filters. Indexed by (`profile_id`, `tag`). |
-
-Migration 11 adds `games.purchased`. Migration 12 creates `profile_owned_games` and copies each profile entry's legacy `games.playtime_forever` and `games.purchased` values into it. The legacy purchased flag was global, so migration 12 copies it to every profile that has the game, even a profile that did not buy it, until that profile's next sync corrects it.
-
-Migration 13 creates `profile_library_settings`. It does not backfill rows: every profile starts with both library sync options on until it saves its own values.
-
-Migration 14 adds `profile_owned_games.vetted` (default `1`). Existing rows count as vetted until the profile's next sync sets the real value.
+| `profile_game_flags` | `profile_id`, `appid`, `groupid`, `manual_was_completed`, `missing_achievements_in_dlc`, `disabled`, `disabled_reason`, `created_at`, `updated_at`; PK (`profile_id`, `appid`, `groupid`) | Manual, profile-scoped game flags per entry. Indexed by (`profile_id`, `disabled`). |
+| `profile_game_tags` | `profile_id`, `appid`, `groupid`, `tag`, `score`, `reason`, `computed_at`; PK (`profile_id`, `appid`, `groupid`, `tag`) | Computed profile-scoped tags used by suggestion filters. Indexed by (`profile_id`, `tag`). |
 
 ```mermaid
 erDiagram
@@ -560,22 +543,32 @@ erDiagram
   GAMES {
     integer appid PK
     text name
-    integer playtime_forever
-    integer purchased
     integer has_achievements
     text achievement_status
-    integer disabled
-    text disabled_reason
-    text cover_path
-    text cover_source_url
-    text cover_checked_at
-    text cover_downloaded_at
     text created_at
     text updated_at
+  }
+  GAME_SETS {
+    integer appid PK,FK
+    integer groupid PK
+    text name
+    integer dlcappid
+    integer sort_order
+    text updated_at
+  }
+  COVER_IMAGES {
+    integer image_appid PK
+    text kind
+    text file_name
+    text path
+    text source_url
+    text checked_at
+    text downloaded_at
   }
   PROFILE_GAMES {
     integer profile_id PK,FK
     integer appid PK,FK
+    integer groupid PK
     integer total_achievements
     integer unlocked_achievements
     real completion_percent
@@ -585,10 +578,10 @@ erDiagram
     integer was_completed
     integer newly_incomplete
     integer sync_warning
+    integer dlc_not_owned
     text last_error
     text last_error_at
     text last_synced_at
-    integer dlc_not_owned
   }
   PROFILE_OWNED_GAMES {
     integer profile_id PK,FK
@@ -601,7 +594,9 @@ erDiagram
   ACHIEVEMENTS {
     integer appid PK,FK
     text apiname PK
+    integer groupid
     real global_percent
+    integer archived
     text updated_at
   }
   PROFILE_ACHIEVEMENTS {
@@ -616,6 +611,7 @@ erDiagram
     integer id PK
     integer profile_id FK
     integer appid FK
+    integer groupid
     integer total_achievements
     integer unlocked_achievements
     real completion_percent
@@ -637,6 +633,7 @@ erDiagram
   PROFILE_GAME_FLAGS {
     integer profile_id PK,FK
     integer appid PK,FK
+    integer groupid PK
     integer manual_was_completed
     integer missing_achievements_in_dlc
     integer disabled
@@ -647,6 +644,7 @@ erDiagram
   PROFILE_GAME_TAGS {
     integer profile_id PK,FK
     integer appid PK,FK
+    integer groupid PK
     text tag PK
     real score
     text reason
@@ -661,6 +659,7 @@ erDiagram
 
   PROFILES ||--o{ PROFILE_GAMES : tracks
   GAMES ||--o{ PROFILE_GAMES : appears_in
+  GAMES ||--o{ GAME_SETS : has_sets
   PROFILES ||--o{ PROFILE_OWNED_GAMES : owns
   GAMES ||--o{ PROFILE_OWNED_GAMES : owned_in
   GAMES ||--o{ ACHIEVEMENTS : has

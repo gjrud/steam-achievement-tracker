@@ -473,7 +473,7 @@ func TestGameCardFlagsFlipIndependently(t *testing.T) {
 	}
 }
 
-func TestActiveProfileFallbacks(t *testing.T) {
+func TestActiveProfileWithoutSettingRowIsNil(t *testing.T) {
 	repo := testRepository(t)
 	if active, err := repo.ActiveProfile(); err != nil || active != nil {
 		t.Fatalf("empty db active = %#v err=%v, want nil", active, err)
@@ -492,14 +492,14 @@ func TestActiveProfileFallbacks(t *testing.T) {
 	if active, err := repo.ActiveProfile(); err != nil || active != nil {
 		t.Fatalf("stale setting active = %#v err=%v, want nil", active, err)
 	}
-	// No setting row at all (sql.ErrNoRows) falls back to the lowest id.
+	// No setting row at all (sql.ErrNoRows) means no active profile, even with profiles present: no fallback.
 	if _, err := repo.db.Exec(`delete from settings where key='active_profile_id'`); err != nil {
 		t.Fatal(err)
 	}
-	if active, err := repo.ActiveProfile(); err != nil || active == nil || active.ID != p1.ID {
-		t.Fatalf("missing setting active = %#v err=%v, want lowest id %d", active, err, p1.ID)
+	if active, err := repo.ActiveProfile(); err != nil || active != nil {
+		t.Fatalf("missing setting active = %#v err=%v, want nil (profile %d not a fallback)", active, err, p1.ID)
 	}
-	// An explicit setting wins over the lowest id.
+	// An explicit setting is the only way to activate a profile.
 	if _, err := repo.db.Exec(`insert into settings(key, value) values('active_profile_id', ?)`, strconv.FormatInt(p2.ID, 10)); err != nil {
 		t.Fatal(err)
 	}
