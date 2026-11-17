@@ -285,7 +285,7 @@ Before sync can run, enter a Steam Web API key in the app; see [Install](#3-ente
 
 Settings does not change the key. If the key is wrong and no profile is active, the profile setup screen has a **Replace key** button that opens the same field. Once a profile is active, switch keys by removing the profile with **Delete API key** (see [Remove the active profile](#remove-the-active-profile)); the app then shows the key screen. After you save the new key, reconnect the profile; its data is kept unless you also turned on **Delete profile data**.
 
-![API key setup](docs/setup-apikey.gif)
+![API key setup](assets/screenshots/setup-apikey.gif)
 
 ### Connect a Steam profile
 
@@ -298,7 +298,7 @@ On first launch with a valid API key and no active profile, enter one of:
 
 Click **Validate**. The app resolves the profile and shows the Steam display name/avatar. Click **Save and sync** to save it as the active profile and start a background sync. Profile game details must be public.
 
-![Connect a Steam profile](docs/connect-profile.gif)
+![Connect a Steam profile](assets/screenshots/connect-profile.gif)
 
 ### Sync achievements
 
@@ -371,7 +371,7 @@ Disable, re-enable, and the manual flags apply to one set card at a time. Disabl
 
 This view lists non-disabled games that are not currently complete. Cards show cover art when cached, completion progress, playtime, tags, and the average unlock rate of missing achievements when Steam provides it.
 
-![Not completed view](docs/not-completed.gif)
+![Not completed view](assets/screenshots/not-completed.gif)
 
 Suggestion tags include **New achievements added**, **Almost there**, **In progress**, **Untouched**, **Unvetted**, **No achievements**, **Set**, **DLC**, **Not owned**, **Achievements in DLC**, **Missing cover art**, and **Sync error**. Use the search box to filter by title and the tag chips to filter the **Not completed** and **Completed** lists. Each chip shows how many cards match it.
 
@@ -411,13 +411,13 @@ Tag meanings:
 
 The **Completed** tab lists non-disabled games where all known achievements are unlocked. Use search to filter by title, and the tag chips to narrow the list to cards carrying a given tag (for example **Set**, **DLC**, or **Missing cover art**). Right-click a card to change local flags or disable the game.
 
-<img src="docs/completed.png" alt="Completed games view" width="640">
+<img src="assets/screenshots/completed.png" alt="Completed games view" width="640">
 
 ### Handle sync errors
 
 The **Sync errors** tab lists non-disabled games with current per-game sync warnings. Previous successful data is shown when available; otherwise the row says there is no previous sync data. Use the **Disable** button to hide a noisy game, or right-click the row to mark it previously completed, flag DLC-missing achievements, or disable it.
 
-<img src="docs/sync-error.png" alt="Sync errors view" width="640">
+<img src="assets/screenshots/sync-error.png" alt="Sync errors view" width="640">
 
 ### Disable or re-enable games
 
@@ -425,7 +425,7 @@ Right-click a game card in **Not completed** or **Completed**, or a row in **Syn
 
 A game whose sets are all disabled is skipped during sync. Because of that, new DLC sets of such a game are only discovered after you re-enable at least one of its sets.
 
-![Disable and re-enable games](docs/disable-renable.gif)
+![Disable and re-enable games](assets/screenshots/disable-renable.gif)
 
 ### Manually flag games
 
@@ -436,7 +436,7 @@ In **Not completed**, right-click a game card and use:
 
 These flags are mainly for incomplete games that need local context. They are profile-scoped, stored locally, and can be cleared from the same right-click menu. The same actions are also available from **Completed** cards and **Sync errors** rows when needed.
 
-![Manually flag games](docs/flag-games.gif)
+![Manually flag games](assets/screenshots/flag-games.gif)
 
 ### Library sync options
 
@@ -458,7 +458,7 @@ The confirm button reads **Remove profile**, **Remove profile and data**, **Remo
 
 With both switches off, the profile is only disconnected: its data stays in the data directory (see [Data](#data)) and the key is kept. Connecting the same SteamID64 again restores that data, and a sync starts. Data from a disconnected profile stays on disk until you reconnect that profile and remove it with **Delete profile data**. If you deleted the profile data, connecting the profile again starts with both library sync options on.
 
-![Remove active profile](docs/clear-data.gif)
+![Remove active profile](assets/screenshots/clear-data.gif)
 
 ## Data
 
