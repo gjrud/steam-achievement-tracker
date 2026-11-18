@@ -41,7 +41,7 @@ Each exported method's behavior is described in the sections below. In summary:
 | `CoverRecord` | `repository.go` | Stored cover row returned by `GetCover` and `ListCovers`. |
 | `LibrarySettings` | `settings.go` | Per-profile library sync options: `IncludeUnvettedApps`, `IncludePlayedFreeGames`. |
 
-Exported helpers in `repository.go`: `EntryKey(appID, groupID) string` (`"<appid>:<groupid>"`), `DisplayName(gameName, setName, groupID) string`, `ErrorPtr(err) *string`, `StringPtr(s) *string`, `FormatGameError(appID, err) string`. `DefaultLibrarySettings() LibrarySettings` is in `settings.go`.
+Exported helpers in `repository.go`: `EntryKey(appID, groupID) string` (`"<appid>:<groupid>"`), `DisplayName(gameName, setName, groupID) string`, `FormatGameError(appID, logText) string` (log text only, never stored). `DefaultLibrarySettings() LibrarySettings` is in `settings.go`.
 
 `DisplayName` rules: group 0 is the game name. For a set with a name, if the set name already contains the game name (case-insensitive) it is used as is; otherwise `"<game> – <set>"` (en dash). An unnamed set becomes `"<game> – Set <groupid>"`.
 

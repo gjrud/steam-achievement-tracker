@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gjrud/steam-achievement-tracker/internal/steam"
+	"github.com/gjrud/steam-achievement-tracker/internal/usererr"
 )
 
 // A GetOwnedGames failure ends the run before any game is touched: the run is saved as failed with the error,
@@ -18,11 +19,12 @@ func TestFullSyncOwnedGamesFailureFailsRunAndKeepsExistingData(t *testing.T) {
 		status    int
 		body      string
 		wantCalls int
-		wantText  string
+		wantText  string // raw text of the returned and logged error
+		wantUser  string // user-safe text stored on the result and the sync run
 	}{
-		{name: "private profile", body: `{"response":{}}`, wantCalls: 1, wantText: "profile game details may be private"},
-		{name: "http 404 not retried", status: http.StatusNotFound, wantCalls: 1, wantText: "returned 404 Not Found"},
-		{name: "http 429 exhausted", status: http.StatusTooManyRequests, wantCalls: 4, wantText: "returned 429 Too Many Requests"},
+		{name: "private profile", body: `{"response":{}}`, wantCalls: 1, wantText: "game details may be private", wantUser: "Steam did not return your game list. Your profile's game details may be private."},
+		{name: "http 404 not retried", status: http.StatusNotFound, wantCalls: 1, wantText: "returned 404 Not Found", wantUser: "Steam has no data for this request."},
+		{name: "http 429 exhausted", status: http.StatusTooManyRequests, wantCalls: 4, wantText: "returned 429 Too Many Requests", wantUser: "Steam is limiting requests right now. Try again in a few minutes."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -34,11 +36,12 @@ func TestFullSyncOwnedGamesFailureFailsRunAndKeepsExistingData(t *testing.T) {
 			fake.ownedBody = tc.body
 
 			result, err := (&Service{Repo: repo, Steam: fake.client}).FullSync(context.Background(), *profile)
-			if err == nil || !strings.Contains(err.Error(), tc.wantText) {
-				t.Fatalf("err = %v, want text %q", err, tc.wantText)
+			// FullSync returns the raw error; the app boundary shows only the user-safe sentence. The stored result is the sentence.
+			if err == nil || !strings.Contains(usererr.Raw(err).Error(), tc.wantText) {
+				t.Fatalf("err = %v, want raw cause %q", err, tc.wantText)
 			}
-			if result.Status != "failed" || result.Error == nil || !strings.Contains(*result.Error, tc.wantText) {
-				t.Fatalf("result = %#v, want failed with error text %q", result, tc.wantText)
+			if result.Status != "failed" || result.Error == nil || *result.Error != tc.wantUser {
+				t.Fatalf("result = %#v, want failed with user text %q", result, tc.wantUser)
 			}
 			if result.GamesTotal != 0 || result.GamesSynced != 0 || result.GamesFailed != 0 {
 				t.Fatalf("result = %#v, want no game counted", result)
@@ -47,8 +50,11 @@ func TestFullSyncOwnedGamesFailureFailsRunAndKeepsExistingData(t *testing.T) {
 				t.Fatalf("owned games calls = %d, want %d", got, tc.wantCalls)
 			}
 			run := requireLatestRun(t, repo, profile.ID)
-			if run.Status != "failed" || run.Error == nil || !strings.Contains(*run.Error, tc.wantText) {
-				t.Fatalf("sync run = %#v, want persisted failed run with error", run)
+			if run.Status != "failed" || run.Error == nil || *run.Error != tc.wantUser {
+				t.Fatalf("sync run = %#v, want persisted failed run with user text %q", run, tc.wantUser)
+			}
+			if strings.Contains(*run.Error, "returned") || strings.Contains(*run.Error, "/") {
+				t.Fatalf("sync run error = %q, want no endpoint or status text", *run.Error)
 			}
 			if got := fake.count("game", 60); got != 0 {
 				t.Fatalf("achievement calls for listed game = %d, want 0", got)
@@ -80,7 +86,12 @@ func TestFullSyncRetryableGameStatusExhaustedIsPartialWithoutLegacyFallback(t *t
 
 			result := runFullSyncOK(t, repo, fake, profile)
 			requireSyncResult(t, result, expectedSyncResult{status: "partial", total: 1, synced: 0, failed: 1, hasError: true})
-			requireWarningCard(t, repo, profile.ID, 20, fmt.Sprintf("returned %d %s", code, http.StatusText(code)))
+			wantWarning := map[int]string{
+				http.StatusTooManyRequests:     "Steam is limiting requests right now. Try again in a few minutes.",
+				http.StatusInternalServerError: "Steam is temporarily unavailable. Try again later.",
+				http.StatusServiceUnavailable:  "Steam is temporarily unavailable. Try again later.",
+			}[code]
+			requireWarningCard(t, repo, profile.ID, 20, wantWarning)
 			if got := fake.count("game", 20); got != 4 {
 				t.Fatalf("achievement schema attempts = %d, want 4 (client retries exhausted)", got)
 			}

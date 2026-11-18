@@ -18,7 +18,7 @@
   import SetupView from './lib/components/SetupView.svelte'
   import DashboardShell from './lib/components/DashboardShell.svelte'
   import ClearDataConfirmModal from './lib/components/ClearDataConfirmModal.svelte'
-  import {formatMessage, formatPlaytime, integer, pct} from './lib/format.js'
+  import {AppMessage, formatMessage, formatPlaytime, integer, pct} from './lib/format.js'
   import {
     cardProgress,
     completionLabel,
@@ -227,7 +227,7 @@
   // preview (validated with the old key) is dropped, an earlier Validate error is cleared, and state is re-read. On
   // failure it rethrows: the form shows the error, and this banner stays untouched.
   async function saveApiKey(key) {
-    if (savingKey) throw new Error('A save is already in progress')
+    if (savingKey) throw new AppMessage('A save is already in progress')
     savingKey = true
     try {
       await SaveAPIKey(key)

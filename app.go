@@ -20,15 +20,9 @@ import (
 	"github.com/gjrud/steam-achievement-tracker/internal/repository"
 	"github.com/gjrud/steam-achievement-tracker/internal/steam"
 	"github.com/gjrud/steam-achievement-tracker/internal/syncer"
+	"github.com/gjrud/steam-achievement-tracker/internal/usererr"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
-
-// errSyncAlreadyInProgress is startSync's error for a forced start while a sync is running.
-var errSyncAlreadyInProgress = errors.New("sync already in progress")
-
-// errShuttingDown is startSync's error once ServiceShutdown has cancelled the lifetime context. Wails shuts services
-// down before it closes the windows, so the frontend can still call in while the repository is being closed.
-var errShuttingDown = errors.New("shutting down")
 
 // syncChangedEvent is the Wails event emitted whenever sync state changes. It carries no payload: the frontend
 // refetches GetAppState when it arrives.
@@ -59,10 +53,14 @@ type App struct {
 	emit func(name string)
 
 	initialized bool
-	// initError is the init failure text shown in AppState, with paths on purpose. It is set by setInitError on a
-	// failed init and cleared on success.
-	initError      string
+	// initError is the user-facing init failure sentence shown in AppState (msgInitDataFolder or msgInitDatabase).
+	// The raw error is logged by the caller, with paths reduced to base names. It is set by setInitError on a failed
+	// init and cleared on success.
+	initError string
+	// paths is set as soon as they are resolved, so a failed init still names the data folder. logFile is set once
+	// logging is up; it stays empty when the data folder cannot be created.
 	paths          appdata.Paths
+	logFile        string
 	repo           *repository.Repository
 	steamAPIKey    string
 	apiKeyPresent  bool
@@ -114,14 +112,16 @@ func NewApp() *App {
 // they surface to the UI through AppState.InitError, so the app still starts.
 func (a *App) ServiceStartup(_ context.Context, _ application.ServiceOptions) error {
 	if err := a.ensureInitialized(); err != nil {
-		// ensureInitialized returns errors passed through redact.Paths, which reduces *fs.PathError and
-		// *os.LinkError paths to base names. Do not format a path into an init error message: only those two error
-		// types are scrubbed. The UI gets InitError unchanged.
-		log.Printf("startup init: %v", err)
+		// The raw init error is logged here, once at startup. The UI gets only the sentence in InitError.
+		log.Printf("startup init: %s", usererr.LogText(err))
 		return nil
 	}
-	state, err := a.GetAppState()
-	if err == nil && state.APIKeyPresent && state.ProfileExists {
+	state, err := a.appState()
+	if err != nil {
+		log.Printf("startup state: %v", redact.Paths(err))
+		return nil
+	}
+	if state.APIKeyPresent && state.ProfileExists {
 		logStartSyncError(a.startSync(false))
 	}
 	return nil
@@ -152,7 +152,13 @@ func (a *App) ServiceShutdown() error {
 	return nil
 }
 
+// GetAppState is bound to the frontend. Like every bound method that returns an error, it is a one-line call to
+// callBound (app_errors.go), which keeps the error user-facing and turns a panic into a generic sentence.
 func (a *App) GetAppState() (AppState, error) {
+	return callBound("GetAppState", func() (AppState, error) { return a.appState() })
+}
+
+func (a *App) appState() (AppState, error) {
 	if err := a.ensureInitialized(); err != nil {
 		a.mu.Lock()
 		repo := a.repo
@@ -207,6 +213,10 @@ func (a *App) GetAppState() (AppState, error) {
 // SetLibrarySettings saves the library sync options of the active profile. They apply on the next sync of that
 // profile; this does not start one.
 func (a *App) SetLibrarySettings(includeUnvettedApps, includePlayedFreeGames bool) (AppState, error) {
+	return callBound("SetLibrarySettings", func() (AppState, error) { return a.setLibrarySettings(includeUnvettedApps, includePlayedFreeGames) })
+}
+
+func (a *App) setLibrarySettings(includeUnvettedApps, includePlayedFreeGames bool) (AppState, error) {
 	repo, profile, err := a.activeRepoAndProfile()
 	if err != nil {
 		return AppState{}, err
@@ -214,12 +224,20 @@ func (a *App) SetLibrarySettings(includeUnvettedApps, includePlayedFreeGames boo
 	if err := repo.SaveLibrarySettings(profile.ID, repository.LibrarySettings{IncludeUnvettedApps: includeUnvettedApps, IncludePlayedFreeGames: includePlayedFreeGames}); err != nil {
 		return AppState{}, err
 	}
-	return a.GetAppState()
+	return a.appState()
 }
 
 func (a *App) RetryAPIKey() (AppState, error) {
-	_ = a.refreshAPIKey()
-	return a.GetAppState()
+	return callBound("RetryAPIKey", func() (AppState, error) { return a.retryAPIKey() })
+}
+
+func (a *App) retryAPIKey() (AppState, error) {
+	// A failed lookup is reported in AppState.APIKeyError, so it is not returned here. Log it, unless it is a
+	// missing key, which is a normal state.
+	if err := a.refreshAPIKey(); err != nil && !errors.Is(err, keyring.ErrMissing) {
+		log.Printf("RetryAPIKey: %v", redact.Paths(err))
+	}
+	return a.appState()
 }
 
 // SaveAPIKey stores the Steam Web API key in the system keyring, replacing any key already stored, and updates the
@@ -229,6 +247,10 @@ func (a *App) RetryAPIKey() (AppState, error) {
 // errors, the keyring may hold the new key while the cache keeps the old one until the next refresh (requireAPIKey
 // or RetryAPIKey re-reads). Do not "fix" this by re-reading inside SaveAPIKey.
 func (a *App) SaveAPIKey(key string) error {
+	return callBoundErr("SaveAPIKey", func() error { return a.saveAPIKey(key) })
+}
+
+func (a *App) saveAPIKey(key string) error {
 	if err := a.ensureInitialized(); err != nil {
 		return err
 	}
@@ -247,6 +269,10 @@ func (a *App) SaveAPIKey(key string) error {
 }
 
 func (a *App) ValidateProfile(input string) (ProfilePreview, error) {
+	return callBound("ValidateProfile", func() (ProfilePreview, error) { return a.validateProfile(input) })
+}
+
+func (a *App) validateProfile(input string) (ProfilePreview, error) {
 	if err := a.ensureInitialized(); err != nil {
 		return ProfilePreview{}, err
 	}
@@ -259,23 +285,28 @@ func (a *App) ValidateProfile(input string) (ProfilePreview, error) {
 	a.mu.Unlock()
 	client := steam.New(key)
 	applySteamBaseURL(client, baseURL)
+	// The step names are kept in the raw error, so the log shows which lookup failed.
 	steamID64, err := client.ResolveProfileInput(a.context(), input)
 	if err != nil {
-		return ProfilePreview{}, err
+		return ProfilePreview{}, fmt.Errorf("resolve profile: %w", err)
 	}
 	summary, err := client.GetPlayerSummary(a.context(), steamID64)
 	if err != nil {
-		return ProfilePreview{}, err
+		return ProfilePreview{}, fmt.Errorf("profile summary: %w", err)
 	}
 	return ProfilePreview{SteamID64: summary.SteamID64, DisplayName: summary.DisplayName, AvatarURL: summary.AvatarURL}, nil
 }
 
 func (a *App) SaveProfile(preview ProfilePreview) (AppState, error) {
+	return callBound("SaveProfile", func() (AppState, error) { return a.saveProfile(preview) })
+}
+
+func (a *App) saveProfile(preview ProfilePreview) (AppState, error) {
 	if err := a.ensureInitialized(); err != nil {
 		return AppState{}, err
 	}
 	if preview.SteamID64 == "" {
-		return AppState{}, errors.New("SteamID64 is required")
+		return AppState{}, errSteamIDMissing
 	}
 	if preview.DisplayName == "" {
 		preview.DisplayName = preview.SteamID64
@@ -284,16 +315,20 @@ func (a *App) SaveProfile(preview ProfilePreview) (AppState, error) {
 	repo := a.repo
 	a.mu.Unlock()
 	if repo == nil {
-		return AppState{}, errors.New("database is not initialized")
+		return AppState{}, errNotReady
 	}
 	if _, err := repo.SaveProfile(preview.SteamID64, preview.DisplayName, preview.AvatarURL); err != nil {
 		return AppState{}, err
 	}
 	logStartSyncError(a.startSync(true))
-	return a.GetAppState()
+	return a.appState()
 }
 
 func (a *App) SyncNow() (AppState, error) {
+	return callBound("SyncNow", func() (AppState, error) { return a.syncNow() })
+}
+
+func (a *App) syncNow() (AppState, error) {
 	if err := a.ensureInitialized(); err != nil {
 		return AppState{}, err
 	}
@@ -303,7 +338,7 @@ func (a *App) SyncNow() (AppState, error) {
 	if err := a.startSync(true); err != nil {
 		return AppState{}, err
 	}
-	return a.GetAppState()
+	return a.appState()
 }
 
 // ClearActiveUserData removes the active profile from the app. The two flags are independent:
@@ -323,6 +358,10 @@ func (a *App) SyncNow() (AppState, error) {
 // intact; a failure removing images after the commit leaves the data deleted, and some cached images may remain on
 // disk. Lock order: keyMu, then mu.
 func (a *App) ClearActiveUserData(deleteProfileData, deleteAPIKey bool) (AppState, error) {
+	return callBound("ClearActiveUserData", func() (AppState, error) { return a.clearActiveUserData(deleteProfileData, deleteAPIKey) })
+}
+
+func (a *App) clearActiveUserData(deleteProfileData, deleteAPIKey bool) (AppState, error) {
 	if err := a.ensureInitialized(); err != nil {
 		return AppState{}, err
 	}
@@ -340,7 +379,7 @@ func (a *App) ClearActiveUserData(deleteProfileData, deleteAPIKey bool) (AppStat
 		if err := repo.DeactivateProfile(); err != nil {
 			return AppState{}, err
 		}
-		return a.GetAppState()
+		return a.appState()
 	}
 	a.mu.Lock()
 	paths := a.paths
@@ -352,7 +391,7 @@ func (a *App) ClearActiveUserData(deleteProfileData, deleteAPIKey bool) (AppStat
 	if err := removeCachedGameImages(paths.GameImages, appIDs); err != nil {
 		return AppState{}, err
 	}
-	return a.GetAppState()
+	return a.appState()
 }
 
 // clearSteamAPIKey deletes the key from the system keyring and resets the cached key state. The cache changes only
@@ -373,6 +412,10 @@ func (a *App) clearSteamAPIKey() error {
 
 // MarkGamePreviouslyCompleted toggles the manual previously-completed flag on one achievement set (appID, groupID) of the active profile.
 func (a *App) MarkGamePreviouslyCompleted(appID, groupID int64) (AppState, error) {
+	return callBound("MarkGamePreviouslyCompleted", func() (AppState, error) { return a.markGamePreviouslyCompleted(appID, groupID) })
+}
+
+func (a *App) markGamePreviouslyCompleted(appID, groupID int64) (AppState, error) {
 	repo, profile, err := a.activeRepoAndProfile()
 	if err != nil {
 		return AppState{}, err
@@ -380,11 +423,15 @@ func (a *App) MarkGamePreviouslyCompleted(appID, groupID int64) (AppState, error
 	if err := repo.MarkGamePreviouslyCompleted(profile.ID, appID, groupID); err != nil {
 		return AppState{}, err
 	}
-	return a.GetAppState()
+	return a.appState()
 }
 
 // ToggleGameMissingAchievementsInDLC toggles the missing-DLC flag on one achievement set.
 func (a *App) ToggleGameMissingAchievementsInDLC(appID, groupID int64) (AppState, error) {
+	return callBound("ToggleGameMissingAchievementsInDLC", func() (AppState, error) { return a.toggleGameMissingAchievementsInDLC(appID, groupID) })
+}
+
+func (a *App) toggleGameMissingAchievementsInDLC(appID, groupID int64) (AppState, error) {
 	repo, profile, err := a.activeRepoAndProfile()
 	if err != nil {
 		return AppState{}, err
@@ -392,11 +439,15 @@ func (a *App) ToggleGameMissingAchievementsInDLC(appID, groupID int64) (AppState
 	if err := repo.ToggleMissingAchievementsInDLC(profile.ID, appID, groupID); err != nil {
 		return AppState{}, err
 	}
-	return a.GetAppState()
+	return a.appState()
 }
 
 // DisableGame disables one achievement set (appID, groupID); sibling sets are unaffected.
 func (a *App) DisableGame(appID, groupID int64) (AppState, error) {
+	return callBound("DisableGame", func() (AppState, error) { return a.disableGame(appID, groupID) })
+}
+
+func (a *App) disableGame(appID, groupID int64) (AppState, error) {
 	repo, profile, err := a.activeRepoAndProfile()
 	if err != nil {
 		return AppState{}, err
@@ -404,11 +455,15 @@ func (a *App) DisableGame(appID, groupID int64) (AppState, error) {
 	if err := repo.DisableProfileGame(profile.ID, appID, groupID); err != nil {
 		return AppState{}, err
 	}
-	return a.GetAppState()
+	return a.appState()
 }
 
 // EnableGame re-enables one achievement set (appID, groupID).
 func (a *App) EnableGame(appID, groupID int64) (AppState, error) {
+	return callBound("EnableGame", func() (AppState, error) { return a.enableGame(appID, groupID) })
+}
+
+func (a *App) enableGame(appID, groupID int64) (AppState, error) {
 	repo, profile, err := a.activeRepoAndProfile()
 	if err != nil {
 		return AppState{}, err
@@ -416,7 +471,7 @@ func (a *App) EnableGame(appID, groupID int64) (AppState, error) {
 	if err := repo.EnableProfileGame(profile.ID, appID, groupID); err != nil {
 		return AppState{}, err
 	}
-	return a.GetAppState()
+	return a.appState()
 }
 
 func (a *App) ensureInitialized() error {
@@ -431,25 +486,28 @@ func (a *App) ensureInitialized() error {
 	a.mu.Unlock()
 
 	paths := appdata.Resolve()
+	a.mu.Lock()
+	a.paths = paths
+	a.mu.Unlock()
 	if err := appdata.Ensure(paths); err != nil {
-		err = fmt.Errorf("create app directories: %w", err)
 		logging.Fallback()
-		a.setInitError(err)
-		return redact.Paths(err)
+		return a.setInitError(msgInitDataFolder, fmt.Errorf("create app directories: %w", err))
 	}
 	logging.Init(paths.LogFile)
+	a.mu.Lock()
+	a.logFile = paths.LogFile
+	a.mu.Unlock()
 	db, err := dbinit.OpenAndMigrate(paths)
 	if err != nil {
-		a.setInitError(err)
-		return redact.Paths(err)
+		return a.setInitError(msgInitDatabase, err)
 	}
 	repo := repository.New(db)
 	if err := repo.CancelRunningSyncRuns("app restarted before sync completed"); err != nil {
-		log.Printf("cancel stale sync runs: %v", err)
+		log.Printf("cancel stale sync runs: %v", redact.Paths(err))
 	}
 	key, keyErr := readSteamAPIKey()
 	if keyErr != nil && !errors.Is(keyErr, keyring.ErrMissing) {
-		log.Printf("keyring lookup: %v", keyErr)
+		log.Printf("keyring lookup: %v", redact.Paths(keyErr))
 	}
 	a.mu.Lock()
 	a.initialized = true
@@ -458,7 +516,7 @@ func (a *App) ensureInitialized() error {
 	a.steamAPIKey = key
 	a.apiKeyPresent = key != ""
 	if keyErr != nil && !errors.Is(keyErr, keyring.ErrMissing) {
-		a.apiKeyError = keyErr.Error()
+		a.apiKeyError = msgKeyring
 	} else {
 		a.apiKeyError = ""
 	}
@@ -475,14 +533,14 @@ func (a *App) activeRepoAndProfile() (*repository.Repository, *repository.Profil
 	repo := a.repo
 	a.mu.Unlock()
 	if repo == nil {
-		return nil, nil, errors.New("database is not initialized")
+		return nil, nil, errNotReady
 	}
 	profile, err := repo.ActiveProfile()
 	if err != nil {
 		return nil, nil, err
 	}
 	if profile == nil {
-		return nil, nil, errors.New("no active profile")
+		return nil, nil, errNoProfile
 	}
 	return repo, profile, nil
 }
@@ -499,7 +557,7 @@ func (a *App) refreshAPIKey() error {
 		if errors.Is(err, keyring.ErrMissing) {
 			a.apiKeyError = ""
 		} else {
-			a.apiKeyError = err.Error()
+			a.apiKeyError = msgKeyring
 		}
 		return err
 	}
@@ -554,7 +612,7 @@ func (a *App) startSync(force bool) error {
 	done := func() { a.endSync(cancel) }
 	if repo == nil {
 		done()
-		return errors.New("database is not initialized")
+		return errNotReady
 	}
 	if key == "" {
 		done()
@@ -567,7 +625,7 @@ func (a *App) startSync(force bool) error {
 	}
 	if profile == nil {
 		done()
-		return errors.New("no active profile")
+		return errNoProfile
 	}
 	client, err := steamClientForProfile(repo, key, profile.ID)
 	if err != nil {
@@ -596,7 +654,7 @@ func (a *App) startSync(force bool) error {
 		defer done()
 		service := syncer.Service{Repo: repo, Steam: client, Images: images.New(paths), OnChange: a.emitSyncChanged}
 		if _, err := service.FullSync(syncCtx, p); err != nil {
-			log.Printf("full sync failed: %v", err)
+			log.Printf("full sync failed: %s", usererr.LogText(err))
 		}
 	}(*profile)
 	return nil
@@ -673,12 +731,12 @@ func (a *App) normalizeStaleRun(repo *repository.Repository, profileID int64, d 
 }
 
 // logStartSyncError logs a startSync error for a caller that does not return it. A missing API key, a sync that is
-// already in progress, and a start during shutdown are expected outcomes and are not logged.
+// already in progress, and a start during shutdown are expected outcomes and are not logged (see shouldLog).
 func logStartSyncError(err error) {
-	if err == nil || errors.Is(err, keyring.ErrMissing) || errors.Is(err, errSyncAlreadyInProgress) || errors.Is(err, errShuttingDown) {
+	if err == nil || !shouldLog(err) {
 		return
 	}
-	log.Printf("start sync: %v", err)
+	log.Printf("start sync: %s", usererr.LogText(err))
 }
 
 func (a *App) cancelSyncAndWait() {
@@ -709,24 +767,26 @@ func (a *App) emitSyncChanged() {
 	}
 }
 
-func (a *App) setInitError(err error) {
+// setInitError records the user-facing init failure msg in AppState and returns it as an error. The cause is kept
+// for the log: the caller logs usererr.LogText of the returned error, and the frontend gets msg only.
+func (a *App) setInitError(msg string, cause error) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if err != nil {
-		a.initError = err.Error()
-	}
+	a.initError = msg
+	a.mu.Unlock()
+	return usererr.Wrap(msg, redact.Paths(cause))
 }
 
 func (a *App) baseState(profile *repository.Profile, dashboard *repository.Dashboard) AppState {
 	a.mu.Lock()
 	paths := a.paths
+	logFile := a.logFile
 	initError := a.initError
 	apiKeyPresent := a.apiKeyPresent
 	apiKeyError := a.apiKeyError
 	syncInProgress := a.syncInProgress
 	a.mu.Unlock()
 	return AppState{
-		AppName: config.AppName, DataDir: paths.DataDir, CacheDir: paths.CacheDir, LogDir: paths.Logs, LogFile: paths.LogFile,
+		AppName: config.AppName, DataDir: paths.DataDir, CacheDir: paths.CacheDir, LogDir: paths.Logs, LogFile: logFile,
 		APIKeyPresent: apiKeyPresent, APIKeyError: apiKeyError,
 		ProfileExists: profile != nil, Profile: profile,
 		Dashboard: dashboard, Settings: repository.DefaultLibrarySettings(), SyncInProgress: syncInProgress, InitError: initError,

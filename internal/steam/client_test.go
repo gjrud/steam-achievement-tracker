@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gjrud/steam-achievement-tracker/internal/usererr"
 )
 
 func TestGetOwnedGamesPrivateProfilesAndFallbackNames(t *testing.T) {
@@ -368,8 +370,8 @@ func TestGetOwnedGamesVettedListValidation(t *testing.T) {
 	}{
 		{name: "count zero and empty list marks every game unvetted", vetted: `{"response":{"game_count":0,"games":[]}}`, wantUnvetted: true},
 		{name: "count zero without games key marks every game unvetted", vetted: `{"response":{"game_count":0}}`, wantUnvetted: true},
-		{name: "bare response is unavailable", vetted: `{"response":{}}`, wantErr: "vetted games list unavailable"},
-		{name: "count positive and empty list is incomplete", vetted: `{"response":{"game_count":1,"games":[]}}`, wantErr: "vetted games response was incomplete"},
+		{name: "bare response is unavailable", vetted: `{"response":{}}`, wantErr: "Steam did not return the list of reviewed games. Try again later."},
+		{name: "count positive and empty list is incomplete", vetted: `{"response":{"game_count":1,"games":[]}}`, wantErr: "Steam returned an incomplete list of reviewed games. Try again later."},
 		{name: "http 404 fails the call", status: http.StatusNotFound, wantErr: "returned 404 Not Found"},
 		{name: "listed game is vetted", vetted: `{"response":{"game_count":1,"games":[{"appid":10,"name":"Game"}]}}`, wantUnvetted: false},
 		{name: "unlisted game is unvetted", vetted: `{"response":{"game_count":1,"games":[{"appid":99,"name":"Other"}]}}`, wantUnvetted: true},
@@ -419,9 +421,9 @@ func TestGetOwnedGamesPurchasedListEmptiness(t *testing.T) {
 	}{
 		{name: "count zero and empty list is a valid empty list", purchased: `{"response":{"game_count":0,"games":[]}}`},
 		{name: "count zero without games key is a valid empty list", purchased: `{"response":{"game_count":0}}`},
-		{name: "bare response is unavailable", purchased: `{"response":{}}`, wantErr: "purchased games list unavailable"},
-		{name: "count positive and empty list is incomplete", purchased: `{"response":{"game_count":2,"games":[]}}`, wantErr: "purchased games response was incomplete"},
-		{name: "count positive without games key is incomplete", purchased: `{"response":{"game_count":1}}`, wantErr: "purchased games response was incomplete"},
+		{name: "bare response is unavailable", purchased: `{"response":{}}`, wantErr: "Steam did not return your purchased games. Try again later."},
+		{name: "count positive and empty list is incomplete", purchased: `{"response":{"game_count":2,"games":[]}}`, wantErr: "Steam returned an incomplete list of purchased games. Try again later."},
+		{name: "count positive without games key is incomplete", purchased: `{"response":{"game_count":1}}`, wantErr: "Steam returned an incomplete list of purchased games. Try again later."},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -505,8 +507,12 @@ func TestGetPlayerAchievementsReturnsSteamErrorWhenNoAchievements(t *testing.T) 
 	defer closeServer()
 
 	_, err := client.GetPlayerAchievements(context.Background(), "11111111111111111", 10)
-	if err == nil || err.Error() != "Profile is private" {
-		t.Fatalf("err = %v, want Steam error", err)
+	if err == nil || err.Error() != "Steam did not provide achievements for this game." {
+		t.Fatalf("err = %v, want the fixed sentence", err)
+	}
+	// Steam's own text is kept for the log only.
+	if got := usererr.Raw(err).Error(); got != "Profile is private" {
+		t.Fatalf("log cause = %q, want Steam's message", got)
 	}
 }
 
@@ -1421,6 +1427,35 @@ func TestRedactTextRemovesKeyValueEverywhere(t *testing.T) {
 	}
 }
 
+// RedactSecrets works without a known key: it removes any 32-hex run (the key shape, any case, with no word boundary),
+// the identifier query values and bare SteamID64s, and keeps the rest of the text, including a goroutine stack's
+// addresses (at most 16 hex digits).
+func TestRedactSecrets(t *testing.T) {
+	const key = "0123456789ABCDEF0123456789ABCDEF"
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "raw key", in: "keyring: " + key, want: "keyring: REDACTED"},
+		{name: "key glued to letters", in: "keyKEY" + key + "x", want: "keyKEYREDACTEDx"},
+		{name: "lower-case key", in: strings.ToLower(key), want: "REDACTED"},
+		{name: "escaped key", in: url.QueryEscape(strings.ToLower(key)), want: "REDACTED"},
+		{name: "key param", in: "?key=" + key + "&appid=10", want: "?key=REDACTED&appid=10"},
+		{name: "bare steamid64", in: "id 76561198000000000 here", want: "id REDACTED here"},
+		{name: "steamids param", in: "?steamids=76561198000000000", want: "?steamids=REDACTED"},
+		{name: "short hex kept", in: "0x4b2c1d+0x1a3 deadbeef", want: "0x4b2c1d+0x1a3 deadbeef"},
+		{name: "plain text kept", in: "goroutine 1 [running]: main.f(0xc000012345)", want: "goroutine 1 [running]: main.f(0xc000012345)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RedactSecrets(tc.in); got != tc.want {
+				t.Fatalf("RedactSecrets(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // testLongKey looks like a real key (32 hex characters) and does not repeat, so partial matches show up.
 const testLongKey = "9F3C1A7E5B2D8046A1C7E3B9D5F20846"
 
@@ -1490,9 +1525,11 @@ func TestResolveVanityURLTransportErrorDoesNotLeakAPIKey(t *testing.T) {
 func TestResolveVanityURLNoMatchErrorsDoNotLeakAPIKey(t *testing.T) {
 	tests := []struct {
 		name, key, vanity, body, wantText string
+		// wantCause is the redacted text the log gets (usererr.Raw); the UI sentence is wantText.
+		wantCause string
 	}{
-		{name: "fallback typed name equals key", key: shortTestKey, vanity: shortTestKey, body: `{"response":{"success":42}}`, wantText: "no Steam profile matches that custom name"},
-		{name: "steam message echoes key", key: testLongKey, vanity: "someone", body: `{"response":{"success":42,"message":"No match for ` + testLongKey + `"}}`, wantText: "REDACTED"},
+		{name: "fallback typed name equals key", key: shortTestKey, vanity: shortTestKey, body: `{"response":{"success":42}}`, wantText: "No Steam profile matches that custom name."},
+		{name: "steam message echoes key", key: testLongKey, vanity: "someone", body: `{"response":{"success":42,"message":"No match for ` + testLongKey + `"}}`, wantText: "No Steam profile matches that custom name.", wantCause: "No match for REDACTED"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1500,8 +1537,14 @@ func TestResolveVanityURLNoMatchErrorsDoNotLeakAPIKey(t *testing.T) {
 			defer closeServer()
 			client.APIKey = tc.key
 			_, err := client.ResolveVanityURL(context.Background(), tc.vanity)
-			if err == nil || strings.Contains(err.Error(), tc.key) || !strings.Contains(err.Error(), tc.wantText) {
-				t.Fatalf("err = %v, want text %q without the API key", err, tc.wantText)
+			if err == nil || err.Error() != tc.wantText {
+				t.Fatalf("err = %v, want the sentence %q", err, tc.wantText)
+			}
+			if strings.Contains(err.Error(), tc.key) || strings.Contains(usererr.Raw(err).Error(), tc.key) {
+				t.Fatalf("err = %v carries the API key", err)
+			}
+			if tc.wantCause != "" && usererr.Raw(err).Error() != tc.wantCause {
+				t.Fatalf("log cause = %q, want %q", usererr.Raw(err).Error(), tc.wantCause)
 			}
 		})
 	}
@@ -1514,8 +1557,8 @@ func TestGetPlayerAchievementsSteamErrorRedactsAPIKey(t *testing.T) {
 	defer closeServer()
 	client.APIKey = testLongKey
 	_, err := client.GetPlayerAchievements(context.Background(), testSteamID, 10)
-	if err == nil || strings.Contains(err.Error(), testLongKey) || !strings.Contains(err.Error(), "REDACTED") {
-		t.Fatalf("err = %v, want a redacted error without the API key", err)
+	if err == nil || strings.Contains(err.Error(), testLongKey) || strings.Contains(usererr.Raw(err).Error(), testLongKey) || !strings.Contains(usererr.Raw(err).Error(), "REDACTED") {
+		t.Fatalf("err = %v, want a sentence and a redacted log cause without the API key", err)
 	}
 }
 
@@ -1851,7 +1894,7 @@ func TestMalformedSteamResponses(t *testing.T) {
 		prefix  bool
 	}{
 		{name: "invalid JSON with 200", body: `{"response":`, wantErr: "decode Steam API /IPlayerService/GetOwnedGames/v0001/", prefix: true},
-		{name: "empty body with 200", body: "", wantErr: "owned games unavailable; profile game details may be private"},
+		{name: "empty body with 200", body: "", wantErr: "Steam did not return your game list. Your profile's game details may be private."},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1884,8 +1927,8 @@ func TestGetOwnedGamesIncompleteResponse(t *testing.T) {
 	}{
 		{name: "count zero and empty list is an empty library", body: `{"response":{"game_count":0,"games":[]}}`, wantCount: 0},
 		{name: "count zero without games key", body: `{"response":{"game_count":0}}`, wantCount: 0},
-		{name: "count positive and empty list is incomplete", body: `{"response":{"game_count":2,"games":[]}}`, wantErr: "owned games response was incomplete"},
-		{name: "count positive without games key is incomplete", body: `{"response":{"game_count":1}}`, wantErr: "owned games response was incomplete"},
+		{name: "count positive and empty list is incomplete", body: `{"response":{"game_count":2,"games":[]}}`, wantErr: "Steam returned an incomplete game list. Try again later."},
+		{name: "count positive without games key is incomplete", body: `{"response":{"game_count":1}}`, wantErr: "Steam returned an incomplete game list. Try again later."},
 		{name: "count positive with games is complete", body: `{"response":{"game_count":1,"games":[{"appid":10,"name":"A","playtime_forever":0}]}}`, wantCount: 1},
 	}
 	for _, tc := range tests {
@@ -1985,8 +2028,8 @@ func TestPlayerAchievementsSuccessFlag(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || err.Error() != "player achievements unavailable" {
-				t.Fatalf("err = %v, want %q", err, "player achievements unavailable")
+			if err == nil || err.Error() != "Steam did not return achievements for this game. Try again later." {
+				t.Fatalf("err = %v, want %q", err, "Steam did not return achievements for this game. Try again later.")
 			}
 		})
 	}
@@ -2014,7 +2057,7 @@ func TestResolveProfileInput(t *testing.T) {
 	const (
 		profileID  = "76561198000000001"
 		vanityID   = "76561197960287930"
-		profileErr = "Steam profile URL must contain /profiles/{steamid64} or /id/{vanity}"
+		profileErr = "Enter a profile link like steamcommunity.com/profiles/<number> or steamcommunity.com/id/<name>."
 	)
 	tests := []struct {
 		name       string
@@ -2032,17 +2075,17 @@ func TestResolveProfileInput(t *testing.T) {
 		{name: "vanity URL trailing slash", input: "https://steamcommunity.com/id/gabelogan/", want: vanityID, wantVanity: 1},
 		{name: "vanity URL with query", input: "https://steamcommunity.com/id/gabelogan?l=english", want: vanityID, wantVanity: 1},
 		{name: "bare vanity name", input: "gabelogan", want: vanityID, wantVanity: 1},
-		{name: "empty input", input: "", wantErr: "profile input is required"},
-		{name: "whitespace input", input: "   ", wantErr: "profile input is required"},
+		{name: "empty input", input: "", wantErr: "Enter a Steam profile URL, SteamID64 or custom name."},
+		{name: "whitespace input", input: "   ", wantErr: "Enter a Steam profile URL, SteamID64 or custom name."},
 		{name: "URL without profile or id", input: "https://steamcommunity.com/", wantErr: profileErr},
 		{name: "URL with groups path", input: "https://steamcommunity.com/groups/foo", wantErr: profileErr},
 		{name: "profiles without id", input: "https://steamcommunity.com/profiles", wantErr: profileErr},
 		{name: "profiles with 3-digit id", input: "https://steamcommunity.com/profiles/123", wantErr: profileErr},
 		{name: "id without vanity", input: "https://steamcommunity.com/id", wantErr: profileErr},
-		{name: "16 digits is not SteamID64", input: "7656119800000000", wantErr: "No match", wantVanity: 1},
-		{name: "18 digits is not SteamID64", input: "765611980000000001", wantErr: "No match", wantVanity: 1},
-		{name: "unknown bare vanity", input: "not a profile!", wantErr: "No match", wantVanity: 1},
-		{name: "unparsable URL falls back to vanity", input: "https://[::1", wantErr: "No match", wantVanity: 1},
+		{name: "16 digits is not SteamID64", input: "7656119800000000", wantErr: "No Steam profile matches that custom name.", wantVanity: 1},
+		{name: "18 digits is not SteamID64", input: "765611980000000001", wantErr: "No Steam profile matches that custom name.", wantVanity: 1},
+		{name: "unknown bare vanity", input: "not a profile!", wantErr: "No Steam profile matches that custom name.", wantVanity: 1},
+		{name: "unparsable URL falls back to vanity", input: "https://[::1", wantErr: "No Steam profile matches that custom name.", wantVanity: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2075,9 +2118,9 @@ func TestResolveVanityURL(t *testing.T) {
 		wantErr string
 	}{
 		{name: "success", body: `{"response":{"success":1,"steamid":"76561197960287930"}}`, want: "76561197960287930"},
-		{name: "no match with message", body: `{"response":{"success":42,"message":"No match"}}`, wantErr: "No match"},
-		{name: "no match without message", body: `{"response":{"success":42}}`, wantErr: "no Steam profile matches that custom name"},
-		{name: "success without steamid", body: `{"response":{"success":1}}`, wantErr: "no Steam profile matches that custom name"},
+		{name: "no match with message", body: `{"response":{"success":42,"message":"No match"}}`, wantErr: "No Steam profile matches that custom name."},
+		{name: "no match without message", body: `{"response":{"success":42}}`, wantErr: "No Steam profile matches that custom name."},
+		{name: "success without steamid", body: `{"response":{"success":1}}`, wantErr: "No Steam profile matches that custom name."},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2115,8 +2158,8 @@ func TestGetPlayerSummaryFieldsAndNotFound(t *testing.T) {
 			body: `{"response":{"players":[{"steamid":"76561198000000001","personaname":"Gabe","avatarfull":"","avatarmedium":"https://img/med.jpg"}]}}`,
 			want: PlayerSummary{SteamID64: "76561198000000001", DisplayName: "Gabe", AvatarURL: "https://img/med.jpg"},
 		},
-		{name: "empty players list", body: `{"response":{"players":[]}}`, wantErr: "Steam profile not found"},
-		{name: "players key missing", body: `{"response":{}}`, wantErr: "Steam profile not found"},
+		{name: "empty players list", body: `{"response":{"players":[]}}`, wantErr: "No Steam profile was found for that account."},
+		{name: "players key missing", body: `{"response":{}}`, wantErr: "No Steam profile was found for that account."},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

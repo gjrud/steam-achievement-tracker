@@ -19,6 +19,8 @@ function missingHandler(name) {
   throw new Error(`Missing Wails mock handler: ${name}`)
 }
 
+// A handler that simulates a Go error rejects with a RuntimeError (wails-runtime-mock.js), as the real bound call does.
+// Any other rejection stands for a frontend or argument error, which the app shows as the generic sentence.
 export function __setWailsMocks(overrides = {}) {
   handlers = {...defaultHandlers, ...overrides}
 }

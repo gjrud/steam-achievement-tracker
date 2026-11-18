@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import {afterEach, describe, expect, test, vi} from 'vitest'
 import App from './App.svelte'
 import {__resetWailsMocks, __setWailsMocks} from './test/wails-app-mock.js'
+import {RuntimeError} from './test/wails-runtime-mock.js'
 import {
   baseState,
   dashboardState,
@@ -47,6 +48,19 @@ describe('App setup states', () => {
     expect(await screen.findByRole('heading', {name: 'Connect your profile'})).toBeInTheDocument()
   })
 
+  test('shows the keyring sentence as is on the missing key screen', async () => {
+    const keyringSentence = 'Could not access the system keyring. Make sure it is unlocked, then try again.'
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => ({...missingKeyState(), apiKeyError: keyringSentence}))
+    })
+
+    render(App)
+
+    expect(await screen.findByRole('heading', {name: 'Steam Web API key missing'})).toBeInTheDocument()
+    expect(screen.getByText(keyringSentence)).toBeInTheDocument()
+    expect(screen.queryByText(/System keyring error/)).not.toBeInTheDocument()
+  })
+
   test('validates and saves a Steam profile', async () => {
     const preview = {steamId64: '76561198000000000', displayName: 'Test Player', avatarUrl: ''}
     const validate = vi.fn(async () => preview)
@@ -81,6 +95,36 @@ describe('App setup states', () => {
     expect(await screen.findByRole('heading', {name: 'Startup failed'})).toBeInTheDocument()
     expect(screen.getByText('database failed')).toBeInTheDocument()
     expect(screen.getByText(/app.log/)).toBeInTheDocument()
+    expect(screen.queryByText(/App folder:/)).not.toBeInTheDocument()
+  })
+
+  test('names the app folder when startup failed before a log file existed', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => ({...baseState(), initError: 'The app could not create its folders.', logFile: ''}))
+    })
+
+    render(App)
+
+    expect(await screen.findByRole('heading', {name: 'Startup failed'})).toBeInTheDocument()
+    expect(screen.getByText('The app could not create its folders.')).toBeInTheDocument()
+    expect(screen.getByText('App folder: /xdg/data/steam-achievement-tracker')).toBeInTheDocument()
+    expect(screen.queryByText(/Check /)).not.toBeInTheDocument()
+  })
+
+  test('shows a generic sentence, not the text, for a frontend or argument error', async () => {
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState()),
+      SyncNow: vi.fn(async () => {
+        throw new TypeError('Cannot read properties of undefined (reading "appid")')
+      })
+    })
+    const user = userEvent.setup()
+
+    render(App)
+    await user.click(await screen.findByRole('button', {name: 'Sync now'}))
+
+    expect(await screen.findByText('Something went wrong. See the log file for details.')).toBeInTheDocument()
+    expect(screen.queryByText(/Cannot read properties/)).not.toBeInTheDocument()
   })
 })
 
@@ -141,7 +185,7 @@ describe('App API key', () => {
       GetAppState: vi.fn(async () => missingKeyState()),
       SaveAPIKey: vi.fn(async () => {
         document.activeElement?.blur()
-        throw new Error(failureMessage)
+        throw new RuntimeError(failureMessage)
       })
     })
     const user = userEvent.setup()
@@ -230,7 +274,7 @@ describe('App API key', () => {
   test('a successful key save clears an earlier Validate error', async () => {
     __setWailsMocks({
       GetAppState: vi.fn(async () => profileSetupState()),
-      ValidateProfile: vi.fn().mockRejectedValueOnce(new Error('Steam profile not found')),
+      ValidateProfile: vi.fn().mockRejectedValueOnce(new RuntimeError('No Steam profile was found for that account.')),
       SaveAPIKey: vi.fn(async () => {})
     })
     const user = userEvent.setup()
@@ -238,13 +282,13 @@ describe('App API key', () => {
     render(App)
     await user.type(await screen.findByPlaceholderText(/SteamID64/), 'nobody')
     await user.click(screen.getByRole('button', {name: 'Validate'}))
-    expect(await screen.findByText('Steam profile not found')).toBeInTheDocument()
+    expect(await screen.findByText('No Steam profile was found for that account.')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', {name: 'Replace key'}))
     await user.type(keyField(), 'new-key')
     await user.click(screen.getByRole('button', {name: 'Save key'}))
 
-    await waitFor(() => expect(screen.queryByText('Steam profile not found')).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByText('No Steam profile was found for that account.')).not.toBeInTheDocument())
   })
 
   test('a failed key save on the profile screen keeps the form open with its error', async () => {
@@ -1029,7 +1073,7 @@ describe('App Wails call failures', () => {
     __setWailsMocks({
       GetAppState: vi.fn(async () => dashboardState()),
       SyncNow: vi.fn()
-        .mockRejectedValueOnce(new Error(failureMessage))
+        .mockRejectedValueOnce(new RuntimeError(failureMessage))
         .mockResolvedValueOnce(syncingState(0))
     })
     const user = userEvent.setup()

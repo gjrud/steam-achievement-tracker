@@ -6,7 +6,7 @@ Developer reference for the SQLite layer in `internal/db` (`db.go`, `dsn.go`). T
 
 - Driver: `github.com/mattn/go-sqlite3` (CGO). `go.mod` pins v1.14.x.
 - One database file: `<data>/steam-achievement-tracker.db` (`config.DBFileName`), with `<data>` set to `appdata.Paths.DataDir`. Backups go in `<data>/backups/`.
-- Privacy (GDPR): all data in this file stays on the user's machine. The app sends it nowhere; its only network traffic is to Steam (Web API and CDN), and the README "Where your data stays" section says the same. The database never stores filesystem paths, since they carry the OS user name. Cover files are found from `image_appid` and `file_name` only (`cover_images.cached` is the flag). Two things can still hold personal data, and the README privacy section tells users about them. The sync error text (`sync_runs.error`, `profile_games.last_error`) no longer carries a SteamID64 or vanity name from new requests, since the client redacts them from request addresses before the text is stored (see [steam-client.md](steam-client.md#key-and-id-redaction)); rows written by earlier versions may still hold a request address with the SteamID64, and backups made before migration 2 still hold the old `cover_images.path` values.
+- Privacy (GDPR): all data in this file stays on the user's machine. The app sends it nowhere; its only network traffic is to Steam (Web API and CDN), and the README "Where your data stays" section says the same. The database never stores filesystem paths, since they carry the OS user name. Cover files are found from `image_appid` and `file_name` only (`cover_images.cached` is the flag). Two things can still hold personal data, and the README privacy section tells users about them. The sync error text (`sync_runs.error`, `profile_games.last_error`) holds only user-safe sentences: `steam.UserMessage` text, the usererr sentences the app writes, and the run texts the app writes itself (see [app-service.md](app-service.md#error-boundary)). Migration 3 rewrote the rows written by earlier versions, which had stored raw error text, so no row keeps a request address, SteamID64, vanity name or backend text (see [Migrations](#migrations)). Backups made before migration 2 still hold the old `cover_images.path` values. A backup made before migration 3 still holds the old raw `last_error` and `sync_runs.error` text, which can include request addresses with a SteamID64 from older versions; the app does not display it, but the file stays on disk until the user deletes it.
 - Journal mode WAL. Foreign keys enforced.
 - Connection pool capped at one open and one idle connection (`SetMaxOpenConns(1)`, `SetMaxIdleConns(1)`). Every query, including nested queries, shares that connection. Do not query `*sql.DB` while a transaction or an open `*sql.Rows` on the same handle remains in use; the query blocks forever. Repository code closes `rows` before issuing the next statement for this reason (see the comments in `loadGameCards` and `profileGameTags`).
 - Timestamps are stored as text. The repository writes `time.Now().UTC().Format(time.RFC3339)`. `SaveGameSync` takes its timestamp (`SyncedAt`) from the caller.
@@ -35,7 +35,7 @@ The DSN parameters apply to the single connection. WAL mode persists in the data
 | `journal_mode` | `PRAGMA` in `OpenAndMigrate` | `WAL` | Executed once per open. |
 | `user_version` | `PRAGMA` in migration code | schema version | Read in `inspectSchema`, set in `setUserVersion` inside the migration transaction. |
 | `wal_checkpoint(TRUNCATE)` | `PRAGMA` in `backupDB` | | Run before copying the file for a backup. |
-| `VACUUM`, `wal_checkpoint(TRUNCATE)` | `compact` | | Run after a compacting migration (migration 2) commits, so the dropped path bytes leave the files. |
+| `VACUUM`, `wal_checkpoint(TRUNCATE)` | `compact` | | Run after a compacting migration (migrations 2 and 3) commits, so the dropped path bytes and the rewritten text leave the files. |
 
 No other pragmas are set. SQLite defaults remain in effect for `synchronous`, `cache_size`, `temp_store`, `auto_vacuum` and `secure_delete`.
 
@@ -58,7 +58,7 @@ Build DSNs only through `sqliteDSN`. Do not concatenate paths into DSN strings (
 
 ### Mechanism
 
-- `migrations` is an ordered slice of `migration{version, name, sql, compact}` in `db.go`. Currently two entries: `{version: 1, name: "initial_schema", sql: initialSchemaSQL}` and `{version: 2, name: "cover_cached_flag", sql: coverCachedFlagSQL, compact: true}`.
+- `migrations` is an ordered slice of `migration{version, name, sql, compact}` in `db.go`. Currently three entries: `{version: 1, name: "initial_schema", sql: initialSchemaSQL}`, `{version: 2, name: "cover_cached_flag", sql: coverCachedFlagSQL, compact: true}` and `{version: 3, name: "rewrite_stored_sync_text", sql: rewriteStoredSyncTextSQL, compact: true}`.
 - `latestVersion()` is the maximum `version` in that slice. A fully migrated database has `user_version = latestVersion()` and a `schema_migrations` row for every version.
 - `schema_migrations(version integer primary key, name text not null, applied_at text not null)` is created by `ensureMigrationsTable` inside the migration transaction (`CREATE TABLE IF NOT EXISTS`). `applied_at` is UTC RFC3339.
 - `inspectSchema` reads `PRAGMA user_version`, whether `schema_migrations` exists, whether any user table exists, and `max(version)` from `schema_migrations` (0 if absent). The user-table check is `name not like 'sqlite_%'`. In SQL `LIKE`, `_` is a one-character wildcard, so the pattern also excludes names that start with `sqlite` followed by any single character; `LIKE` matching is ASCII case-insensitive. No table in the schema is affected.
@@ -79,6 +79,14 @@ Build DSNs only through `sqliteDSN`. Do not concatenate paths into DSN strings (
   ```
 
   `DROP COLUMN` needs SQLite 3.35 or newer; the bundled go-sqlite3 ships 3.54.
+- Migration 3 `rewrite_stored_sync_text` (`rewriteStoredSyncTextSQL`, `compact: true`) rewrites stored error text. Versions before it stored the raw error in `profile_games.last_error` and `sync_runs.error`, and the UI shows both. The rule is an allowlist, not a pattern match:
+  - a value that is exactly one of the sentences the app writes (the `steam.UserMessage` sentences, the usererr sentences, and the run texts `app restarted before sync completed` and `sync ended but its final status could not be saved`) is kept;
+  - `sync_runs.error` also keeps the run summary `N of M games failed to sync`, where N and M are non-empty runs of digits and the value holds nothing else (checked by `partialRunSummarySQL`: `rtrim` on each number, and the fixed words by position, because a `GLOB` cannot require digits-only parts). `1x of 2 games failed to sync` is rewritten;
+  - `context canceled` becomes `The request was canceled.`;
+  - any other non-empty value becomes `Something went wrong. See the log file for details.`;
+  - NULL and empty values are not changed.
+
+  The list is frozen in the migration SQL (`syncTextSafeSentences`). It is not a pattern list because the raw texts vary (endpoints, status lines, URLs, decode messages) and an unlisted raw form would survive a pattern rule. The trade-off: a sentence that the app wrote in an earlier version and that is not on the list becomes the generic sentence. Re-running the migration SQL changes nothing. `compact` removes the old text from the free pages.
 - `compact: true` on a migration means that after its transaction commits, `compact` runs `VACUUM` and then `PRAGMA wal_checkpoint(TRUNCATE)`. `VACUUM` cannot run inside the transaction. Without it the dropped path bytes stay in free pages and in the WAL. `compact` runs only when a compacting migration ran in this open and the database already had user tables before the open (a fresh install holds no dropped data, so it is skipped). A failure is logged with `log.Printf("compact database: ...")` and not returned: `OpenAndMigrate` succeeds, the migration itself stays committed, and `compact` is not retried on the next open. The dropped bytes then stay in free pages and the WAL until SQLite reuses them or a later `VACUUM` runs.
 
 ### Backup before migration
@@ -93,6 +101,7 @@ Runs only when a migration is pending and the database already contains user tab
 - No retention or pruning. Backups accumulate; nothing in the code deletes them.
 - The backup is not rolled back or restored automatically. A failed migration leaves the backup file behind for manual recovery.
 - Backups made before migration 2 still hold the old absolute cover paths (`cover_images.path`), and so do backups from before any later upgrade. The app never reads or deletes them. Users who care about the OS user name in them must delete the files in `<data>/backups/` (see the README privacy section).
+- A backup made before migration 3 still holds the raw sync error text that migration 3 rewrote (`profile_games.last_error`, `sync_runs.error`), which can include request addresses with a SteamID64. The app does not display it and never reads it; delete it with the other backups if that matters.
 
 ### Adding a migration
 
@@ -106,7 +115,7 @@ Runs only when a migration is pending and the database already contains user tab
 
 ## Schema reference
 
-All tables are created by migration 1 (`initial_schema`), except `schema_migrations`, which `migrate` creates. Migration 2 changes only `cover_images` (its `path` column is replaced by `cached`). Columns are listed in definition order. "PK" is primary key; "FK" is foreign key. No `ON DELETE` or `ON UPDATE` actions are declared anywhere, so the default `NO ACTION` applies: deleting a referenced parent row fails while children exist. The repository deletes children first (see `ClearProfileData` in [repository.md](repository.md)). Besides primary keys, `NOT NULL` and foreign keys, the only uniqueness constraint is `UNIQUE` on `profiles.steam_id64`. There are no `CHECK` constraints.
+All tables are created by migration 1 (`initial_schema`), except `schema_migrations`, which `migrate` creates. Migration 2 changes only `cover_images` (its `path` column is replaced by `cached`). Migration 3 changes no columns; it rewrites the text in `profile_games.last_error` and `sync_runs.error`. Columns are listed in definition order. "PK" is primary key; "FK" is foreign key. No `ON DELETE` or `ON UPDATE` actions are declared anywhere, so the default `NO ACTION` applies: deleting a referenced parent row fails while children exist. The repository deletes children first (see `ClearProfileData` in [repository.md](repository.md)). Besides primary keys, `NOT NULL` and foreign keys, the only uniqueness constraint is `UNIQUE` on `profiles.steam_id64`. There are no `CHECK` constraints.
 
 ### `settings`
 

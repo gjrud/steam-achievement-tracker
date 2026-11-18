@@ -21,12 +21,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gjrud/steam-achievement-tracker/internal/appdata"
 	"github.com/gjrud/steam-achievement-tracker/internal/appdata/appdatatest"
 	"github.com/gjrud/steam-achievement-tracker/internal/config"
 	"github.com/gjrud/steam-achievement-tracker/internal/keyring"
 	"github.com/gjrud/steam-achievement-tracker/internal/logging"
 	"github.com/gjrud/steam-achievement-tracker/internal/repository"
-	"github.com/gjrud/steam-achievement-tracker/internal/steam"
 	zk "github.com/zalando/go-keyring"
 )
 
@@ -47,6 +47,17 @@ func openTestApp(t *testing.T) *App {
 	}
 	t.Cleanup(func() { _ = app.ServiceShutdown() })
 	return app
+}
+
+// captureLog sends the standard logger to a buffer until the test ends and returns the buffer. Use it only in tests
+// that start no background sync, because the sync goroutine also logs.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	return &buf
 }
 
 // newTestApp opens an App with an empty mocked system keyring.
@@ -173,7 +184,7 @@ func TestStartSyncSingleFlightGuards(t *testing.T) {
 		t.Fatal("syncInProgress = false, want existing sync left running")
 	}
 	err := app.startSync(true)
-	if err == nil || !strings.Contains(err.Error(), "sync already in progress") {
+	if !errors.Is(err, errSyncAlreadyInProgress) {
 		t.Fatalf("forced startSync err = %v, want already-in-progress error", err)
 	}
 }
@@ -182,7 +193,7 @@ func TestStartSyncLifecycleResetsAfterGuardFailure(t *testing.T) {
 	t.Run("no database", func(t *testing.T) {
 		app := &App{}
 		err := app.startSync(true)
-		if err == nil || !strings.Contains(err.Error(), "database is not initialized") {
+		if !errors.Is(err, errNotReady) {
 			t.Fatalf("startSync err = %v, want database-not-initialized", err)
 		}
 		assertIdleSync(t, app)
@@ -204,7 +215,7 @@ func TestStartSyncLifecycleResetsAfterGuardFailure(t *testing.T) {
 	t.Run("no active profile", func(t *testing.T) {
 		app := newTestAppWithKey(t, "key-without-profile")
 		err := app.startSync(true)
-		if err == nil || !strings.Contains(err.Error(), "no active profile") {
+		if !errors.Is(err, errNoProfile) {
 			t.Fatalf("startSync err = %v, want no-active-profile", err)
 		}
 		assertIdleSync(t, app)
@@ -254,7 +265,7 @@ func TestSetLibrarySettingsRequiresActiveProfile(t *testing.T) {
 	if state.Settings != repository.DefaultLibrarySettings() {
 		t.Fatalf("Settings without profile = %+v, want defaults", state.Settings)
 	}
-	if _, err := app.SetLibrarySettings(false, false); err == nil || !strings.Contains(err.Error(), "no active profile") {
+	if _, err := app.SetLibrarySettings(false, false); !errors.Is(err, errNoProfile) {
 		t.Fatalf("SetLibrarySettings without profile err = %v, want no-active-profile", err)
 	}
 	state, err = app.GetAppState()
@@ -401,15 +412,22 @@ func TestGetAppStateReportsKeyPresenceWithoutLeakingKey(t *testing.T) {
 }
 
 func TestGetAppStateReportsKeyringReadErrorAtInit(t *testing.T) {
+	logs := captureLog(t)
 	zk.MockInitWithError(errors.New("secret service unavailable"))
 	app := openTestApp(t)
 	state, err := app.GetAppState()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.APIKeyPresent || state.APIKeyError != "secret service unavailable" || state.InitError != "" {
-		t.Fatalf("state = present %v apiKeyError %q initError %q, want key error reported and no init error",
+	if state.APIKeyPresent || state.APIKeyError != msgKeyring || state.InitError != "" {
+		t.Fatalf("state = present %v apiKeyError %q initError %q, want the keyring sentence and no init error",
 			state.APIKeyPresent, state.APIKeyError, state.InitError)
+	}
+	if strings.Contains(state.APIKeyError, "secret service") {
+		t.Fatalf("apiKeyError %q carries the backend text", state.APIKeyError)
+	}
+	if !strings.Contains(logs.String(), "keyring lookup: secret service unavailable") {
+		t.Fatalf("log = %q, want the raw keyring error", logs.String())
 	}
 }
 
@@ -817,6 +835,19 @@ func TestStartSyncFailsWhenBaselineCannotBeRead(t *testing.T) {
 	if known || runID != 0 || profileID != 0 {
 		t.Fatalf("baseline after failed start = known %v run %d profile %d, want cleared", known, runID, profileID)
 	}
+
+	// Through the bound method the frontend gets only the generic sentence. The table name stays in the log.
+	if err := zk.Set(testKeyringService, testKeyringUser, "fixture-steam-key"); err != nil {
+		t.Fatal(err)
+	}
+	logs := captureLog(t)
+	if _, err := app.SyncNow(); err == nil || err.Error() != msgGeneric {
+		t.Fatalf("SyncNow err = %v, want the generic sentence", err)
+	}
+	if !strings.Contains(logs.String(), "sync_runs") {
+		t.Fatalf("log = %q, want the raw sync_runs error", logs.String())
+	}
+	assertIdleSync(t, app)
 }
 
 // TestStartSyncFailureResetsSyncBaseline checks that the done path of a failed start leaves no baseline behind.
@@ -829,7 +860,7 @@ func TestStartSyncFailureResetsSyncBaseline(t *testing.T) {
 	app.mu.Unlock()
 
 	// No database, so startSync fails through done().
-	if err := app.startSync(true); err == nil || !strings.Contains(err.Error(), "database is not initialized") {
+	if err := app.startSync(true); !errors.Is(err, errNotReady) {
 		t.Fatalf("startSync err = %v, want database-not-initialized", err)
 	}
 	assertIdleSync(t, app)
@@ -877,7 +908,7 @@ func TestRequireAPIKeyTracksKeyringState(t *testing.T) {
 	if _, err := app.requireAPIKey(); err == nil || err.Error() != "secret service locked" {
 		t.Fatalf("requireAPIKey with keyring error = %v, want the keyring error", err)
 	}
-	if state, _ := app.GetAppState(); state.APIKeyPresent || state.APIKeyError != "secret service locked" {
+	if state, _ := app.GetAppState(); state.APIKeyPresent || state.APIKeyError != msgKeyring {
 		t.Fatalf("state after keyring error = present %v err %q, want error reported", state.APIKeyPresent, state.APIKeyError)
 	}
 
@@ -928,8 +959,8 @@ func TestSaveProfileDefaultsBlankDisplayNameToSteamID(t *testing.T) {
 func TestSaveProfileRequiresSteamID(t *testing.T) {
 	app := newTestApp(t)
 	_, err := app.SaveProfile(ProfilePreview{DisplayName: "No Id"})
-	if err == nil || !strings.Contains(err.Error(), "SteamID64 is required") {
-		t.Fatalf("SaveProfile err = %v, want SteamID64 required", err)
+	if !errors.Is(err, errSteamIDMissing) {
+		t.Fatalf("SaveProfile err = %v, want the steam id required sentence", err)
 	}
 	state, err := app.GetAppState()
 	if err != nil {
@@ -966,6 +997,35 @@ func TestSaveProfileUpdatesExistingAndSwitchesActive(t *testing.T) {
 	}
 }
 
+// A database that cannot be opened fails init after the data folder and log file are known, so the failure screen can
+// name the log file. The bound method error carries the sentence only.
+func TestInitDatabaseFailureNamesLogFile(t *testing.T) {
+	appdatatest.Isolate(t)
+	t.Cleanup(logging.Fallback)
+	zk.MockInit()
+	paths := appdata.Resolve()
+	if err := appdata.Ensure(paths); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.DB, []byte("this file is plain text, not a SQLite database, and is long enough to read"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp()
+
+	state, err := app.GetAppState()
+	if err != nil {
+		t.Fatalf("GetAppState err = %v, want nil with InitError set", err)
+	}
+	if state.InitError != msgInitDatabase || state.LogFile != paths.LogFile || state.DataDir != paths.DataDir {
+		t.Fatalf("state = initError %q logFile %q dataDir %q, want %q, %q, %q",
+			state.InitError, state.LogFile, state.DataDir, msgInitDatabase, paths.LogFile, paths.DataDir)
+	}
+	_, err = app.SaveProfile(ProfilePreview{SteamID64: testSteamID})
+	if err == nil || err.Error() != msgInitDatabase {
+		t.Fatalf("SaveProfile err = %v, want %q", err, msgInitDatabase)
+	}
+}
+
 func TestInitFailureIsReportedAndBlocksActions(t *testing.T) {
 	// The XDG base directories sit under a regular file, so appdata.Ensure fails.
 	appdatatest.Block(t)
@@ -977,23 +1037,30 @@ func TestInitFailureIsReportedAndBlocksActions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAppState err = %v, want nil with InitError set", err)
 	}
-	if state.InitError == "" || state.ProfileExists || state.DataDir != "" {
-		t.Fatalf("state = initError %q profile %v dataDir %q, want init error and no paths", state.InitError, state.ProfileExists, state.DataDir)
+	// The app folder is known, so the failure screen can name it. No log file exists yet, so none is named.
+	if state.InitError != msgInitDataFolder || state.ProfileExists || state.DataDir == "" || state.LogFile != "" {
+		t.Fatalf("state = initError %q profile %v dataDir %q logFile %q, want the folders sentence, the data dir and no log file",
+			state.InitError, state.ProfileExists, state.DataDir, state.LogFile)
 	}
-	if _, err := app.SaveProfile(ProfilePreview{SteamID64: testSteamID}); err == nil {
+	_, err = app.SaveProfile(ProfilePreview{SteamID64: testSteamID})
+	if err == nil {
 		t.Fatal("SaveProfile err = nil after failed init, want error")
+	}
+	if strings.Contains(err.Error(), state.DataDir) {
+		t.Fatalf("SaveProfile err = %q carries the data folder", err.Error())
 	}
 	if _, err := app.DisableGame(10, 0); err == nil {
 		t.Fatal("DisableGame err = nil after failed init, want error")
 	}
 }
 
-// Bound methods return the init failure to Wails, which logs it. The text must not carry the data directory, while
-// AppState.InitError keeps the full text on purpose. A failed init is retried, not cached: each later call re-runs
-// init and fails the same way, so every call is checked.
+// Bound methods return the init failure sentence, and AppState.InitError holds the same sentence. Neither carries the
+// data directory. The raw error is logged with the path reduced to its base name. A failed init is retried, not
+// cached: each later call re-runs init and fails the same way, so every call is checked.
 func TestInitFailureBoundErrorsOmitPathsButStateKeepsThem(t *testing.T) {
 	blocker := appdatatest.Block(t)
 	t.Cleanup(logging.Fallback)
+	logs := captureLog(t)
 	zk.MockInit()
 	app := &App{}
 
@@ -1001,6 +1068,9 @@ func TestInitFailureBoundErrorsOmitPathsButStateKeepsThem(t *testing.T) {
 		_, err := app.SaveProfile(ProfilePreview{SteamID64: testSteamID})
 		if err == nil {
 			t.Fatalf("%s: SaveProfile err = nil after failed init, want error", call)
+		}
+		if err.Error() != msgInitDataFolder {
+			t.Fatalf("%s: SaveProfile err = %q, want %q", call, err.Error(), msgInitDataFolder)
 		}
 		if strings.Contains(err.Error(), blocker) {
 			t.Fatalf("%s: SaveProfile error carries the data directory: %q", call, err.Error())
@@ -1011,8 +1081,18 @@ func TestInitFailureBoundErrorsOmitPathsButStateKeepsThem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAppState err = %v, want nil with InitError set", err)
 	}
-	if !strings.Contains(state.InitError, blocker) {
-		t.Fatalf("InitError = %q, want the full path kept for the UI", state.InitError)
+	if state.InitError != msgInitDataFolder {
+		t.Fatalf("InitError = %q, want %q", state.InitError, msgInitDataFolder)
+	}
+	if strings.Contains(state.InitError, blocker) {
+		t.Fatalf("InitError = %q carries the data directory", state.InitError)
+	}
+	// The raw cause, with the path reduced to its base name, is in the log.
+	if !strings.Contains(logs.String(), "create app directories:") {
+		t.Fatalf("log = %q, want the raw init error", logs.String())
+	}
+	if strings.Contains(logs.String(), blocker) {
+		t.Fatalf("log = %q carries the full data directory; redact.Paths should reduce it", logs.String())
 	}
 }
 
@@ -1234,15 +1314,22 @@ func TestClearActiveUserDataKeyDeleteErrorChangesNothing(t *testing.T) {
 				t.Fatal(err)
 			}
 			prev := deleteSteamAPIKey
-			deleteSteamAPIKey = func() error { return fmt.Errorf("delete api key: %w", backendErr) }
+			deleteSteamAPIKey = func() error { return fmt.Errorf("delete api key: %w", &keyring.BackendError{Err: backendErr}) }
 			t.Cleanup(func() { deleteSteamAPIKey = prev })
+			logs := captureLog(t)
 
 			_, err := app.ClearActiveUserData(deleteProfileData, true)
-			if !errors.Is(err, backendErr) {
-				t.Fatalf("ClearActiveUserData err = %v, want backend error", err)
+			if err == nil || err.Error() != msgKeyring {
+				t.Fatalf("ClearActiveUserData err = %v, want the keyring sentence", err)
 			}
-			if strings.Contains(err.Error(), sentinel) {
-				t.Fatalf("error text %q contains the key", err.Error())
+			if strings.Contains(err.Error(), "secret service") || strings.Contains(err.Error(), sentinel) {
+				t.Fatalf("error text %q carries backend or key text", err.Error())
+			}
+			if !strings.Contains(logs.String(), "secret service locked") {
+				t.Fatalf("log = %q, want the raw backend error", logs.String())
+			}
+			if strings.Contains(logs.String(), sentinel) {
+				t.Fatalf("log = %q contains the key", logs.String())
 			}
 			if active, err := app.repo.ActiveProfile(); err != nil || active == nil || active.ID != profile.ID {
 				t.Fatalf("active profile = %#v, %v; want unchanged profile %d", active, err, profile.ID)
@@ -1334,9 +1421,14 @@ func TestClearActiveUserDataDataStepFailureAfterKeyDeleted(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	logs := captureLog(t)
 	_, err = app.ClearActiveUserData(true, true)
-	if err == nil || !strings.Contains(err.Error(), "profile delete blocked") {
-		t.Fatalf("ClearActiveUserData err = %v, want the data step failure", err)
+	// A database failure reaches the UI as the generic sentence. The SQL trigger message stays in the log.
+	if err == nil || err.Error() != msgGeneric {
+		t.Fatalf("ClearActiveUserData err = %v, want the generic sentence", err)
+	}
+	if !strings.Contains(logs.String(), "profile delete blocked") {
+		t.Fatalf("log = %q, want the raw data step failure", logs.String())
 	}
 	if _, err := zk.Get(testKeyringService, testKeyringUser); !errors.Is(err, zk.ErrNotFound) {
 		t.Fatalf("keyring get after failed data step err = %v, want key deleted", err)
@@ -1387,7 +1479,7 @@ func TestGameActionsRequireActiveProfile(t *testing.T) {
 	}
 	for name, action := range actions {
 		t.Run(name, func(t *testing.T) {
-			if _, err := action(); err == nil || !strings.Contains(err.Error(), "no active profile") {
+			if _, err := action(); !errors.Is(err, errNoProfile) {
 				t.Fatalf("%s err = %v, want no-active-profile", name, err)
 			}
 		})
@@ -1667,16 +1759,36 @@ func TestValidateProfileWithoutKeyReturnsErrMissing(t *testing.T) {
 	}
 }
 
-// A Steam HTTP error is returned to the caller as the steam package's HTTPStatusError.
-func TestValidateProfileSteamHTTPErrorPropagates(t *testing.T) {
+// A Steam HTTP error reaches the caller as the user-safe sentence: no endpoint, status line or body. The raw error,
+// with its status text, is logged for diagnostics.
+func TestValidateProfileSteamHTTPErrorIsUserSafe(t *testing.T) {
 	app := newTestAppWithKey(t, "fixture-steam-key")
 	stub, _ := newSteamStub(t, forbidSteam)
 	setSteamBaseURL(app, stub.URL)
 
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
 	_, err := app.ValidateProfile(testSteamID)
-	var statusErr *steam.HTTPStatusError
-	if !errors.As(err, &statusErr) || statusErr.Code != http.StatusForbidden {
-		t.Fatalf("ValidateProfile err = %v, want HTTPStatusError with code 403", err)
+	if err == nil {
+		t.Fatal("ValidateProfile err = nil, want a 403 sentence")
+	}
+	want := "Steam rejected the Web API key. Check that the key is correct and still valid, then replace it in Settings."
+	if err.Error() != want {
+		t.Fatalf("ValidateProfile err = %q, want %q", err.Error(), want)
+	}
+	for _, raw := range []string{"/ISteamUser", "returned 403", "forbidden", "fixture-steam-key"} {
+		if strings.Contains(err.Error(), raw) {
+			t.Fatalf("ValidateProfile err = %q, contains %q", err.Error(), raw)
+		}
+	}
+	if !strings.Contains(buf.String(), "returned 403 Forbidden") {
+		t.Fatalf("log = %q, want the raw status error for diagnostics", buf.String())
+	}
+	if strings.Contains(buf.String(), "fixture-steam-key") {
+		t.Fatalf("log = %q, must not carry the API key", buf.String())
 	}
 }
 
@@ -1687,7 +1799,7 @@ func TestValidateProfileEmptyInputErrors(t *testing.T) {
 	setSteamBaseURL(app, stub.URL)
 
 	for _, input := range []string{"", "   "} {
-		if _, err := app.ValidateProfile(input); err == nil || !strings.Contains(err.Error(), "profile input is required") {
+		if _, err := app.ValidateProfile(input); err == nil || err.Error() != "Enter a Steam profile URL, SteamID64 or custom name." {
 			t.Fatalf("ValidateProfile(%q) err = %v, want profile-input-required", input, err)
 		}
 	}
@@ -1703,8 +1815,8 @@ func TestValidateProfileReportsPlayerNotFound(t *testing.T) {
 	})
 	setSteamBaseURL(app, stub.URL)
 
-	if _, err := app.ValidateProfile(testSteamID); err == nil || !strings.Contains(err.Error(), "Steam profile not found") {
-		t.Fatalf("ValidateProfile err = %v, want Steam profile not found", err)
+	if _, err := app.ValidateProfile(testSteamID); err == nil || !strings.Contains(err.Error(), "No Steam profile was found for that account.") {
+		t.Fatalf("ValidateProfile err = %v, want No Steam profile was found for that account", err)
 	}
 }
 
@@ -1722,7 +1834,7 @@ func TestSyncNowWithoutKeyReturnsErrMissing(t *testing.T) {
 func TestSyncNowWithoutActiveProfileErrors(t *testing.T) {
 	app := newTestAppWithKey(t, "fixture-steam-key")
 
-	if _, err := app.SyncNow(); err == nil || !strings.Contains(err.Error(), "no active profile") {
+	if _, err := app.SyncNow(); !errors.Is(err, errNoProfile) {
 		t.Fatalf("SyncNow err = %v, want no-active-profile", err)
 	}
 	assertIdleSync(t, app)
@@ -1871,10 +1983,14 @@ func TestSaveAPIKeyKeyringErrorLeavesCacheUnchanged(t *testing.T) {
 	t.Run("working old key stays present", func(t *testing.T) {
 		app := newTestAppWithKey(t, "old-key")
 		zk.MockInitWithError(errors.New("secret service locked"))
+		logs := captureLog(t)
 
 		err := app.SaveAPIKey("new-key")
-		if err == nil || !strings.Contains(err.Error(), "secret service locked") {
-			t.Fatalf("SaveAPIKey err = %v, want the keyring error", err)
+		if err == nil || err.Error() != msgKeyring {
+			t.Fatalf("SaveAPIKey err = %v, want the keyring sentence", err)
+		}
+		if !strings.Contains(logs.String(), "secret service locked") {
+			t.Fatalf("log = %q, want the raw keyring error", logs.String())
 		}
 		key, present, keyErr := cachedAPIKeyState(app)
 		if key != "old-key" || !present || keyErr != "" {
@@ -1891,7 +2007,7 @@ func TestSaveAPIKeyKeyringErrorLeavesCacheUnchanged(t *testing.T) {
 			t.Fatal("SaveAPIKey err = nil, want keyring error")
 		}
 		key, present, keyErr := cachedAPIKeyState(app)
-		if key != "" || present || keyErr != "secret service unavailable" {
+		if key != "" || present || keyErr != msgKeyring {
 			t.Fatalf("cache = key %q present %v err %q, want no key and the earlier error", key, present, keyErr)
 		}
 	})
@@ -1957,23 +2073,36 @@ func TestSaveAPIKeyErrorsNeverContainTheKey(t *testing.T) {
 	const sentinel = "SENTINEL"
 	backendErr := errors.New("boom")
 	tests := []struct {
-		name  string
-		input string
-		setup func()
+		name   string
+		input  string
+		setup  func()
+		logged bool
 	}{
-		{"invalid input passes through", "SENTINEL\u200bkey", zk.MockInit},
-		{"store error", "  SENTINELkey  ", func() { zk.MockInitWithError(backendErr) }},
+		// ErrInvalidKey is an input check (no raw cause), so it is not logged; a store failure is.
+		{"invalid input passes through", "SENTINEL\u200bkey", zk.MockInit, false},
+		{"store error", "  SENTINELkey  ", func() { zk.MockInitWithError(backendErr) }, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.setup()
 			app := openTestApp(t)
+			logs := captureLog(t)
 			err := app.SaveAPIKey(tt.input)
 			if err == nil {
 				t.Fatal("SaveAPIKey err = nil, want an error")
 			}
 			if strings.Contains(err.Error(), sentinel) {
 				t.Fatalf("error text %q contains the key", err.Error())
+			}
+			// A store failure is logged for diagnostics; the key must not be in the log either.
+			if tt.logged && logs.Len() == 0 {
+				t.Fatal("SaveAPIKey store error was not logged")
+			}
+			if !tt.logged && logs.Len() != 0 {
+				t.Fatalf("SaveAPIKey input check was logged: %q", logs.String())
+			}
+			if strings.Contains(logs.String(), sentinel) {
+				t.Fatalf("log %q contains the key", logs.String())
 			}
 		})
 	}

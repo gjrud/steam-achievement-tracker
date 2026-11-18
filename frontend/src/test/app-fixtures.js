@@ -1,7 +1,7 @@
 import {fireEvent, screen} from '@testing-library/svelte'
 import {tick} from 'svelte'
 import {vi} from 'vitest'
-import {__emitWailsEvent} from './wails-runtime-mock.js'
+import {__emitWailsEvent, RuntimeError} from './wails-runtime-mock.js'
 
 export const failureMessage = 'Wails call failed'
 
@@ -30,7 +30,7 @@ export async function advance(ms) {
 
 export function rejecting() {
   return vi.fn(async () => {
-    throw new Error(failureMessage)
+    throw new RuntimeError(failureMessage)
   })
 }
 

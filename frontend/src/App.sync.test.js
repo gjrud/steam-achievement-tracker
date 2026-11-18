@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest'
 import App from './App.svelte'
 import {__resetWailsMocks, __setWailsMocks} from './test/wails-app-mock.js'
-import {__listenerCount} from './test/wails-runtime-mock.js'
+import {__listenerCount, RuntimeError} from './test/wails-runtime-mock.js'
 import {
   advance,
   dashboardState,
@@ -197,7 +197,7 @@ describe('App sync events', () => {
   test('shows a failed event read and retries once after 2s while the sync runs', async () => {
     const getState = vi.fn()
       .mockResolvedValueOnce(syncingState(1))
-      .mockRejectedValueOnce(new Error(failureMessage))
+      .mockRejectedValueOnce(new RuntimeError(failureMessage))
       .mockResolvedValueOnce(syncingState(3))
     __setWailsMocks({GetAppState: getState})
 
@@ -223,8 +223,8 @@ describe('App sync events', () => {
   test('keeps retrying while reads keep failing during a sync, one timer at a time', async () => {
     const getState = vi.fn()
       .mockResolvedValueOnce(syncingState(1))
-      .mockRejectedValueOnce(new Error(failureMessage))
-      .mockRejectedValueOnce(new Error(failureMessage))
+      .mockRejectedValueOnce(new RuntimeError(failureMessage))
+      .mockRejectedValueOnce(new RuntimeError(failureMessage))
       .mockResolvedValueOnce(finishedState())
     __setWailsMocks({GetAppState: getState})
 
@@ -247,7 +247,7 @@ describe('App sync events', () => {
   test('does not retry a failed event read when no sync is running', async () => {
     const getState = vi.fn()
       .mockResolvedValueOnce(dashboardState())
-      .mockRejectedValueOnce(new Error(failureMessage))
+      .mockRejectedValueOnce(new RuntimeError(failureMessage))
     __setWailsMocks({GetAppState: getState})
 
     render(App)
@@ -264,7 +264,7 @@ describe('App sync events', () => {
   test('a successful read clears a failed-read banner and cancels its pending retry', async () => {
     const getState = vi.fn()
       .mockResolvedValueOnce(syncingState(1))
-      .mockRejectedValueOnce(new Error(failureMessage))
+      .mockRejectedValueOnce(new RuntimeError(failureMessage))
       .mockResolvedValueOnce(syncingState(3))
     __setWailsMocks({GetAppState: getState})
 
@@ -291,7 +291,7 @@ describe('App sync events', () => {
       .mockResolvedValueOnce(syncingState(4))
       .mockResolvedValue(finishedState())
     const disable = vi.fn()
-      .mockRejectedValueOnce(new Error(failureMessage))
+      .mockRejectedValueOnce(new RuntimeError(failureMessage))
       .mockResolvedValueOnce(syncingState(5))
     __setWailsMocks({GetAppState: getState, DisableGame: disable})
 
@@ -328,7 +328,7 @@ describe('App sync events', () => {
   test('a successful action cancels a pending failed-read retry', async () => {
     const getState = vi.fn()
       .mockResolvedValueOnce(syncingState(1))
-      .mockRejectedValueOnce(new Error(failureMessage))
+      .mockRejectedValueOnce(new RuntimeError(failureMessage))
     const disable = vi.fn(async () => syncingState(2))
     __setWailsMocks({GetAppState: getState, DisableGame: disable})
 
@@ -351,10 +351,10 @@ describe('App sync events', () => {
   test('a failed action inside the retry window still lets the failed read\'s retry clear Syncing…', async () => {
     const getState = vi.fn()
       .mockResolvedValueOnce(syncingState(1))
-      .mockRejectedValueOnce(new Error(failureMessage))
+      .mockRejectedValueOnce(new RuntimeError(failureMessage))
       .mockResolvedValueOnce(finishedState())
     const disable = vi.fn(async () => {
-      throw new Error('Disable failed')
+      throw new RuntimeError('Disable failed')
     })
     __setWailsMocks({GetAppState: getState, DisableGame: disable})
 
@@ -401,7 +401,7 @@ describe('App sync events', () => {
   test('cancels a pending failed-read retry on unmount', async () => {
     const getState = vi.fn()
       .mockResolvedValueOnce(syncingState(1))
-      .mockRejectedValueOnce(new Error(failureMessage))
+      .mockRejectedValueOnce(new RuntimeError(failureMessage))
     __setWailsMocks({GetAppState: getState})
 
     render(App)

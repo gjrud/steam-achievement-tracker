@@ -33,12 +33,12 @@ Every method takes a `context.Context` first. Requests use that context, so canc
 | --- | --- | --- | --- | --- |
 | `ResolveProfileInput(ctx, input)` | see [Profile resolution](#profile-resolution) | depends on input | `(steamID64 string, error)` | Accepts a SteamID64, a profile URL, a vanity URL or a bare vanity name. |
 | `ResolveVanityURL(ctx, vanity)` | `/ISteamUser/ResolveVanityURL/v1/` | `key`, `vanityurl` | `(string, error)` | Error is Steam's `message` text when present, else a generic error. |
-| `GetPlayerSummary(ctx, steamID64)` | `/ISteamUser/GetPlayerSummaries/v2/` | `key`, `steamids` | `(PlayerSummary, error)` | Error `Steam profile not found` when no player is returned. |
+| `GetPlayerSummary(ctx, steamID64)` | `/ISteamUser/GetPlayerSummaries/v2/` | `key`, `steamids` | `(PlayerSummary, error)` | Error `No Steam profile was found for that account.` when no player is returned. |
 | `GetOwnedGames(ctx, steamID64)` | `/IPlayerService/GetOwnedGames/v0001/` (up to 3 calls) | see [Library fetch](#library-fetch-getownedgames) | `([]OwnedGame, error)` | Combines the full, purchased and vetted lists. |
 | `GetGameAchievements(ctx, appID)` | `/IPlayerService/GetGameAchievements/v1/` | `key`, `appid`, `language=english`, `format=json` | `(GameAchievements, error)` | Uses `x-eresult`. EResult 42 returns an empty value and no error. |
 | `GetUserAchievements(ctx, steamID64, appID)` | `/IPlayerService/GetUserAchievements/v1/` | `key`, `steamid`, `appid`, `format=json` | `(UserAchievements, error)` | Uses `x-eresult`. EResult 42 returns empty maps and no error. |
 | `GetSchemaForGame(ctx, appID)` | `/ISteamUserStats/GetSchemaForGame/v2/` | `key`, `appid`, `l=english`, `format=json` | `([]SchemaAchievement, error)` | Legacy. Drops entries with an empty name. |
-| `GetPlayerAchievements(ctx, steamID64, appID)` | `/ISteamUserStats/GetPlayerAchievements/v1/` | `key`, `steamid`, `appid`, `l=english`, `format=json` | `([]PlayerAchievement, error)` | Legacy. When `success` is false and no achievements came back, the error is Steam's `error` text if present, else `player achievements unavailable`. `APIName` falls back to `name` when `apiname` is empty. |
+| `GetPlayerAchievements(ctx, steamID64, appID)` | `/ISteamUserStats/GetPlayerAchievements/v1/` | `key`, `steamid`, `appid`, `l=english`, `format=json` | `([]PlayerAchievement, error)` | Legacy. When `success` is false and no achievements came back, the error is the sentence `Steam did not provide achievements for this game.` (Steam's `error` text is its cause, logged only), or `Steam did not return achievements for this game. Try again later.` when Steam sent no error text. `APIName` falls back to `name` when `apiname` is empty. |
 | `GetGlobalAchievementPercentages(ctx, appID)` | `/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v0002/` | `gameid`, `format=json` (no key) | `(map[string]float64, error)` | Legacy. Keyed by achievement API name. |
 
 “Legacy” refers to the pre-IPlayerService path, used only as a syncer fallback (see [syncer.md](syncer.md#per-game-refresh)). Remove these methods together with the legacy sync path once Steam documents `GetGameAchievements`.
@@ -77,7 +77,35 @@ No data is sent to non-Steam services.
 - `*HTTPStatusError{Path, Code, Status}` for non-2xx responses. `Code` is the HTTP status code; callers classify with `errors.As`, not by message. `Error()` is `Steam API <path> returned <status>`. For non-retryable statuses the trimmed body is appended (after key and ID redaction, see [Key and ID redaction](#key-and-id-redaction)). Retryable statuses (429, 500, 503) carry no body text.
 - `*EResultError{Path, Code}` for an `x-eresult` header other than 0, 1 or 42.
 
-Other errors are plain `errors.New` or `fmt.Errorf` values, for example `profile input is required`, `Steam profile not found`, `owned games unavailable; profile game details may be private`, `decode Steam API <path>: ...`, and `Steam API <path> returned invalid x-eresult "<value>"`.
+Other errors are `usererr` values (`internal/usererr`; `Error()` is the text, and `usererr.New` builds them): the app's own user-facing messages, for example `Enter a Steam profile URL, SteamID64 or custom name.`, `No Steam profile was found for that account.`, and `Steam did not return your game list. Your profile's game details may be private.`. Steam's own `message` and `PlayerStats.error` texts are never user-facing: they are wrapped with `usererr.Wrap`, the error text is a fixed sentence (`No Steam profile matches that custom name.`, `Steam did not provide achievements for this game.`), and Steam's text is the cause, kept for the log only (`usererr.LogText`). A decode failure is `*badResponseError` (its text is `decode Steam API <path>: ...`, and it unwraps to the decoder error), and an invalid header is also `*badResponseError` (`Steam API <path> returned invalid x-eresult "<value>"`). A failed body read is `*bodyReadError`, which keeps the underlying text.
+
+### User-facing messages
+
+`steam.UserMessage(err)` (`usermessage.go`) turns an error into one plain sentence for the UI and for stored display text. It finds the typed cause with `errors.As`, so wrapping prefixes such as `achievement schema: ` are dropped. It is an allowlist: only the typed causes below and the app's own user-facing errors (`usererr`) get their text. Any other error gets one generic sentence, so no raw text reaches the UI. Mapping:
+
+| Cause | Message |
+| --- | --- |
+| `HTTPStatusError` 401 or 403, on `ResolveVanityURL`, `GetPlayerSummaries` or `GetOwnedGames` | Steam rejected the Web API key. Check that the key is correct and still valid, then replace it in Settings. |
+| `HTTPStatusError` 403 with a key-check body (`verify your` and `key=`) on any endpoint; a 401 with the same body is not this rule | Same as above. |
+| `HTTPStatusError` 401 on `GetUserAchievements`, `GetPlayerAchievements`, `GetGameAchievements` or `GetSchemaForGame` | Same as above. |
+| `HTTPStatusError` 403 on `GetUserAchievements` or legacy `GetPlayerAchievements` | Steam did not share achievements for this game. The profile's game details may be private. |
+| `HTTPStatusError` 403 on `GetGameAchievements` or `GetSchemaForGame` | Steam refused this request. |
+| `HTTPStatusError` 401 or 403 on `GetGlobalAchievementPercentagesForApp` (sends no key), or on any other path | 403: Steam refused this request. 401 on an unknown path: the key message above. |
+| `HTTPStatusError` 400 | Steam could not process the request. |
+| `HTTPStatusError` 404 | Steam has no data for this request. |
+| `HTTPStatusError` 429 | Steam is limiting requests right now. Try again in a few minutes. |
+| `HTTPStatusError` 5xx | Steam is temporarily unavailable. Try again later. |
+| other `HTTPStatusError` | Steam returned an unexpected response. The status code is in the log only. |
+| `EResultError` | Steam could not provide this data right now. |
+| `badResponseError` (body does not decode, or `x-eresult` is not an integer) | Steam sent a response the app could not read. |
+| `context.Canceled` (also inside a `*url.Error`) | The request was canceled. |
+| `context.DeadlineExceeded`, `*url.Error`, `net.Error`, body read failure (`bodyReadError`) | Could not reach Steam. Check your internet connection and try again. |
+| `usererr` (input checks, `No Steam profile was found for that account.`, the `checkOwnedGamesList` messages, the achievements sentence) | Its own text, unchanged. Steam's `Response.Message` and `PlayerStats.Error` are not used here: they are the cause of a wrapped `usererr` and go to the log only. |
+| anything else | Something went wrong. See the log file for details. |
+
+Endpoint names in the table are the `Interface.Method` part of the path, so the version segment (`v1`, `v0001`, ...) does not matter.
+
+The mapper never includes an endpoint path, a status line, a body, an eresult, a URL or the key. The raw error text is still logged, and the typed errors keep their `Error()` text, so `errors.As` classification (for example the legacy fallback in `syncer`) is unchanged. Every error that reaches the UI or is stored for display passes through `UserMessage`: the App boundary (`userFacingError`, see [app-service.md](app-service.md#error-boundary)) for bound methods, the per-game warning written by `syncer` (`recordGameFailure`), and the run error of `fail`. A cancelled run stores the same sentence, `The request was canceled.`: the mapper gives it for `context.Canceled` inside a `*url.Error` too, so the request address is never stored. No Steam-authored text reaches the UI or is stored for display.
 
 ## Endpoints
 
@@ -89,15 +117,15 @@ Store item lookups (`IStoreBrowseService/GetItems`) and CDN image URLs are not i
 
 `ResolveProfileInput` turns user input into a SteamID64 in this order:
 
-1. Trim whitespace. Empty input returns `profile input is required`.
+1. Trim whitespace. Empty input returns `Enter a Steam profile URL, SteamID64 or custom name.`
 2. If the value matches `^\d{17}$`, return it unchanged. No request.
 3. If `url.Parse` succeeds and yields a host, scan the path segments in order:
    - `profiles/<17 digits>` returns that id. A `profiles/` segment not followed by 17 digits does not match, and the scan continues.
    - `id/<vanity>` returns the result of `ResolveVanityURL` for that segment. An `id/` segment with nothing after it does not match, and the scan continues.
-   - If no segment matches, the error is `Steam profile URL must contain /profiles/{steamid64} or /id/{vanity}`.
+   - If no segment matches, the error is `Enter a profile link like steamcommunity.com/profiles/<number> or steamcommunity.com/id/<name>.`.
 4. Otherwise the whole trimmed value is treated as a vanity name and sent to `ResolveVanityURL`.
 
-`ResolveVanityURL` succeeds only when `response.success == 1` and a `steamid` is returned. Otherwise it returns Steam's `message` (for example `No match`, redacted like any message), or when Steam sends no message, the constant error `no Steam profile matches that custom name`. The constant does not echo the typed input, so a SteamID64 typed as an `/id/` value or a mistyped name never reaches the error text, the log or the UI.
+`ResolveVanityURL` succeeds only when `response.success == 1` and a `steamid` is returned. Otherwise it returns `No Steam profile matches that custom name.`. When Steam sent a `message` (for example `No match`), it is kept, redacted like any message, as the log cause (`usererr.LogText`); the UI gets only the sentence. The sentence does not echo the typed input, so a SteamID64 typed as an `/id/` value or a mistyped name never reaches the error text or the UI.
 
 Note: a URL without a scheme (for example `steamcommunity.com/id/name`) has no host to `url.Parse`, so it is sent to `ResolveVanityURL` as a literal vanity name and fails. Only inputs with `https://` (or another scheme) are parsed as profile URLs. The tests do not cover scheme-less URLs.
 
@@ -118,7 +146,7 @@ Combination rules:
 - With `ExcludePlayedFreeGames` set, the full list already is the purchased list, so the purchased request is skipped and every game is `Purchased`.
 - With `SkipUnvettedApps` set, the library already excludes unvetted apps, so the vetted request is skipped and no game is `Unvetted`.
 - Any failing request fails the whole call. Nothing is partially returned.
-- `checkOwnedGamesList` rejects unusable answers. A response with neither `games` nor `game_count` is unusable (`owned games unavailable...`, `purchased games list unavailable`, `vetted games list unavailable`). A non-zero `game_count` with no games is incomplete (`... response was incomplete`). A `game_count` of 0 with no games is a valid empty list. This stops a `{"response":{}}` from reading as "nothing purchased" or "nothing vetted".
+- `checkOwnedGamesList` rejects unusable answers. A response with neither `games` nor `game_count` is unusable (`Steam did not return your game list...`, `Steam did not return your purchased games...`, `Steam did not return the list of reviewed games...`). A non-zero `game_count` with no games is incomplete (`Steam returned an incomplete game list...`, and the purchased and reviewed variants). A `game_count` of 0 with no games is a valid empty list. This stops a `{"response":{}}` from reading as "nothing purchased" or "nothing vetted".
 
 The returned slice follows the full list's order. Each game's flags come from set membership in the purchased and vetted lists.
 
@@ -190,9 +218,11 @@ Where it applies:
 
 Identifiers are redacted in `redactText`, not only in URL errors, because bodies and Steam's messages can echo the request. Names, app IDs and timestamps are not matched by these patterns, so they stay. A vanity name is removed only where it is a `vanityurl` query value; a name echoed in other text is kept.
 
+`RedactSecrets` is the keyless form for log text whose key is not known, such as a panic value in `callBound`. It applies the identifier rules above and also replaces any run of 32 hex digits (`(?i)[0-9a-f]{32}`, the shape of a Steam Web API key, with no word boundary) by `REDACTED`. It can therefore also replace a 32-hex run that is not a key, so it is for logs only.
+
 `HTTPStatusError.Path` is the endpoint path without the query string. `EResultError`, the x-eresult error and the decode errors carry no request URL. A JSON decode error names the field and the type; for an out-of-range number it also quotes that number, which is not a profile field in any response the client decodes.
 
-Callers (`syncer`) also store error text in `sync_runs.error` and `profile_games.last_error` and write it to the log, so this redaction is the protection for those paths. Rows written before this redaction was in place keep whatever they stored. Tests: `TestRedactURLErrorIdentityParams`, `TestTransportErrorHidesIdentifiersAndKeepsCause`, `TestRedactBodyRemovesSteamID64` and `TestVanityFallbackDoesNotEchoTypedInput` in `client_test.go`. The syncer's `TestTransportFailureStoresNoSteamID64OrKeyInSyncText` checks the same redaction in `sync_runs.error` and `profile_games.last_error`.
+The syncer writes the raw error text to the log, so this redaction protects the log and the error the sync returns. Stored display text (`sync_runs.error`, `profile_games.last_error`) is the `UserMessage` sentence, which carries no request address, so the redaction is not what protects those columns. Rows written by earlier versions were rewritten by migration 3 (`rewrite_stored_sync_text`, see [database.md](database.md#migrations)). Tests: `TestRedactURLErrorIdentityParams`, `TestTransportErrorHidesIdentifiersAndKeepsCause`, `TestRedactBodyRemovesSteamID64` and `TestVanityFallbackDoesNotEchoTypedInput` in `client_test.go`. The syncer's `TestTransportFailureStoresNoSteamID64OrKeyInSyncText` checks that the returned error keeps the redacted request address, and that `sync_runs.error` and `profile_games.last_error` hold only the user-safe sentence, with no key or SteamID64.
 
 ## DLC detection
 

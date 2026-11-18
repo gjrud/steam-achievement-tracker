@@ -2,7 +2,7 @@ import {cleanup, fireEvent, render, screen, waitFor} from '@testing-library/svel
 import userEvent from '@testing-library/user-event'
 import {afterEach, describe, expect, test, vi} from 'vitest'
 import ApiKeyForm from './ApiKeyForm.svelte'
-import {__failBrowserOpen, __openedUrls} from '../../test/wails-runtime-mock.js'
+import {__failBrowserOpen, __openedUrls, RuntimeError} from '../../test/wails-runtime-mock.js'
 
 const KEY_PAGE_URL = 'https://steamcommunity.com/dev/apikey'
 
@@ -60,7 +60,7 @@ describe('ApiKeyForm', () => {
     const onSave = vi.fn(async () => {
       // Stand-in for WebKit dropping focus from a field that was disabled during the save.
       keyField().blur()
-      throw new Error('Secret Service is locked')
+      throw new RuntimeError('Secret Service is locked')
     })
     render(ApiKeyForm, {props: {onSave}})
 
@@ -74,7 +74,7 @@ describe('ApiKeyForm', () => {
   test('shows a failed save error as an alert', async () => {
     const user = userEvent.setup()
     render(ApiKeyForm, {props: {onSave: vi.fn(async () => {
-      throw new Error('Secret Service is locked')
+      throw new RuntimeError('Secret Service is locked')
     })}})
 
     await user.type(keyField(), 'abc123')
@@ -133,7 +133,7 @@ describe('ApiKeyForm', () => {
     const user = userEvent.setup()
     // The rejection is caught by the form, so the test completes without an unhandled rejection.
     render(ApiKeyForm, {props: {onSave: vi.fn(async () => {
-      throw new Error('Secret Service is locked')
+      throw new RuntimeError('Secret Service is locked')
     })}})
 
     await user.type(keyField(), 'abc123')
@@ -147,7 +147,7 @@ describe('ApiKeyForm', () => {
   test('a later successful save clears the earlier error', async () => {
     const user = userEvent.setup()
     const onSave = vi.fn()
-      .mockRejectedValueOnce(new Error('Secret Service is locked'))
+      .mockRejectedValueOnce(new RuntimeError('Secret Service is locked'))
       .mockResolvedValueOnce(undefined)
     render(ApiKeyForm, {props: {onSave}})
 

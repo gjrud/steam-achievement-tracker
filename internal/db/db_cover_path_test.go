@@ -32,8 +32,9 @@ func TestCoverPathMigrationDropsPathAndCompactsFiles(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 2)
+	assertUserVersion(t, conn, 3)
 	assertMigration(t, conn, 2)
+	assertMigration(t, conn, 3)
 	assertColumns(t, conn, "cover_images", coverImagesColumns)
 	assertCount(t, conn, `select count(*) from cover_images where image_appid=42 and cached=1 and source_url='https://example.com/42.jpg'`, 1)
 	assertCount(t, conn, `select count(*) from cover_images where image_appid=43 and cached=0`, 1)

@@ -2,7 +2,6 @@ package repository
 
 import (
 	"database/sql"
-	"errors"
 	"math"
 	"strconv"
 	"testing"
@@ -727,14 +726,8 @@ func TestCoverURLWithoutImageAppIDIsEmpty(t *testing.T) {
 	}
 }
 
-func TestErrorPtrAndFormatGameError(t *testing.T) {
-	if got := ErrorPtr(nil); got != nil {
-		t.Fatalf("ErrorPtr(nil) = %q, want nil", *got)
-	}
-	if got := ErrorPtr(errors.New("boom")); got == nil || *got != "boom" {
-		t.Fatalf("ErrorPtr(boom) = %v, want boom", got)
-	}
-	if got := FormatGameError(42, errors.New("boom")); got != "appid 42: boom" {
+func TestFormatGameError(t *testing.T) {
+	if got := FormatGameError(42, "boom"); got != "appid 42: boom" {
 		t.Fatalf("FormatGameError = %q, want %q", got, "appid 42: boom")
 	}
 }
