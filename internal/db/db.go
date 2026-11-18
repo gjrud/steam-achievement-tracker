@@ -13,6 +13,7 @@ import (
 
 	"github.com/gjrud/steam-achievement-tracker/internal/appdata"
 	"github.com/gjrud/steam-achievement-tracker/internal/fsretry"
+	"github.com/gjrud/steam-achievement-tracker/internal/redact"
 )
 
 type migration struct {
@@ -97,7 +98,7 @@ func migrate(conn *sql.DB, paths appdata.Paths) error {
 	if shouldCompact(state, target) {
 		if err := compact(conn); err != nil {
 			// compact's errors already start with "compact database:"; this line only says the migration itself held.
-			log.Printf("migration committed; %v", err)
+			log.Printf("migration committed; %v", redact.Paths(err))
 		}
 	}
 	return nil

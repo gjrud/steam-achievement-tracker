@@ -73,7 +73,7 @@ These hooks are not bound. The binding generator excludes `ServiceStartup` and `
 
 ### ServiceStartup(ctx, options) error
 
-- Calls `ensureInitialized`. On failure it logs `startup init: ...` (the raw cause, reduced by `redact.Paths`) and returns `nil`. The app starts with `AppState.InitError` set.
+- Calls `ensureInitialized`. On failure it logs `startup init: ...` (the raw cause, reduced by `redact.Paths` and scrubbed by `steam.RedactSecrets`, through `logText`) and returns `nil`. The app starts with `AppState.InitError` set.
 - On success, reads the state. If `apiKeyPresent` and `profileExists` are both true, it calls `startSync(false)`. A sync that is already running is not restarted.
 - The Wails context argument is ignored. The `App` uses its own lifetime context.
 - Runs inside `app.Run`, before the window opens.
@@ -93,12 +93,12 @@ Every exported method of `App` that returns an error is bound to the frontend, a
 
 `callBound` does two things:
 
-1. **Recovers a panic** in `fn`. It logs `<method>: panic: <value>` and the stack (`debug.Stack`). The value goes through `redact.Paths`, and the whole line through `steam.RedactSecrets`, which removes by pattern the API key (any 32-hex-digit run), SteamID64s and identifier query values, because a panic value can carry them (`SaveAPIKey`'s key, for example). The cached key is not used, since it may not be set yet and reading it inside `recover` could deadlock. The frontend gets `Something went wrong. See the log file for details.` with a zero result. Without this, Wails' own recovery would send the panic text (`<Method FQN>: panic: <value>`) to the frontend as a `RuntimeError`, shown raw.
+1. **Recovers a panic** in `fn`. It logs `<method>: panic: <value>` and the stack (`debug.Stack`). The value goes through `redact.Paths`, and the whole line through `steam.RedactSecrets`, which removes by pattern the API key (any run of 32 or more hex digits, so a non-key hex value such as a hash also shows `REDACTED`), SteamID64s and identifier query values, because a panic value can carry them (`SaveAPIKey`'s key, for example). The cached key is not used, since it may not be set yet and reading it inside `recover` could deadlock. The frontend gets `Something went wrong. See the log file for details.` with a zero result. Without this, Wails' own recovery would send the panic text (`<Method FQN>: panic: <value>`) to the frontend as a `RuntimeError`, shown raw.
 2. **Runs `userFacingError(op, err)`** on the error, which does the two steps below.
 
 `userFacingError` does two things:
 
-1. **Logs** the raw error once, under the method name, through `usererr.LogText`: `<method>: <outer text> (cause: <raw>)` when the error has a raw cause (`usererr.Wrap`), so the operation context and the sentence stay in the line and the cause is kept too; otherwise `<method>: <text>`. Paths are reduced with `redact.Paths`. A usererr with no cause is not logged (`shouldLog`): it is a sentence the app wrote for a normal state or an input check, such as a missing key (`keyring.ErrMissing`), a sync already running, a start during shutdown, or no active profile.
+1. **Logs** the raw error once, under the method name, through `logText` (`usererr.LogText` with the result scrubbed by `steam.RedactSecrets`): `<method>: <outer text> (cause: <raw>)` when the error has a raw cause (`usererr.Wrap`), so the operation context and the sentence stay in the line and the cause is kept too; otherwise `<method>: <text>`. Paths are reduced with `redact.Paths`, and a key or SteamID64 in the text is replaced by `REDACTED`. A usererr with no cause is not logged (`shouldLog`): it is a sentence the app wrote for a normal state or an input check, such as a missing key (`keyring.ErrMissing`), a sync already running, a start during shutdown, or no active profile.
 2. **Returns** a new error whose text is one of these, and nothing built from the raw text:
    - the sentence of a `usererr` error (`internal/usererr`). A sentinel with no cause is returned unchanged, so `errors.Is` still matches it. A usererr that has a raw cause is returned as a new usererr with the same sentence, so the cause is not attached. These are the app's own sentences and the Steam input checks: `No Steam Web API key is saved. Enter your key first.` (`keyring.ErrMissing`), `The Steam Web API key cannot be empty or contain spaces or hidden characters.` (`keyring.ErrInvalidKey`), `A sync is already running. Try again when it finishes.`, `The app is shutting down.`, `No Steam profile is active. Add your Steam profile first.`, `The app database is not available. Restart the app, or see the log file for details.`, `A Steam profile is required.`, and the Steam input messages (`Enter a Steam profile URL, SteamID64 or custom name.`, `Enter a profile link like steamcommunity.com/profiles/<number> or steamcommunity.com/id/<name>.`, `No Steam profile matches that custom name.`). Steam's own text is never returned: a wrapped Steam message is a cause, logged only;
    - `Could not access the system keyring. Make sure it is unlocked, then try again.` for a failure of the system keyring: a `*keyring.BackendError` or `keyring.ErrNotStored`. The backend text (Secret Service, D-Bus, Credential Manager) is never shown;
@@ -184,7 +184,7 @@ The code treats a URL without a scheme, such as `steamcommunity.com/id/name`, as
 5. Records the profile's latest run id as the baseline.
 6. Starts a goroutine: `syncer.Service{Repo, Steam, Images: images.New(paths), OnChange: emitSyncChanged}.FullSync`. Its error is logged (`full sync failed`). The goroutine always calls `endSync`.
 
-`endSync` cancels the context, clears `syncInProgress`, the cancel func, and the baseline under `mu`, emits the final event, and calls `syncWG.Done`. Emission happens after the flag is cleared, so the frontend refetch reads the new state.
+`endSync` cancels the context, clears `syncInProgress`, the cancel func, and the baseline under `mu`, emits the final event, and calls `syncWG.Done`. Emission happens after the flag is cleared, so the frontend refetch reads the new state. A panic after the sync state is set, including one in the event emit of step 3, also runs `endSync` through a deferred guard until the sync goroutine takes over `done`. `endSync` releases `syncWG` with a deferred `Done`, so an emitter panic cannot hang `ServiceShutdown`.
 
 `logStartSyncError` logs a `startSync` error for callers that do not return it. A missing key, an already-running sync, and shutdown are expected and are not logged.
 

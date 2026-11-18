@@ -61,6 +61,20 @@ func callBound[T any](op string, fn func() (T, error)) (result T, err error) {
 	return result, userFacingError(op, err)
 }
 
+// logText is the log text of err: usererr.LogText (paths reduced, raw cause kept) with secrets scrubbed by pattern
+// (steam.RedactSecrets). It is used for the log lines of bound-method errors (userFacingError), startup init failures
+// (ServiceStartup), start-sync failures (logStartSyncError) and the full-sync failure log in startSync. The per-game
+// sync failure log in internal/syncer applies the same two steps inline, since it cannot import package main. These
+// errors can carry text from any source, so a key or SteamID64 in them is scrubbed before it is written.
+//
+// The other log sites use redact.Paths only, because their errors carry no key, or are Steam client errors that the
+// Client has already redacted. Examples are the keyring and
+// cancel-stale-run logs in ensureInitialized, RetryAPIKey, the startup state log, normalizeStaleRun, the repository
+// and sync-progress logs in internal/syncer, the GetGameAchievements fallback and cover refresh logs in internal/syncer,
+// the migration log in internal/db, and the app.Run error in main.go. Steam client errors need no extra scrub: the steam
+// Client already redacts its known key and profile identifiers (redactText) before they leave it.
+func logText(err error) string { return steam.RedactSecrets(usererr.LogText(err)) }
+
 // callBoundErr is callBound for a method that returns only an error.
 func callBoundErr(op string, fn func() error) error {
 	_, err := callBound(op, func() (struct{}, error) { return struct{}{}, fn() })
@@ -92,7 +106,7 @@ func userFacingError(op string, err error) error {
 		return nil
 	}
 	if shouldLog(err) {
-		log.Printf("%s: %s", op, usererr.LogText(err))
+		log.Printf("%s: %s", op, logText(err))
 	}
 	if ue := usererr.Find(err); ue != nil {
 		if ue.Unwrap() != nil {

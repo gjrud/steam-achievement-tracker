@@ -704,10 +704,12 @@ var queryIdentityParam = regexp.MustCompile(`(?i)((?:[?&;]|\\u0026)(?:key|steami
 // unix times are never 17 digits, so they are not matched.
 var steamID64Text = regexp.MustCompile(`\b76561\d{12}\b`)
 
-// keyLikeText matches any run of 32 hex digits, in any letter case: the shape of a Steam Web API key. It has no word
-// boundaries, because a key that follows a letter (for example "key" followed by hex) has none. It is used only where
-// the key is not known, by RedactSecrets; a key of a known Client is removed by redactText in its own forms.
-var keyLikeText = regexp.MustCompile(`(?i)[0-9a-f]{32}`)
+// keyLikeText matches any run of 32 or more hex digits, in any letter case. A Steam Web API key is 32 hex digits. The
+// whole run is matched, so a key glued to other hex digits, or a longer hex value such as a 40-hex icon hash, leaves no
+// hex tail in the log. It has no word boundaries, because a key that follows a letter (for example "key" followed by
+// hex) has none. It is used only where the key is not known, by RedactSecrets; a key of a known Client is removed by
+// redactText in its own forms.
+var keyLikeText = regexp.MustCompile(`(?i)[0-9a-f]{32,}`)
 
 // redactIdentifiers replaces the values of the key, steamid, steamids and vanityurl query parameters and any bare
 // SteamID64 in s. It is the part of redactText that needs no Client.
@@ -716,10 +718,11 @@ func redactIdentifiers(s string) string {
 	return steamID64Text.ReplaceAllString(s, "REDACTED")
 }
 
-// RedactSecrets removes secrets from s by pattern, for text whose key is not known to the caller: it applies the
-// identifier rules of redactText and also replaces any 32-hex-digit run, which is the shape of a Steam Web API key.
-// It is for log text that may carry a secret from a panic value, where the cached key cannot be read safely. A
-// 32-hex run that is not a key is replaced too, so use it only on logs, never on text the user reads.
+// RedactSecrets removes secrets from s by pattern, for text whose key is not known to the caller. It is the scrub for
+// log text whose key the caller does not have: panic logs (callBound), app error logs (logText) and the per-game sync
+// failure log (internal/syncer). It applies the identifier rules of redactText and also replaces any run of 32 or more
+// hex digits, the shape of a Steam Web API key, with REDACTED. So a hex value that is not a key, such as a 40-hex
+// hash, also shows REDACTED in a log. Use it only on logs, never on text the user reads.
 func RedactSecrets(s string) string {
 	return keyLikeText.ReplaceAllString(redactIdentifiers(s), "REDACTED")
 }

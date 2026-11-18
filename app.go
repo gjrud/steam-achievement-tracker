@@ -113,7 +113,7 @@ func NewApp() *App {
 func (a *App) ServiceStartup(_ context.Context, _ application.ServiceOptions) error {
 	if err := a.ensureInitialized(); err != nil {
 		// The raw init error is logged here, once at startup. The UI gets only the sentence in InitError.
-		log.Printf("startup init: %s", usererr.LogText(err))
+		log.Printf("startup init: %s", logText(err))
 		return nil
 	}
 	state, err := a.appState()
@@ -607,29 +607,34 @@ func (a *App) startSync(force bool) error {
 	a.syncCancel = cancel
 	a.syncWG.Add(1)
 	a.mu.Unlock()
-	a.emitSyncChanged()
-	// done ends the sync on every path, including the early exits below. endSync emits the final event.
+	// done ends the sync on every path, including the early exits below. endSync emits the final event. Until the
+	// goroutine takes ownership of done (started), the deferred guard calls it on any exit, a panic included, so the
+	// flag is never left set and syncWG is always released. The guard is set up before the emit below, so a panic in
+	// the emitter also ends the sync. done runs exactly once: the guard is the only caller before started, and the
+	// goroutine's defer is the only caller after.
 	done := func() { a.endSync(cancel) }
+	started := false
+	defer func() {
+		if !started {
+			done()
+		}
+	}()
+	a.emitSyncChanged()
 	if repo == nil {
-		done()
 		return errNotReady
 	}
 	if key == "" {
-		done()
 		return keyring.ErrMissing
 	}
 	profile, err := repo.ActiveProfile()
 	if err != nil {
-		done()
 		return err
 	}
 	if profile == nil {
-		done()
 		return errNoProfile
 	}
 	client, err := steamClientForProfile(repo, key, profile.ID)
 	if err != nil {
-		done()
 		return err
 	}
 	applySteamBaseURL(client, baseURL)
@@ -638,7 +643,6 @@ func (a *App) startSync(force bool) error {
 	// very likely fail too, and a sync started without a baseline could not tell its own run from an older one.
 	latest, err := repo.LatestSyncRun(profile.ID)
 	if err != nil {
-		done()
 		return err
 	}
 	var baselineRunID int64
@@ -650,11 +654,12 @@ func (a *App) startSync(force bool) error {
 	a.syncBaselineRunID = baselineRunID
 	a.syncBaselineKnown = true
 	a.mu.Unlock()
+	started = true
 	go func(p repository.Profile) {
 		defer done()
 		service := syncer.Service{Repo: repo, Steam: client, Images: images.New(paths), OnChange: a.emitSyncChanged}
 		if _, err := service.FullSync(syncCtx, p); err != nil {
-			log.Printf("full sync failed: %s", usererr.LogText(err))
+			log.Printf("full sync failed: %s", logText(err))
 		}
 	}(*profile)
 	return nil
@@ -665,6 +670,9 @@ func (a *App) startSync(force bool) error {
 // comes after the flag clear, so the frontend's refetch reads syncInProgress=false. It is emitted before syncWG is
 // released, so ServiceShutdown's wait covers it. The emit runs outside a.mu.
 func (a *App) endSync(cancel context.CancelFunc) {
+	// Deferred so the release runs even if the emit panics. The state is cleared before the emit, so a panic there
+	// cannot leave the flag set either.
+	defer a.syncWG.Done()
 	cancel()
 	a.mu.Lock()
 	a.syncCancel = nil
@@ -674,7 +682,6 @@ func (a *App) endSync(cancel context.CancelFunc) {
 	a.syncBaselineKnown = false
 	a.mu.Unlock()
 	a.emitSyncChanged()
-	a.syncWG.Done()
 }
 
 // syncStillRunning decides whether GetAppState reports a sync as running. snapshot is the flag as read before the
@@ -716,7 +723,7 @@ func (a *App) normalizeStaleRun(repo *repository.Repository, profileID int64, d 
 	}
 	fresh, err := repo.LatestSyncRun(profileID)
 	if err != nil {
-		log.Printf("read latest sync run: %v", err)
+		log.Printf("read latest sync run: %v", redact.Paths(err))
 		return
 	}
 	if fresh == nil || fresh.Status != "running" {
@@ -736,7 +743,7 @@ func logStartSyncError(err error) {
 	if err == nil || !shouldLog(err) {
 		return
 	}
-	log.Printf("start sync: %s", usererr.LogText(err))
+	log.Printf("start sync: %s", logText(err))
 }
 
 func (a *App) cancelSyncAndWait() {
@@ -768,7 +775,7 @@ func (a *App) emitSyncChanged() {
 }
 
 // setInitError records the user-facing init failure msg in AppState and returns it as an error. The cause is kept
-// for the log: the caller logs usererr.LogText of the returned error, and the frontend gets msg only.
+// for the log: the caller logs logText of the returned error, and the frontend gets msg only.
 func (a *App) setInitError(msg string, cause error) error {
 	a.mu.Lock()
 	a.initError = msg

@@ -226,8 +226,8 @@ func TestFullSyncGameTransportErrorWarningRedactsAPIKey(t *testing.T) {
 	}
 }
 
-// A game failure logs the sentence and the raw cause of a user-facing error (usererr.LogText, paths reduced); the
-// stored warning and the UI get only the sentence.
+// A game failure logs the sentence and the raw cause of a user-facing error (usererr.LogText, paths reduced, then
+// steam.RedactSecrets); the stored warning and the UI get only the sentence.
 func TestRecordGameFailureLogsCauseAndStoresSentence(t *testing.T) {
 	repo := testRepository(t)
 	profile := testProfile(t, repo)
@@ -238,11 +238,18 @@ func TestRecordGameFailureLogsCauseAndStoresSentence(t *testing.T) {
 
 	run := &fullSyncRun{s: &Service{Repo: repo}, profile: *profile, runID: 1}
 	const sentence = "Steam did not provide achievements for this game."
+	const key = "0123456789ABCDEF0123456789ABCDEF"
+	const steamID = "76561198000000000"
 	game := steam.OwnedGame{AppID: 20, Name: "Broken Game"}
-	run.recordGameFailure(game, usererr.Wrap(sentence, errors.New("Profile is private for appid 20")))
+	cause := "Profile is private for appid 20 with key " + key + " for " + steamID
+	run.recordGameFailure(game, usererr.Wrap(sentence, errors.New(cause)))
 
-	if want := "appid 20: " + sentence + " (cause: Profile is private for appid 20)"; !strings.Contains(logs.String(), want) {
-		t.Fatalf("log = %q, want %q", logs.String(), want)
+	logged := logs.String()
+	if want := "appid 20: " + sentence + " (cause: Profile is private for appid 20 with key REDACTED for REDACTED)"; !strings.Contains(logged, want) {
+		t.Fatalf("log = %q, want %q", logged, want)
+	}
+	if strings.Contains(strings.ToUpper(logged), key) || strings.Contains(logged, steamID) {
+		t.Fatalf("log = %q carries a key or SteamID64", logged)
 	}
 	requireWarningCard(t, repo, profile.ID, 20, sentence)
 }

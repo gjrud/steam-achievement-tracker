@@ -52,8 +52,10 @@ func Raw(err error) error {
 
 // LogText is the text to log for err. For an error with a raw cause it is the error's own text, which keeps the
 // operation context and any user sentence, followed by the cause in parentheses, so the cause is never lost:
-// "resolve profile: No Steam profile was found for that account. (cause: ...)". An error without a cause is logged as it is. Paths are
-// reduced to base names by redact.Paths in both parts. The log line is the caller's to prefix with its operation.
+// "resolve profile: No Steam profile matches that custom name. (cause: <Steam's message>)". An error without a cause
+// is logged as it is. Paths are reduced to base names by redact.Paths in both parts. The log line is the caller's to
+// prefix with its operation. LogText does not scrub keys or SteamID64s; callers that log text which may carry them
+// pass the result through steam.RedactSecrets (see app_errors.go logText).
 func LogText(err error) string {
 	cause := Raw(err)
 	if cause == err {

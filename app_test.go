@@ -220,6 +220,41 @@ func TestStartSyncLifecycleResetsAfterGuardFailure(t *testing.T) {
 		}
 		assertIdleSync(t, app)
 	})
+
+	t.Run("panic after the state is set", func(t *testing.T) {
+		// A repository with no database panics in ActiveProfile, after startSync has set syncInProgress and added to
+		// syncWG. The deferred guard must end that sync, so the App is idle and ServiceShutdown's wait does not hang.
+		// The panic comes from the zero-value repository.Repository (nil *sql.DB) inside ActiveProfile, so this test
+		// relies on that.
+		app := &App{repo: &repository.Repository{}, steamAPIKey: "fixture-steam-key"}
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			_ = app.startSync(true)
+		}()
+		if recovered == nil {
+			t.Fatal("startSync did not panic; the test needs a panic after the state is set")
+		}
+		assertIdleSync(t, app)
+	})
+
+	t.Run("panic in the event emitter", func(t *testing.T) {
+		// The emitter panics on every call, as a failing Wails event emit would. The first call is startSync's own emit,
+		// made after syncInProgress and syncWG are set; the guard then calls endSync, whose emit panics too. The panic
+		// must not leave the flag set or syncWG held, or ServiceShutdown's wait would hang.
+		app := &App{}
+		sentinel := errors.New("emitter panic")
+		app.setEventEmitter(func(string) { panic(sentinel) })
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			_ = app.startSync(true)
+		}()
+		if recovered != sentinel {
+			t.Fatalf("recovered = %v, want the emitter's panic", recovered)
+		}
+		assertIdleSync(t, app)
+	})
 }
 
 func TestGetAppStateWithoutKeyOrProfile(t *testing.T) {

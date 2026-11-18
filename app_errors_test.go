@@ -151,6 +151,22 @@ func TestLogStartSyncErrorSkipsSentinels(t *testing.T) {
 	}
 }
 
+// The start-sync log is scrubbed by logText: a key or SteamID64 in the raw cause is replaced, the rest of the line is
+// kept.
+func TestLogStartSyncErrorScrubsSecrets(t *testing.T) {
+	const key = "0123456789ABCDEF0123456789ABCDEF"
+	const steamID = "76561198000000000"
+	logs := captureLog(t)
+	logStartSyncError(usererr.Wrap(msgNotReady, fmt.Errorf("read profile %s with key %s", steamID, key)))
+	want := "start sync: " + msgNotReady + " (cause: read profile REDACTED with key REDACTED)"
+	if !strings.Contains(logs.String(), want) {
+		t.Fatalf("log = %q, want %q", logs.String(), want)
+	}
+	if strings.Contains(strings.ToUpper(logs.String()), key) || strings.Contains(logs.String(), steamID) {
+		t.Fatalf("log = %q carries a key or SteamID64", logs.String())
+	}
+}
+
 // The generic sentence of the App and the one steam.UserMessage gives for an unknown error must stay the same,
 // because userFacingError falls back to steam.UserMessage.
 func TestGenericSentenceMatchesSteam(t *testing.T) {
@@ -281,5 +297,24 @@ func TestBoundMethodsUserFacingErrors(t *testing.T) {
 				t.Fatalf("%s log = %q, want the raw database error", name, logs.String())
 			}
 		})
+	}
+}
+
+// A key or SteamID64 that reached a raw error text from any source is scrubbed from the log line, and the returned
+// text stays the user-facing sentence.
+func TestUserFacingErrorScrubsSecretsFromLog(t *testing.T) {
+	const key = "0123456789ABCDEF0123456789ABCDEF"
+	const steamID = "76561198000000000"
+	logs := captureLog(t)
+	got := userFacingError("Op", fmt.Errorf("backend said %s for %s", key, steamID))
+	if got == nil || got.Error() != msgGeneric {
+		t.Fatalf("userFacingError = %v, want %q", got, msgGeneric)
+	}
+	logged := logs.String()
+	if strings.Contains(strings.ToLower(logged), strings.ToLower(key)) || strings.Contains(logged, steamID) {
+		t.Fatalf("log = %q carries a secret", logged)
+	}
+	if !strings.Contains(logged, "backend said") || !strings.Contains(logged, "REDACTED") {
+		t.Fatalf("log = %q, want the text kept with the secrets redacted", logged)
 	}
 }

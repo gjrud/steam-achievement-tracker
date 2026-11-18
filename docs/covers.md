@@ -240,7 +240,7 @@ Because the file name is whitelisted and the id is numeric, the handler cannot r
 | Cancelled sync context, no file on disk | Context error | Nothing saved. |
 | Cancelled sync context, previous file on disk | Context error from the store lookup | Nothing saved. |
 
-Cover failures are logged by the syncer and never fail a game sync or the sync run status. Log lines pass the error through `redact.Paths` (`internal/redact`), which reduces the file paths of `*fs.PathError` and `*os.LinkError` to base names, so the log does not carry the user's profile directory. The cache-removal error in `removeCachedGameImages` (app.go) is redacted the same way before it is wrapped, since `ClearActiveUserData` returns it to the UI. Use `redact.Paths` for any new log line or UI message that can carry a cache or image file error.
+Cover failures are logged by the syncer and never fail a game sync or the sync run status. Log lines pass the error through `redact.Paths` (`internal/redact`), which reduces the file paths of `*fs.PathError` and `*os.LinkError` to base names, so the log does not carry the user's profile directory. The cache-removal error from `removeCachedGameImages` (app.go) has its cause reduced by `redact.Paths` before it is wrapped. The bound method that returns it (`ClearActiveUserData`) logs the error once through `userFacingError` (`app_errors.go`), and the UI gets only the generic sentence, never the wrapped text. Use `redact.Paths` for any new log line or UI message that can carry a cache or image file error.
 
 ## Notes
 

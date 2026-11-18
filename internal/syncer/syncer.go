@@ -155,9 +155,10 @@ func dispatchSyncJobs(ctx context.Context, jobs chan<- steam.OwnedGame, games []
 }
 
 func (r *fullSyncRun) recordGameFailure(game steam.OwnedGame, err error) {
-	// The log gets the sentence and the raw cause (usererr.LogText), with paths reduced. The stored warning is saved for
-	// display (Sync errors), so it gets only the user-safe sentence (steam.UserMessage), never the logged text.
-	log.Print(repository.FormatGameError(game.AppID, usererr.LogText(err)))
+	// The log gets the sentence and the raw cause (usererr.LogText), with paths reduced and secrets scrubbed by pattern
+	// (steam.RedactSecrets). The stored warning is saved for display (Sync errors), so it gets only the user-safe
+	// sentence (steam.UserMessage), never the logged text.
+	log.Print(repository.FormatGameError(game.AppID, steam.RedactSecrets(usererr.LogText(err))))
 	if saveErr := r.s.Repo.SaveGameWarning(r.profile.ID, gameRecord(game), steam.UserMessage(err)); saveErr != nil {
 		log.Printf("save game warning %d: %v", game.AppID, redact.Paths(saveErr))
 	}

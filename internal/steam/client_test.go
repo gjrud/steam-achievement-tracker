@@ -1427,9 +1427,9 @@ func TestRedactTextRemovesKeyValueEverywhere(t *testing.T) {
 	}
 }
 
-// RedactSecrets works without a known key: it removes any 32-hex run (the key shape, any case, with no word boundary),
-// the identifier query values and bare SteamID64s, and keeps the rest of the text, including a goroutine stack's
-// addresses (at most 16 hex digits).
+// RedactSecrets works without a known key: it removes any run of 32 or more hex digits (the key shape, any case, with
+// no word boundary) whole, the identifier query values and bare SteamID64s, and keeps the rest of the text, including a
+// goroutine stack's addresses (at most 16 hex digits).
 func TestRedactSecrets(t *testing.T) {
 	const key = "0123456789ABCDEF0123456789ABCDEF"
 	tests := []struct {
@@ -1440,6 +1440,11 @@ func TestRedactSecrets(t *testing.T) {
 		{name: "raw key", in: "keyring: " + key, want: "keyring: REDACTED"},
 		{name: "key glued to letters", in: "keyKEY" + key + "x", want: "keyKEYREDACTEDx"},
 		{name: "lower-case key", in: strings.ToLower(key), want: "REDACTED"},
+		{name: "mixed-case key", in: "Key " + "0aBc" + key[4:], want: "Key REDACTED"},
+		{name: "key glued to hex digits", in: "ab" + key + "cd", want: "REDACTED"},
+		{name: "40-hex run replaced whole", in: "icon " + key + "01234567", want: "icon REDACTED"},
+		{name: "key after key=", in: "key=" + key, want: "key=REDACTED"},
+		{name: "31-hex run kept", in: "h " + key[:31] + " x", want: "h " + key[:31] + " x"},
 		{name: "escaped key", in: url.QueryEscape(strings.ToLower(key)), want: "REDACTED"},
 		{name: "key param", in: "?key=" + key + "&appid=10", want: "?key=REDACTED&appid=10"},
 		{name: "bare steamid64", in: "id 76561198000000000 here", want: "id REDACTED here"},
