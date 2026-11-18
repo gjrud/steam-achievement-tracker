@@ -38,11 +38,11 @@ Linux packages (AppImage, deb, rpm and Arch) go to `bin/`:
 VERSION=0.0.0-dev wails3 package
 ```
 
-The package version comes only from the `VERSION` environment variable, expanded by `build/linux/nfpm/nfpm.yaml` (`version: ${VERSION}`). The repository stores no version. Without `VERSION`, packaging still succeeds but produces a wrong version (a deb shows `0.0.0~rc0-1`), so always set it. Use the version without the `v` prefix, for example `1.2.3` or `1.2.3-rc.1`. A bare `bin/steam-achievement-tracker` runs, but has no menu entry or icon until a package installs it.
+The Linux package version (deb, rpm, Arch) is `VERSION` if set, otherwise the `vX.Y.Z` git tag that points at the checked-out commit, without the `v` prefix. It is expanded by `build/linux/nfpm/nfpm.yaml` (`version: ${VERSION}`). So `git checkout v1.2.3 && wails3 package` yields `1.2.3`. If `VERSION` is unset and `HEAD` has no tag, the package tasks fail instead of building a wrong version. The repository stores no version. `VERSION` may be written with or without the `v` prefix, for example `1.2.3` or `1.2.3-rc.1`; the tag fallback ignores tags that do not start with `v` and a digit. A bare `bin/steam-achievement-tracker` runs, but has no menu entry or icon until a package installs it.
 
 The deb, rpm and Arch packages declare the GTK 4 and WebKitGTK 6.0 runtime packages as dependencies (see `build/linux/nfpm/nfpm.yaml`). They do not depend on a Secret Service provider, so install one separately. The AppImage step downloads `linuxdeploy`, so it needs network access.
 
-Windows (run on a Windows host with the dependencies above). Set `VERSION` first; in PowerShell:
+Windows (run on a Windows host with the dependencies above). The version is `VERSION` if set, otherwise the git tag on the checked-out commit, so on a tagged commit you can skip the next step. To set it explicitly, in PowerShell:
 
 ```powershell
 $env:VERSION = "0.0.0-dev"
@@ -51,7 +51,7 @@ wails3 task windows:create:nsis:installer  # bin\steam-achievement-tracker-amd64
 wails3 task windows:package                # build + installer
 ```
 
-`VERSION` must start with `X.Y.Z`. Pre-release suffixes (`1.2.3-rc.1`) and a leading `v` are accepted, but Windows resources and NSIS take only the numeric core plus `.0`, so `1.2.3-rc.1` becomes `1.2.3.0`. The full tag name belongs in release filenames, which the release workflow sets. Without `VERSION` the tasks use `0.0.0`. `windows:create:nsis:installer` does not rebuild the exe. It writes the WebView2 bootstrapper (embedded in the Wails CLI) into `build/windows/nsis`, which git ignores.
+`VERSION` must start with `X.Y.Z`. Pre-release suffixes (`1.2.3-rc.1`) and a leading `v` are accepted, but Windows resources and NSIS take only the numeric core plus `.0`, so `1.2.3-rc.1` becomes `1.2.3.0`. The full tag name belongs in release filenames, which the release workflow sets. Without `VERSION` or a tag on `HEAD`, `windows:build` and `windows:create:nsis:installer` fail. Dev builds (`DEV=true`) use `0.0.0`. `windows:create:nsis:installer` does not rebuild the exe. It writes the WebView2 bootstrapper (embedded in the Wails CLI) into `build/windows/nsis`, which git ignores.
 
 Generated bindings: after adding, removing or changing an exported `App` method, run `wails3 generate bindings` from the repository root. It writes `frontend/bindings/` (git-ignored). `wails3 dev` and `wails3 build` regenerate it too. Do not edit those files by hand.
 
@@ -97,7 +97,7 @@ Root tasks: `build`, `package`, `run`, `dev` (`wails3 dev -config ./build/config
 ### Windows (build/windows/Taskfile.yml)
 
 - Native build only. It needs a Windows host with MinGW gcc on `PATH`, because `go-sqlite3` uses CGO. The precondition checks `gcc --version` and `OS == windows`.
-- `VERSION` is the only version source. `VERSION_CORE` is the numeric `X.Y.Z` part: a leading `v`, pre-release and build metadata are dropped. Unset falls back to `0.0.0`. `WIN_VERSION` appends `.0` for the Windows `X.Y.Z.W` resource version. The precondition fails when `VERSION_CORE` is not `X.Y.Z`.
+- `PKG_VERSION` (root `Taskfile.yml`) is `VERSION` if set, else the `vX.Y.Z` tag on `HEAD` (without `v`). `VERSION_CORE` is its numeric `X.Y.Z` part: a leading `v`, pre-release and build metadata are dropped. Empty (dev builds only) falls back to `0.0.0`. `WIN_VERSION` appends `.0` for the Windows `X.Y.Z.W` resource version. The precondition fails when `VERSION_CORE` is not `X.Y.Z`.
 - `build` runs `generate:resources`, then `generate:syso`, then `go build`, with a deferred `cleanup:syso`. The `.syso` (`wails_windows_amd64.syso`) is linked into the package, so it must not remain after the task.
   - Production: `-tags production -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui"` (GUI subsystem, no console). Output `bin/steam-achievement-tracker.exe`.
   - Dev (`DEV=true`): no `windowsgui`, so logs go to a console.
@@ -221,9 +221,9 @@ Dependabot schedules weekly updates for three ecosystems. The Go and npm groups 
 
 ## Version handling
 
-- Source of truth: the tag. The release workflow sets `VERSION=${GITHUB_REF_NAME#v}`. Locally, set `VERSION` yourself (`VERSION=0.0.0-dev wails3 package`). The repo does not store a version.
-- `nfpm.yaml` expands `${VERSION}`. Without it, packaging still succeeds with a wrong version (a deb built without `VERSION` shows `0.0.0~rc0-1`), and no step fails. That silence is why the release job checks the deb version.
-- Windows: `VERSION_CORE` and `WIN_VERSION` as above. `1.2.3-rc.1` becomes `1.2.3.0` in the exe and NSIS. Release artifact names keep the full version.
+- Source of truth: the tag. The release workflow sets `VERSION=${GITHUB_REF_NAME#v}`. Locally, `PKG_VERSION` in the root `Taskfile.yml` is `VERSION` if set, else the `vX.Y.Z` tag on `HEAD` (other tags such as `nightly` are ignored), else empty, and the package tasks fail. The repo does not store a version.
+- `nfpm.yaml` expands `${VERSION}`. Run directly through `wails3 tool package` without `VERSION`, packaging still succeeds with a wrong version (a deb shows `0.0.0~rc0-1`). The `PKG_VERSION` guard prevents that through the tasks, and the release job still checks the deb version.
+- Windows: `PKG_VERSION` (same rule: `VERSION`, else the tag on `HEAD`, else fail), `VERSION_CORE` and `WIN_VERSION` as above. `1.2.3-rc.1` becomes `1.2.3.0` in the exe and NSIS. Release artifact names keep the full version.
 - `create:appimage` unsets `VERSION` on purpose.
 - The frontend `package.json` `version` is `0.0.0` and is not the app version.
 

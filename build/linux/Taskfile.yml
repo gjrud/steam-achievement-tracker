@@ -103,6 +103,10 @@ tasks:
 
   package:
     summary: Packages the application for Linux
+    # PKG_VERSION is defined in the root Taskfile. Checked here too so a missing version fails before the build.
+    preconditions:
+      - sh: 'test -n "{{.PKG_VERSION}}"'
+        msg: "No version. Set VERSION (e.g. VERSION=1.2.3) or check out a tagged commit (git tag vX.Y.Z)."
     deps:
       - task: build
     cmds:
@@ -156,16 +160,31 @@ tasks:
 
   generate:deb:
     summary: Creates a deb package
+    env:
+      VERSION: '{{.PKG_VERSION}}'
+    preconditions:
+      - sh: 'test -n "{{.PKG_VERSION}}"'
+        msg: "No version. Set VERSION (e.g. VERSION=1.2.3) or check out a tagged commit (git tag vX.Y.Z)."
     cmds:
       - wails3 tool package -name "{{.APP_NAME}}" -format deb -config ./build/linux/nfpm/nfpm.yaml -out {{.ROOT_DIR}}/bin
 
   generate:rpm:
     summary: Creates a rpm package
+    env:
+      VERSION: '{{.PKG_VERSION}}'
+    preconditions:
+      - sh: 'test -n "{{.PKG_VERSION}}"'
+        msg: "No version. Set VERSION (e.g. VERSION=1.2.3) or check out a tagged commit (git tag vX.Y.Z)."
     cmds:
       - wails3 tool package -name "{{.APP_NAME}}" -format rpm -config ./build/linux/nfpm/nfpm.yaml -out {{.ROOT_DIR}}/bin
 
   generate:aur:
     summary: Creates a arch linux packager package
+    env:
+      VERSION: '{{.PKG_VERSION}}'
+    preconditions:
+      - sh: 'test -n "{{.PKG_VERSION}}"'
+        msg: "No version. Set VERSION (e.g. VERSION=1.2.3) or check out a tagged commit (git tag vX.Y.Z)."
     cmds:
       - wails3 tool package -name "{{.APP_NAME}}" -format archlinux -config ./build/linux/nfpm/nfpm.yaml -out {{.ROOT_DIR}}/bin
 

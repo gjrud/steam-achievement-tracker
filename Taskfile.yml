@@ -5,6 +5,14 @@ vars:
   BIN_DIR: "bin"
   PACKAGE_MANAGER: '{{.PACKAGE_MANAGER | default "npm"}}'
   VITE_PORT: '{{.WAILS_VITE_PORT | default 9245}}'
+  # Package/app version, shared by build/linux and build/windows (included Taskfile vars share one namespace, so define
+  # it once). `VERSION` wins, else the vX.Y.Z tag that points at HEAD, without the "v". Empty when neither exists:
+  # production package tasks then fail through a precondition. The var itself must not fail, because Task evaluates it for
+  # every task, including build and dev. --match ignores non-version tags such as "nightly".
+  PKG_VERSION:
+    sh: |
+      v="${VERSION:-$(git describe --tags --exact-match --match 'v[0-9]*' HEAD 2>/dev/null || true)}"
+      echo "${v#v}"
 
 includes:
   common: ./build/Taskfile.yml

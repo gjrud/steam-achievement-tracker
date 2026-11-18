@@ -3,18 +3,20 @@ version: '3'
 # Windows (amd64) build, portable executable and NSIS installer.
 #
 # - Native build only: run on a Windows host with MinGW gcc on PATH (go-sqlite3 needs CGO). No cross-compile.
-# - VERSION env var is the only version source (CI sets it to the tag without "v"). Never hardcode it here.
+# - Version source: VERSION env var if set (CI sets it to the tag without "v"), else the git tag on HEAD (see
+#   PKG_VERSION in the root Taskfile). Never hardcode it here. Production build and installer fail when neither exists; DEV builds use 0.0.0.
 #   Windows resources and NSIS need a numeric X.Y.Z.W: pre-release and build metadata are dropped
-#   (0.1.0-rc.1 -> 0.1.0.0). Unset falls back to 0.0.0 (see VERSION_CORE). Full tag names belong in artifact
-#   filenames, which the release workflow sets.
+#   (0.1.0-rc.1 -> 0.1.0.0). Full tag names belong in artifact filenames, which the release workflow sets.
 # - Code signing is not used (no signing tasks here).
 
 includes:
   common: ../Taskfile.yml
 
 vars:
-  # Numeric core of VERSION (X.Y.Z): strip a leading "v", pre-release and build metadata. Unset -> 0.0.0.
-  VERSION_CORE: '{{(splitList "+" (splitList "-" (trimPrefix "v" (env "VERSION" | default "0.0.0")) | first) | first)}}'
+  # PKG_VERSION (root Taskfile) is empty when there is no VERSION and no tag on HEAD: build and create:nsis:installer
+  # then fail (see the version precondition), except DEV builds.
+  # Numeric core of PKG_VERSION (X.Y.Z): strip a leading "v", pre-release and build metadata. Empty -> 0.0.0.
+  VERSION_CORE: '{{(splitList "+" (splitList "-" (trimPrefix "v" (.PKG_VERSION | default "0.0.0")) | first) | first)}}'
   # Four-part numeric version for the .exe version resource (info.json, manifest).
   WIN_VERSION: '{{.VERSION_CORE}}.0'
 
@@ -32,6 +34,8 @@ tasks:
     preconditions:
       - sh: '{{if eq OS "windows"}}gcc --version{{else}}exit 1{{end}}'
         msg: "windows:build must run on a Windows host with MinGW gcc on PATH (CGO). Cross-compiling from Linux or macOS is not supported."
+      - sh: '{{if eq .DEV "true"}}true{{else}}test -n "{{.PKG_VERSION}}"{{end}}'
+        msg: "No version. Set VERSION (e.g. VERSION=1.2.3) or check out a tagged commit (git tag vX.Y.Z)."
       - sh: '[[ "{{.VERSION_CORE}}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]'
         msg: "VERSION must start with X.Y.Z (optional leading v, pre-release and build metadata allowed), got '{{.VERSION_CORE}}'. Set VERSION, e.g. VERSION=1.2.3 or v1.2.3-rc.1."
     cmds:
@@ -64,6 +68,8 @@ tasks:
     preconditions:
       - sh: 'test -f "{{.ROOT_DIR}}/{{.BIN_DIR}}/{{.APP_NAME}}.exe"'
         msg: "bin/{{.APP_NAME}}.exe not found. Run `wails3 task windows:build` first."
+      - sh: 'test -n "{{.PKG_VERSION}}"'
+        msg: "No version. Set VERSION (e.g. VERSION=1.2.3) or check out a tagged commit (git tag vX.Y.Z)."
       - sh: '[[ "{{.VERSION_CORE}}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]'
         msg: "VERSION must start with X.Y.Z (optional leading v, pre-release and build metadata allowed), got '{{.VERSION_CORE}}'. Set VERSION, e.g. VERSION=1.2.3 or v1.2.3-rc.1."
     cmds:
