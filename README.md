@@ -100,8 +100,6 @@ The app stores the key in the system keyring, under service `steam-achievement-t
 - **Windows:** Windows Credential Manager, as a generic credential named `steam-achievement-tracker:steam-web-api-key`.
   View or delete it under **Credential Manager** > **Windows Credentials** > **Generic Credentials**.
 
-![API key setup](assets/screenshots/setup-apikey.gif)
-
 ### Launch
 
 On Linux, start `steam-achievement-tracker` from your menu or a terminal. On Windows, start it from the Start Menu or
@@ -116,6 +114,8 @@ To enter the first key, see [Get a Steam Web API key](#get-a-steam-web-api-key).
 profile is active, the profile setup screen has a **Replace key** button. Once a profile is connected, remove it with
 **Delete API key** (see [Remove the active profile](#remove-the-active-profile)), enter the new key, then connect the
 profile again. Its data is kept unless you also chose **Delete profile data**.
+
+![API key form, opened with Replace key](assets/screenshots/setup-apikey.gif)
 
 ### Connect a Steam profile
 
@@ -260,9 +260,9 @@ and, when Steam provides it, the average unlock rate of the achievements you are
 | **Sync error** | The latest refresh of this game failed. |
 | **Completed** | Shown on completed cards. |
 
-The filter chips and the card tags follow the order of this table. On completed cards, **Completed** comes first. A view
-shows only the chips for tags that at least one of its cards has. Changing tabs clears the selected chip, but search
-still applies.
+The filter chips and the card tags follow the order of this table. On completed cards, **Completed** comes first, but it
+has no filter chip. A view shows only the chips for tags that at least one of its cards has. Changing tabs clears the
+selected chip, but search still applies.
 
 ### Right-click actions
 
