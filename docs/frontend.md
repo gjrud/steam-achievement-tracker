@@ -39,7 +39,7 @@ Child components receive data and callbacks through props. `@wailsio/runtime` is
 | Condition (first match wins) | Screen |
 | --- | --- |
 | `loading` | loading screen |
-| `state.initError` | `SetupView mode="startup-error"` (shows the init error and the log file) |
+| `state.initError` | `SetupView mode="startup-error"` (shows the init error and the log file, or the app folder when no log file exists) |
 | `!state.apiKeyPresent` | `SetupView mode="missing-key"` (key form, retry lookup; shows `apiKeyError` if set) |
 | `!state.profileExists` | `SetupView mode="profile"` (SteamID input, Validate, Save and sync, Replace key) |
 | otherwise | `DashboardShell` |
@@ -81,7 +81,7 @@ On a failed clear-data call the app re-reads state, because the backend may alre
 
 - `error` is the single banner string shown in `DashboardShell` (`.error-banner`, `aria-live` polite) and in the setup screens.
 - `refreshError` marks whether `error` came from a failed state read. Only such an error is cleared by a later successful read. An action error survives event-driven reads until the next action succeeds (test: `keeps an action error through event reads until a later action succeeds`).
-- `formatMessage(err)` (in `format.js`) turns any rejection into text.
+- `formatMessage(err)` (in `format.js`) turns a rejection into text. A `RuntimeError` (Wails' kind for a bound method's returned error) and an `AppMessage` (thrown by the frontend with a sentence for the user, such as `A save is already in progress`) show their message. The backend guarantees that a `RuntimeError` from a bound method carries an app sentence: its errors go through `callBound` (see [app-service.md](app-service.md#error-boundary)), which also turns a Go panic into the generic sentence. Any other rejection, a missing one included, shows `genericMessage` (`Something went wrong. See the log file for details.`), so a JavaScript or argument error never shows its own text.
 
 ### Other interaction
 
@@ -96,7 +96,7 @@ These modules contain pure functions and import only from one another. Their exp
 
 | Module | Exports | Purpose |
 | --- | --- | --- |
-| `format.js` | `formatMessage`, `integer`, `pct`, `formatPlaytime`, `formatDateTime`, `formatRelativeTime` | Error text, locale integers, percentages (one decimal when fractional), playtime (`Xm` under 60 minutes, otherwise `Xh Ym`), absolute date/time, relative time ("5 min ago"; absolute date from 7 days). |
+| `format.js` | `formatMessage`, `AppMessage`, `genericMessage`, `integer`, `pct`, `formatPlaytime`, `formatDateTime`, `formatRelativeTime` | Error text, locale integers, percentages (one decimal when fractional), playtime (`Xm` under 60 minutes, otherwise `Xh Ym`), absolute date/time, relative time ("5 min ago"; absolute date from 7 days). |
 | `game.js` | `gameTitle`, `gameWarning`, `syncErrorLabel`, `hasAchievements`, `shouldShowSyncErrorMessage`, `cardProgress`, `completionLabel`, `missingAvgUnlockLabel` | Card title (`Untitled game` fallback), sync-warning text, "No achievements" / "unlocked / total" labels, progress clamped to 0 to 100. |
 | `filter.js` | `matchesSearchQuery`, `matchesTagFilter`, `matchesViewFilters`, `sortByTitle` | Case-insensitive title search, tag match, and combined view filter. Sorting uses `localeCompare` on titles. |
 | `tag.js` | `suggestionTagOptions`, `gameTags`, `tagLabel`, `tagDescription`, `tagTone`, `toneClass`, `tagCountFromGames`, `tagCountsFromGames` | Tag model and presentation. `gameTags` derives `set`, `dlc` and `unvetted` from the game and hides incomplete-only tags on completed games. Tags are sorted by the chip order in `suggestionTagOptions`. `tagCountFromGames` is the per-tag reference; `tagCountsFromGames` is the one-pass version used by the app. |
@@ -222,7 +222,7 @@ Four kinds of messages can reach the user:
 | --- | --- |
 | `setup.js` | Loaded for every test file (`test.setupFiles`). Imports `@testing-library/jest-dom/vitest`. After each test, resets runtime event listeners and the Browser mock. |
 | `wails-app-mock.js` | Replacement for the generated `app.js`, through the test alias. Exports one function per binding with the same explicit parameters. `__setWailsMocks` and `__resetWailsMocks` replace handlers. Unset handlers reject with `Missing Wails mock handler: <Name>`. |
-| `wails-runtime-mock.js` | Replacement for `@wailsio/runtime`. `Events.On` stores listeners, and `__emitWailsEvent`, `__listenerCount` and `__resetWailsEvents` control them. `Browser.OpenURL` records URLs, and `__failBrowserOpen` makes it reject. |
+| `wails-runtime-mock.js` | Replacement for `@wailsio/runtime`. Exports `RuntimeError` (the class a bound method's error rejects with; tests reject backend failures with it). `Events.On` stores listeners, and `__emitWailsEvent`, `__listenerCount` and `__resetWailsEvents` control them. `Browser.OpenURL` records URLs, and `__failBrowserOpen` makes it reject. |
 | `app-fixtures.js` | State builders (`baseState`, `dashboardState`, `missingKeyState`, `profileSetupState`, `game`, `manyGames`, `syncRun`, `syncingState`, `finishedState`), `emitSyncChanged`, `settle`, `advance` (fake-timer helpers), `rejecting`, and click helpers. |
 | `wails-bindings.test.js` | Drift checks; see below. |
 

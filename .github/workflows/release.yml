@@ -173,7 +173,17 @@ jobs:
         run: |
           gcc --version
           if ! command -v makensis >/dev/null 2>&1; then
-            choco install nsis -y --no-progress
+            # Chocolatey feed returns transient 504s; retry before failing.
+            installed=0
+            for attempt in 1 2 3 4 5; do
+              if choco install nsis -y --no-progress; then
+                installed=1
+                break
+              fi
+              echo "choco install nsis failed (attempt $attempt/5); retrying in $((attempt * 15))s"
+              sleep $((attempt * 15))
+            done
+            [ "$installed" = 1 ] || { echo "::error::NSIS install failed after 5 attempts"; exit 1; }
             echo 'C:\Program Files (x86)\NSIS' >> "$GITHUB_PATH"
             export PATH="/c/Program Files (x86)/NSIS:$PATH"
           fi

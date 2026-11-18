@@ -26,8 +26,12 @@ func (logWriter) Write(p []byte) (int, error) {
 // Rules for this logger, because it writes to app.log:
 //   - It must never enable Debug. Wails logs the arguments of every bound-method call at Debug, and those arguments
 //     include the Steam Web API key passed to SaveAPIKey. Keep the level at Warn (or higher).
-//   - Errors returned by bound methods are kept at Error with their text, so such errors must never contain the
-//     secret. Return constant messages or wrapped backend errors, never the input.
+//   - Errors returned by bound methods are kept at Error with their text. Every bound method returns only the
+//     user-facing sentence built by userFacingError (app_errors.go), so that text carries no path, SQL, backend text
+//     or key. The raw error goes to the app log through userFacingError: paths are reduced by redact.Paths and secrets
+//     are scrubbed by steam.RedactSecrets (logText).
+//   - Panics in bound methods are logged by callBound (app_errors.go), not by Wails. Their log line goes through
+//     steam.RedactSecrets, so a panic value that carries the API key or a SteamID64 is scrubbed before it is written.
 func newWailsLogger(w io.Writer) *slog.Logger {
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelWarn}))
 }

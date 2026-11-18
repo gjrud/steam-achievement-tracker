@@ -276,14 +276,11 @@ func stringPtr(v sql.NullString) *string {
 	return &x
 }
 
-func ErrorPtr(err error) *string {
-	if err == nil {
-		return nil
-	}
-	return new(err.Error())
+// FormatGameError is the log line for a failed game, from the text of usererr.LogText. It is for the log only: the warning stored
+// and shown for the game is the user-facing sentence (steam.UserMessage). Do not store it.
+func FormatGameError(appID int64, logText string) string {
+	return fmt.Sprintf("appid %d: %s", appID, logText)
 }
-
-func FormatGameError(appID int64, err error) string { return fmt.Sprintf("appid %d: %v", appID, err) }
 
 // EntryKey is the stable frontend key of an entry: "<appid>:<groupid>".
 func EntryKey(appID, groupID int64) string {

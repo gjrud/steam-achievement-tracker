@@ -15,6 +15,7 @@ import (
 	"github.com/gjrud/steam-achievement-tracker/internal/redact"
 	"github.com/gjrud/steam-achievement-tracker/internal/repository"
 	"github.com/gjrud/steam-achievement-tracker/internal/steam"
+	"github.com/gjrud/steam-achievement-tracker/internal/usererr"
 )
 
 type Service struct {
@@ -85,11 +86,11 @@ func (s *Service) prepareOwnedGames(ctx context.Context, profile repository.Prof
 	for _, g := range owned {
 		ownedIDs = append(ownedIDs, g.AppID)
 		if err := s.Repo.UpsertOwnedGame(profile.ID, gameRecord(g)); err != nil {
-			log.Printf("upsert owned game %d: %v", g.AppID, err)
+			log.Printf("upsert owned game %d: %v", g.AppID, redact.Paths(err))
 		}
 	}
 	if err := s.Repo.DisableMissingOwnedGames(profile.ID, ownedIDs); err != nil {
-		log.Printf("disable missing games: %v", err)
+		log.Printf("disable missing games: %v", redact.Paths(err))
 	}
 	return owned, nil
 }
@@ -154,10 +155,12 @@ func dispatchSyncJobs(ctx context.Context, jobs chan<- steam.OwnedGame, games []
 }
 
 func (r *fullSyncRun) recordGameFailure(game steam.OwnedGame, err error) {
-	warning := repository.FormatGameError(game.AppID, err)
-	log.Print(warning)
-	if saveErr := r.s.Repo.SaveGameWarning(r.profile.ID, gameRecord(game), err.Error()); saveErr != nil {
-		log.Printf("save game warning %d: %v", game.AppID, saveErr)
+	// The log gets the sentence and the raw cause (usererr.LogText), with paths reduced and secrets scrubbed by pattern
+	// (steam.RedactSecrets). The stored warning is saved for display (Sync errors), so it gets only the user-safe
+	// sentence (steam.UserMessage), never the logged text.
+	log.Print(repository.FormatGameError(game.AppID, steam.RedactSecrets(usererr.LogText(err))))
+	if saveErr := r.s.Repo.SaveGameWarning(r.profile.ID, gameRecord(game), steam.UserMessage(err)); saveErr != nil {
+		log.Printf("save game warning %d: %v", game.AppID, redact.Paths(saveErr))
 	}
 	r.mu.Lock()
 	r.result.GamesFailed++
@@ -180,7 +183,7 @@ func (r *fullSyncRun) progressLocked() (int, int, int) {
 
 func (r *fullSyncRun) updateProgress(total, synced, failed int) {
 	if err := r.s.Repo.UpdateSyncRunProgress(r.runID, total, synced, failed); err != nil {
-		log.Printf("update sync progress: %v", err)
+		log.Printf("update sync progress: %v", redact.Paths(err))
 	}
 	r.s.changed()
 }
@@ -198,12 +201,13 @@ func (r *fullSyncRun) finalize() {
 
 func (r *fullSyncRun) touchProfileSynced() {
 	if err := r.s.Repo.TouchProfileSynced(r.profile.ID); err != nil {
-		log.Printf("touch profile synced: %v", err)
+		log.Printf("touch profile synced: %v", redact.Paths(err))
 	}
 }
 
 func (r *fullSyncRun) fail(err error) (Result, error) {
-	errText := err.Error()
+	// The stored run error is exposed in AppState, so it gets the user-safe sentence. The caller logs the raw err.
+	errText := steam.UserMessage(err)
 	r.result.Status = "failed"
 	r.result.Error = &errText
 	r.finish()
@@ -212,7 +216,7 @@ func (r *fullSyncRun) fail(err error) (Result, error) {
 
 func (r *fullSyncRun) finish() {
 	if err := r.s.Repo.FinishSyncRun(r.runID, r.result.Status, r.result.GamesTotal, r.result.GamesSynced, r.result.GamesFailed, r.result.Error); err != nil {
-		log.Printf("finish sync run: %v", err)
+		log.Printf("finish sync run: %v", redact.Paths(err))
 	}
 	r.s.changed()
 }
@@ -235,7 +239,7 @@ func (s *Service) syncGame(ctx context.Context, profile repository.Profile, game
 		if hasSets {
 			return fmt.Errorf("achievement schema: %w", err)
 		}
-		log.Printf("appid %d: GetGameAchievements failed, using legacy achievement API: %v", game.AppID, err)
+		log.Printf("appid %d: GetGameAchievements failed, using legacy achievement API: %v", game.AppID, redact.Paths(err))
 		return s.syncGameLegacy(ctx, profile, game, now)
 	}
 	if len(schema.Achievements) == 0 {

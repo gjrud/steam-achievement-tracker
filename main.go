@@ -10,6 +10,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 
 	"github.com/gjrud/steam-achievement-tracker/internal/appdata"
+	"github.com/gjrud/steam-achievement-tracker/internal/redact"
 )
 
 //go:embed all:frontend/dist
@@ -86,6 +87,6 @@ func main() {
 
 	// Run blocks until the application exits. The app quits when its last window closes (the default on Linux).
 	if err := app.Run(); err != nil {
-		log.Fatal(err)
+		log.Fatal(redact.Paths(err))
 	}
 }

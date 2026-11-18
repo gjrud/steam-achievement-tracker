@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gjrud/steam-achievement-tracker/internal/usererr"
 )
 
 const defaultBaseURL = "https://api.steampowered.com"
@@ -117,11 +119,15 @@ func (c *Client) SetRetryBackoff(fn func(attempt int) time.Duration) {
 
 // errAPIKeyAsProfileInput is returned without sending a request when the profile input, or the vanity name
 // decoded from it, holds the API key.
-var errAPIKeyAsProfileInput = errors.New("this looks like your Steam Web API key; enter your profile URL, SteamID64 or custom name instead")
+var errAPIKeyAsProfileInput = usererr.New("This looks like your Steam Web API key. Enter your profile URL, SteamID64 or custom name instead.")
 
-// errNoVanityMatch is the ResolveVanityURL fallback when Steam sends no message. It is a constant on purpose: the
-// typed name is never echoed, so a SteamID64 typed as a /id/ value cannot reach logs, the UI or the sync history.
-var errNoVanityMatch = errors.New("no Steam profile matches that custom name")
+// msgNoVanityMatch is the sentence for a custom name that matches no profile. It is a constant on purpose: the typed
+// name is never echoed, so a SteamID64 typed as a /id/ value cannot reach the UI or the sync history. Steam's own
+// message for the same miss goes to the log only.
+const msgNoVanityMatch = "No Steam profile matches that custom name."
+
+// errNoVanityMatch is the ResolveVanityURL result when Steam sends no message.
+var errNoVanityMatch = usererr.New(msgNoVanityMatch)
 
 // minGuardedKeyLen skips the input guard for keys too short to be real (real keys are 32 characters),
 // where a substring match would reject ordinary input.
@@ -138,7 +144,7 @@ func (c *Client) inputContainsAPIKey(input string) bool {
 func (c *Client) ResolveProfileInput(ctx context.Context, input string) (string, error) {
 	value := strings.TrimSpace(input)
 	if value == "" {
-		return "", errors.New("profile input is required")
+		return "", usererr.New("Enter a Steam profile URL, SteamID64 or custom name.")
 	}
 	if c.inputContainsAPIKey(value) {
 		return "", errAPIKeyAsProfileInput
@@ -160,7 +166,7 @@ func (c *Client) ResolveProfileInput(ctx context.Context, input string) (string,
 				}
 			}
 		}
-		return "", errors.New("Steam profile URL must contain /profiles/{steamid64} or /id/{vanity}")
+		return "", usererr.New("Enter a profile link like steamcommunity.com/profiles/<number> or steamcommunity.com/id/<name>.")
 	}
 	return c.ResolveVanityURL(ctx, value)
 }
@@ -183,7 +189,7 @@ func (c *Client) ResolveVanityURL(ctx context.Context, vanity string) (string, e
 	}
 	if payload.Response.Success != 1 || payload.Response.SteamID == "" {
 		if payload.Response.Message != "" {
-			return "", errors.New(c.redactText(payload.Response.Message))
+			return "", usererr.Wrap(msgNoVanityMatch, errors.New(c.redactText(payload.Response.Message)))
 		}
 		return "", errNoVanityMatch
 	}
@@ -206,7 +212,7 @@ func (c *Client) GetPlayerSummary(ctx context.Context, steamID64 string) (Player
 		return PlayerSummary{}, err
 	}
 	if len(payload.Response.Players) == 0 {
-		return PlayerSummary{}, errors.New("Steam profile not found")
+		return PlayerSummary{}, usererr.New("No Steam profile was found for that account.")
 	}
 	p := payload.Response.Players[0]
 	avatar := p.AvatarFull
@@ -249,10 +255,10 @@ func (c *Client) getOwnedGamesList(ctx context.Context, steamID64 string, includ
 // games list is a valid empty library.
 func checkOwnedGamesList(r ownedGamesResponse, unavailable, incomplete string) error {
 	if r.Response.Games == nil && r.Response.GameCount == nil {
-		return errors.New(unavailable)
+		return usererr.New(unavailable)
 	}
 	if r.Response.GameCount != nil && *r.Response.GameCount > 0 && len(r.Response.Games) == 0 {
-		return errors.New(incomplete)
+		return usererr.New(incomplete)
 	}
 	return nil
 }
@@ -272,7 +278,7 @@ func (c *Client) GetOwnedGames(ctx context.Context, steamID64 string) ([]OwnedGa
 	if err != nil {
 		return nil, err
 	}
-	if err := checkOwnedGamesList(full, "owned games unavailable; profile game details may be private", "owned games response was incomplete"); err != nil {
+	if err := checkOwnedGamesList(full, "Steam did not return your game list. Your profile's game details may be private.", "Steam returned an incomplete game list. Try again later."); err != nil {
 		return nil, err
 	}
 	purchasedAll := c.ExcludePlayedFreeGames
@@ -284,7 +290,7 @@ func (c *Client) GetOwnedGames(ctx context.Context, steamID64 string) ([]OwnedGa
 		}
 		// Checked like the full list: a glitched or throttled `{"response":{}}` must not read as "no purchases",
 		// which would clear every purchased flag. A genuinely empty purchased list still carries game_count.
-		if err := checkOwnedGamesList(purchasedList, "purchased games list unavailable", "purchased games response was incomplete"); err != nil {
+		if err := checkOwnedGamesList(purchasedList, "Steam did not return your purchased games. Try again later.", "Steam returned an incomplete list of purchased games. Try again later."); err != nil {
 			return nil, err
 		}
 		for _, g := range purchasedList.Response.Games {
@@ -300,7 +306,7 @@ func (c *Client) GetOwnedGames(ctx context.Context, steamID64 string) ([]OwnedGa
 			return nil, err
 		}
 		// Checked like the other lists: an unusable answer must not read as "nothing vetted".
-		if err := checkOwnedGamesList(vettedList, "vetted games list unavailable", "vetted games response was incomplete"); err != nil {
+		if err := checkOwnedGamesList(vettedList, "Steam did not return the list of reviewed games. Try again later.", "Steam returned an incomplete list of reviewed games. Try again later."); err != nil {
 			return nil, err
 		}
 		for _, g := range vettedList.Response.Games {
@@ -368,9 +374,9 @@ func (c *Client) GetPlayerAchievements(ctx context.Context, steamID64 string, ap
 	}
 	if !successValue(payload.PlayerStats.Success) && len(payload.PlayerStats.Achievements) == 0 {
 		if payload.PlayerStats.Error != "" {
-			return nil, errors.New(c.redactText(payload.PlayerStats.Error))
+			return nil, usererr.Wrap("Steam did not provide achievements for this game.", errors.New(c.redactText(payload.PlayerStats.Error)))
 		}
-		return nil, errors.New("player achievements unavailable")
+		return nil, usererr.New("Steam did not return achievements for this game. Try again later.")
 	}
 	ach := make([]PlayerAchievement, 0, len(payload.PlayerStats.Achievements))
 	for _, a := range payload.PlayerStats.Achievements {
@@ -605,10 +611,31 @@ func parseEResult(path, header string) (int, error) {
 	}
 	code, err := strconv.Atoi(header)
 	if err != nil {
-		return 0, fmt.Errorf("Steam API %s returned invalid x-eresult %q", path, header)
+		return 0, &badResponseError{msg: fmt.Sprintf("Steam API %s returned invalid x-eresult %q", path, header)}
 	}
 	return code, nil
 }
+
+// badResponseError is a Steam response the client could not read: a body that does not decode, or an x-eresult
+// header that is not an integer. Error() text is the earlier message; UserMessage uses the type, not the text.
+type badResponseError struct {
+	msg string
+	err error // the decoder error, nil for the header case
+}
+
+func (e *badResponseError) Error() string { return e.msg }
+
+func (e *badResponseError) Unwrap() error { return e.err }
+
+// bodyReadError is a failure reading a response body after its status was received, a transport failure.
+// Error() text is the underlying read error, unchanged.
+type bodyReadError struct {
+	err error
+}
+
+func (e *bodyReadError) Error() string { return e.err.Error() }
+
+func (e *bodyReadError) Unwrap() error { return e.err }
 
 func (c *Client) endpoint(path string, q url.Values) string {
 	base := strings.TrimRight(c.BaseURL, "/")
@@ -650,7 +677,7 @@ func (c *Client) getJSONBody(ctx context.Context, path, endpoint string) ([]byte
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	resp.Body.Close()
 	if readErr != nil {
-		return nil, "", false, readErr
+		return nil, "", false, &bodyReadError{err: readErr}
 	}
 	if retryableSteamStatus(resp.StatusCode) {
 		return nil, "", true, &HTTPStatusError{Path: path, Code: resp.StatusCode, Status: resp.Status}
@@ -677,6 +704,29 @@ var queryIdentityParam = regexp.MustCompile(`(?i)((?:[?&;]|\\u0026)(?:key|steami
 // unix times are never 17 digits, so they are not matched.
 var steamID64Text = regexp.MustCompile(`\b76561\d{12}\b`)
 
+// keyLikeText matches any run of 32 or more hex digits, in any letter case. A Steam Web API key is 32 hex digits. The
+// whole run is matched, so a key glued to other hex digits, or a longer hex value such as a 40-hex icon hash, leaves no
+// hex tail in the log. It has no word boundaries, because a key that follows a letter (for example "key" followed by
+// hex) has none. It is used only where the key is not known, by RedactSecrets; a key of a known Client is removed by
+// redactText in its own forms.
+var keyLikeText = regexp.MustCompile(`(?i)[0-9a-f]{32,}`)
+
+// redactIdentifiers replaces the values of the key, steamid, steamids and vanityurl query parameters and any bare
+// SteamID64 in s. It is the part of redactText that needs no Client.
+func redactIdentifiers(s string) string {
+	s = queryIdentityParam.ReplaceAllString(s, "${1}REDACTED")
+	return steamID64Text.ReplaceAllString(s, "REDACTED")
+}
+
+// RedactSecrets removes secrets from s by pattern, for text whose key is not known to the caller. It is the scrub for
+// log text whose key the caller does not have: panic logs (callBound), app error logs (logText) and the per-game sync
+// failure log (internal/syncer). It applies the identifier rules of redactText and also replaces any run of 32 or more
+// hex digits, the shape of a Steam Web API key, with REDACTED. So a hex value that is not a key, such as a 40-hex
+// hash, also shows REDACTED in a log. Use it only on logs, never on text the user reads.
+func RedactSecrets(s string) string {
+	return keyLikeText.ReplaceAllString(redactIdentifiers(s), "REDACTED")
+}
+
 // redactText removes the API key and profile identifiers from text that may carry a request URL, a response body
 // or user input. It replaces the values of the key, steamid, steamids and vanityurl query parameters and any bare
 // SteamID64. The API key is also replaced wherever it appears, in raw, query-escaped and path-escaped form, because
@@ -686,8 +736,7 @@ var steamID64Text = regexp.MustCompile(`\b76561\d{12}\b`)
 // echo the input, and the vanity fallback echoes a typed /id/ value that may be a SteamID64. Names, appids and
 // timestamps are not matched by these patterns and are kept.
 func (c *Client) redactText(s string) string {
-	s = queryIdentityParam.ReplaceAllString(s, "${1}REDACTED")
-	s = steamID64Text.ReplaceAllString(s, "REDACTED")
+	s = redactIdentifiers(s)
 	if c.APIKey == "" {
 		return s
 	}
@@ -730,7 +779,7 @@ func decodeJSONBody(path string, body []byte, target any) error {
 		return nil
 	}
 	if err := json.Unmarshal(body, target); err != nil {
-		return fmt.Errorf("decode Steam API %s: %w", path, err)
+		return &badResponseError{msg: fmt.Sprintf("decode Steam API %s: %v", path, err), err: err}
 	}
 	return nil
 }

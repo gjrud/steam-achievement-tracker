@@ -13,6 +13,7 @@ import (
 
 	"github.com/gjrud/steam-achievement-tracker/internal/appdata"
 	"github.com/gjrud/steam-achievement-tracker/internal/fsretry"
+	"github.com/gjrud/steam-achievement-tracker/internal/redact"
 )
 
 type migration struct {
@@ -97,7 +98,7 @@ func migrate(conn *sql.DB, paths appdata.Paths) error {
 	if shouldCompact(state, target) {
 		if err := compact(conn); err != nil {
 			// compact's errors already start with "compact database:"; this line only says the migration itself held.
-			log.Printf("migration committed; %v", err)
+			log.Printf("migration committed; %v", redact.Paths(err))
 		}
 	}
 	return nil
@@ -287,6 +288,7 @@ func secureDBFiles(paths appdata.Paths) {
 var migrations = []migration{
 	{version: 1, name: "initial_schema", sql: initialSchemaSQL},
 	{version: 2, name: "cover_cached_flag", sql: coverCachedFlagSQL, compact: true},
+	{version: 3, name: "rewrite_stored_sync_text", sql: rewriteStoredSyncTextSQL, compact: true},
 }
 
 // coverCachedFlagSQL replaces the stored absolute cover path with a cached flag. The path held the OS user name
@@ -296,6 +298,86 @@ const coverCachedFlagSQL = `
 ALTER TABLE cover_images ADD COLUMN cached integer not null default 0;
 UPDATE cover_images SET cached = 1 WHERE path IS NOT NULL AND trim(path) <> '';
 ALTER TABLE cover_images DROP COLUMN path;
+`
+
+// rewriteStoredSyncTextSQL replaces stored error text that is not a sentence the app wrote for the user. Versions before
+// this one stored the raw error (a Steam endpoint, a status line, a URL, a decode error) in profile_games.last_error and
+// sync_runs.error, and the UI shows both, so that text must not stay.
+//
+// The rule is an allowlist, not a pattern match: a value is kept only when it is exactly one of the sentences listed
+// below, or, for sync_runs.error only, the run summary "N of M games failed to sync". Every other non-empty value is
+// replaced. The one exception is the old cancellation text "context canceled", which becomes "The request was
+// canceled.". Empty and NULL values are left alone. The list is frozen here, so later sentence changes do not affect
+// this migration; a later release that stores new text needs no change here, because this runs once per database.
+//
+// Running it again changes nothing: a kept sentence matches the list, and a replaced value is the generic sentence,
+// which is on the list too (the second run finds nothing to rewrite). compact is set because an UPDATE leaves the old
+// text in free pages until the file is compacted; compaction removes it from the file.
+const rewriteStoredSyncTextSQL = `
+UPDATE profile_games
+SET last_error = CASE WHEN last_error = 'context canceled' THEN 'The request was canceled.' ELSE 'Something went wrong. See the log file for details.' END
+WHERE last_error IS NOT NULL AND trim(last_error) <> '' AND last_error NOT IN (` + syncTextSafeSentences + `);
+UPDATE sync_runs
+SET error = CASE WHEN error = 'context canceled' THEN 'The request was canceled.' ELSE 'Something went wrong. See the log file for details.' END
+WHERE error IS NOT NULL AND trim(error) <> '' AND error NOT IN (` + syncTextSafeSentences + `)
+  AND NOT ` + partialRunSummarySQL + `;
+`
+
+// partialRunSummarySQL matches the run summary "N of M games failed to sync", where N and M are non-empty runs of
+// digits and nothing else is in the value. A GLOB cannot require digits-only parts ('*' takes any text), so each part
+// is checked with rtrim (which leaves an empty string only when every character is a digit) and the fixed words are
+// checked by position: the first " of " ends N, the first " games failed to sync" ends M, and the value ends there.
+const partialRunSummarySQL = `(
+  instr(error, ' of ') > 1
+  AND rtrim(substr(error, 1, instr(error, ' of ') - 1), '0123456789') = ''
+  AND instr(error, ' games failed to sync') - instr(error, ' of ') - 4 > 0
+  AND rtrim(substr(error, instr(error, ' of ') + 4, instr(error, ' games failed to sync') - instr(error, ' of ') - 4), '0123456789') = ''
+  AND substr(error, instr(error, ' games failed to sync')) = ' games failed to sync'
+)`
+
+// syncTextSafeSentences is the SQL list of the sentences that may stay in profile_games.last_error and sync_runs.error,
+// as exact strings (apostrophes doubled for SQL). It is the sentences the app can store in these columns: the
+// steam.UserMessage sentences and the other user-facing sentences that reach a sync, plus the run texts the app writes
+// itself (the stale-run and shutdown texts, and the cancellation sentence the migration rewrites to). It belongs to
+// migration 3 only: changing it changes what migration 3 keeps. A later change to the sentences the app writes goes in
+// a new migration, not here. TestSyncTextSafeSentencesCoverAppSentences fails when a sentence the app can store is
+// missing here.
+const syncTextSafeSentences = `
+  'Steam rejected the Web API key. Check that the key is correct and still valid, then replace it in Settings.',
+  'Steam did not share achievements for this game. The profile''s game details may be private.',
+  'Steam refused this request.',
+  'Steam could not process the request.',
+  'Steam has no data for this request.',
+  'Steam is limiting requests right now. Try again in a few minutes.',
+  'Steam is temporarily unavailable. Try again later.',
+  'Steam could not provide this data right now.',
+  'Could not reach Steam. Check your internet connection and try again.',
+  'The request was canceled.',
+  'Steam sent a response the app could not read.',
+  'Something went wrong. See the log file for details.',
+  'Steam returned an unexpected response.',
+  'This looks like your Steam Web API key. Enter your profile URL, SteamID64 or custom name instead.',
+  'No Steam profile matches that custom name.',
+  'Enter a Steam profile URL, SteamID64 or custom name.',
+  'Steam did not return your game list. Your profile''s game details may be private.',
+  'Steam returned an incomplete game list. Try again later.',
+  'Steam did not return your purchased games. Try again later.',
+  'Steam returned an incomplete list of purchased games. Try again later.',
+  'Steam did not return the list of reviewed games. Try again later.',
+  'Steam returned an incomplete list of reviewed games. Try again later.',
+  'Steam did not provide achievements for this game.',
+  'Steam did not return achievements for this game. Try again later.',
+  'A sync is already running. Try again when it finishes.',
+  'The app is shutting down.',
+  'Could not access the system keyring. Make sure it is unlocked, then try again.',
+  'The app could not open its database.',
+  'The app database is not available. Restart the app, or see the log file for details.',
+  'No Steam profile is active. Add your Steam profile first.',
+  'A Steam profile is required.',
+  'No Steam Web API key is saved. Enter your key first.',
+  'The Steam Web API key cannot be empty or contain spaces or hidden characters.',
+  'app restarted before sync completed',
+  'sync ended but its final status could not be saved'
 `
 
 // initialSchemaSQL creates the complete current schema in one step. Nothing older than this layout was ever shipped,

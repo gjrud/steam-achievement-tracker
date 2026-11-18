@@ -1,22 +1,33 @@
 import {describe, expect, test} from 'vitest'
-import {formatDateTime, formatMessage, formatPlaytime, formatRelativeTime, integer, pct} from './format.js'
+import {RuntimeError} from '../test/wails-runtime-mock.js'
+import {AppMessage, formatDateTime, formatMessage, formatPlaytime, formatRelativeTime, genericMessage, integer, pct} from './format.js'
 
 describe('formatMessage', () => {
-  test('uses the Error message', () => {
-    expect(formatMessage(new Error('boom'))).toBe('boom')
+  test('shows the message of a RuntimeError, the backend sentence of a bound method', () => {
+    expect(formatMessage(new RuntimeError('No Steam profile matches that custom name.'))).toBe('No Steam profile matches that custom name.')
   })
 
-  test('uses the string form of plain rejections', () => {
-    expect(formatMessage('plain text')).toBe('plain text')
+  test('shows the message of an AppMessage the frontend wrote for the user', () => {
+    expect(formatMessage(new AppMessage('A save is already in progress'))).toBe('A save is already in progress')
   })
 
-  test('falls back to the error name when the message is empty', () => {
-    expect(formatMessage(new Error(''))).toBe('Error')
+  test.each([
+    ['a TypeError from a bad argument', new TypeError('Cannot read properties of undefined (reading "appid")')],
+    ['a ReferenceError', new ReferenceError('steamKey is not defined')],
+    ['a plain Error', new Error('boom /home/user/.local/share/app/app.db')],
+    ['a string rejection', 'plain text']
+  ])('shows the generic sentence for %s, never its text', (_, err) => {
+    expect(formatMessage(err)).toBe(genericMessage)
   })
 
-  test('reports an unknown error when there is nothing to show', () => {
-    expect(formatMessage(null)).toBe('Unknown error')
-    expect(formatMessage(undefined)).toBe('Unknown error')
+  test('shows the generic sentence for a RuntimeError or AppMessage with no message', () => {
+    expect(formatMessage(new RuntimeError(''))).toBe(genericMessage)
+    expect(formatMessage(new AppMessage(''))).toBe(genericMessage)
+  })
+
+  test('shows the generic sentence when there is nothing to show', () => {
+    expect(formatMessage(null)).toBe(genericMessage)
+    expect(formatMessage(undefined)).toBe(genericMessage)
   })
 })
 

@@ -66,6 +66,7 @@ No tests. It is constants only.
 | --- | --- |
 | `db_test.go` | Fresh schema and defaults, no-op backup skipping, backup of an unversioned database with tables, backup contents match the original. |
 | `db_gap_test.go` | Migration failure rolls back to the previous schema, a newer schema is rejected, a failure while recording the version rolls back, a failed migration releases the connection, and file modes of the database and backups. |
+| `sync_text_migration_test.go` | Migration 3 rewrites raw stored sync text (`profile_games.last_error`, `sync_runs.error`), keeps the app's own sentences and the run summary, maps `context canceled`, leaves NULL and empty values, and is idempotent. |
 | `dsn_test.go` | SQLite URI building: escaping, query parameters kept, and a path with special characters opens correctly. |
 
 ### internal/fsretry

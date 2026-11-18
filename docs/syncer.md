@@ -99,7 +99,7 @@ sequenceDiagram
 6. `finalize` sets status `partial` when any game failed, and calls `TouchProfileSynced` when at least one game succeeded.
 7. `finish` writes the final status, error and counts with `Repo.FinishSyncRun`, then calls `OnChange`.
 
-Failure of the whole run goes through `fail(err)`: status `failed`, error text from `err`, then `finish`.
+Failure of the whole run goes through `fail(err)`: status `failed`, the stored error text from `steam.UserMessage(err)` (a cancelled run stores `The request was canceled.`), then `finish`. The raw `err` is returned to the caller, which logs it.
 
 `GamesTotal` reaches the row through `UpdateSyncRunProgress`, called after each game finishes, and through `FinishSyncRun`. Thus, `games_total` remains 0 while the first game is in progress and becomes visible only afterward. A run with no syncable games, or one that fails before any game finishes, gets its total only from `FinishSyncRun`.
 
@@ -112,7 +112,7 @@ Status values stored in `sync_runs.status`:
 | `running` | `Repo.StartSyncRun` | Row created at start of `FullSync`. Stays until `FinishSyncRun`. |
 | `success` | `finalize` (default) | No failed game and no run-level error. A run with zero syncable games is also `success`. |
 | `partial` | `finalize` | At least one game failed (`GamesFailed > 0`), including when every game failed. `Error` reads `N of M games failed to sync`. |
-| `failed` | `fail` | Run-level error: `GetOwnedGames` or the disabled-game lookup failed, or the context was cancelled during dispatch or after all games were dispatched. `Error` is the error text. |
+| `failed` | `fail` | Run-level error: `GetOwnedGames` or the disabled-game lookup failed, or the context was cancelled during dispatch or after all games were dispatched. `Error` is `steam.UserMessage(err)`, which gives `The request was canceled.` on cancel. |
 | `canceled` | `Repo.CancelRunningSyncRuns` at app start | Not written by the syncer. It marks rows still `running` after an unclean exit. |
 
 A cancelled sync therefore ends as `failed`, not `canceled`. Games interrupted by cancellation are not counted and do not get warnings (see [Cancellation](#cancellation)).
@@ -122,7 +122,7 @@ If `FinishSyncRun` itself fails, the error is logged and the row stays `running`
 ## Worker pool and per-game failures
 
 - Workers run `syncWorker`, which calls `syncGame` for each job. A nil error calls `recordGameSuccess`.
-- A non-nil error when the context is still live calls `recordGameFailure`: it formats the warning (`repository.FormatGameError`), logs it, calls `Repo.SaveGameWarning` with the error text, increments `GamesFailed`, and writes progress.
+- A non-nil error when the context is still live calls `recordGameFailure`: it formats the warning (`repository.FormatGameError`) with the cause of the error (`usererr.LogText`, paths reduced, then `steam.RedactSecrets` so a key or SteamID64 in the cause is not logged) and logs it, calls `Repo.SaveGameWarning` with `steam.UserMessage(err)` (the user-safe sentence shown in Sync errors), increments `GamesFailed`, and writes progress.
 - A non-nil error when the context is cancelled is neither a success nor a failure: no warning, no count. The game keeps its stored data.
 - The mutex guards only the counters. `updateProgress` writes to the repository and calls `OnChange` outside the lock.
 
@@ -230,11 +230,13 @@ Thresholds and rules that matter for sync results (verified in `internal/reposit
 | --- | --- |
 | `GetOwnedGames` error | Run `failed`. No game rows changed. |
 | Upsert or not-owned sweep error | Logged. Sync continues. |
-| Game schema error (non-fallback) | Game `SaveGameWarning` with the error text. |
+| Game schema error (non-fallback) | Game `SaveGameWarning` with the user-safe text from `steam.UserMessage`. |
 | Game user-achievement error | Same as above. |
 | Legacy fallback with existing set data | Refused; game warning. Existing entries kept. |
 | Store or cover error | Logged by the cover refresh. Game sync still succeeds. |
 | `SaveGameSync` error | Game warning; the transaction is rolled back, so the previous data stays. |
+
+Stored and displayed error text is always user-safe. `recordGameFailure` stores `steam.UserMessage(err)` as the game warning, and `fail` stores `steam.UserMessage(err)` as the run error, so a database or filesystem error stores `Something went wrong. See the log file for details.`. `fail` has no special case for cancellation: `steam.UserMessage` gives `The request was canceled.` for `context.Canceled`, also inside a `*url.Error`. The raw error is only logged: a game line through `repository.FormatGameError` with the sentence and the cause (`usererr.LogText`, paths reduced, then `steam.RedactSecrets`), a run line in `app.go` (`full sync failed`) with the same (`logText`), the other sync log lines (`upsert owned game`, `save game warning`, `update sync progress`, `finish sync run`, and so on) and a cover line through `redact.Paths`. Cover refresh errors are never stored. The `partial` run text `N of M games failed to sync` is built from counts, not from error text.
 
 `SaveGameWarning` keeps prior data when the game has entries: it sets `sync_warning` and `last_error` on each existing entry, and does not change totals. If the game has no entries, it creates a group-0 placeholder with `sync_warning` only; this placeholder has no progress and produces no progress tags until a sync succeeds. It also upserts the owned-game row so the playtime is current.
 

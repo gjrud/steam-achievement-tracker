@@ -129,8 +129,8 @@ On the normal quit path, Wails v3.1.0 runs `application.App.cleanup`. It cancels
 Wails closes the windows only after `shutdownServices` returns, so the frontend may still be running. A call that reaches Go after step 4 behaves as follows:
 
 - `GetAppState` does not fail. `initialized` stays true and `repo` is nil, so it returns a state with `profileExists` false, a null dashboard and no error. The frontend routes on that state (see [frontend.md](frontend.md)).
-- Actions that need the repository (`SaveProfile`, `SetLibrarySettings`, `ClearActiveUserData`, and the game actions) fail with `database is not initialized`.
-- `SyncNow` and `ValidateProfile` call `requireAPIKey` first. Without a key they return `keyring.ErrMissing` (or the keyring read error). With a key, `SyncNow` returns `shutting down`, and `ValidateProfile` fails on its cancelled request context.
+- Actions that need the repository (`SaveProfile`, `SetLibrarySettings`, `ClearActiveUserData`, and the game actions) fail with the not-ready sentence (`The app database is not available. Restart the app, or see the log file for details.`).
+- `SyncNow` and `ValidateProfile` call `requireAPIKey` first. Without a key they return `keyring.ErrMissing` (or the keyring read error). With a key, `SyncNow` returns `The app is shutting down.`, and `ValidateProfile` fails on its cancelled request context.
 - `SaveAPIKey` and `RetryAPIKey` still reach the keyring.
 
 The final `sync:changed` event does not block shutdown. `endSync` emits it through `app.Event.Emit`, which only queues it on an unbounded mailbox (`frontendEvents` in Wails `pkg/application/events.go`), so `syncWG.Done` still runs. Delivery to the webview needs the UI thread: the window queues the script and schedules `InvokeAsync(drainEventQueue)`. That drain cannot start until the `InvokeSync` callback in `cleanup` returns, and the window is marked destroyed only after several asynchronous steps (`windowEvents`, then `InvokeSync(markAsDestroyed)`). Whether the event reaches the webview is therefore a race, and once the event loop has quit the drain may never run.
@@ -153,7 +153,7 @@ Emit points:
 | Final run status | after `FinishSyncRun` | `finish` through `changed` |
 | Flag cleared | after `syncInProgress` is set to false | `endSync` through `emitSyncChanged` |
 
-`endSync` also runs on the early-exit paths of `startSync`: no repo, no key, a failed active-profile read, no profile, a failed library settings read (the only way building the Steam client fails), or a failed latest-run read. Emission goes through `emitSyncChanged`, which reads the emitter under `mu` and calls it after releasing `mu`.
+`endSync` also runs on the early-exit paths of `startSync`: no repo, no key, a failed active-profile read, no profile, a failed library settings read (the only way building the Steam client fails), or a failed latest-run read. Emission goes through `emitSyncChanged`, which reads the emitter under `mu` and calls it after releasing `mu`. A panic after the sync state is set, including one in the first emit ("Sync accepted"), also runs `endSync` through a deferred guard until the sync goroutine takes over `done`. `endSync` releases `syncWG` with a deferred `Done`, so an emitter panic cannot hang `ServiceShutdown`.
 
 Frontend side (`App.svelte`):
 
@@ -178,8 +178,9 @@ The full list of bound methods, their parameters, results and errors is in [app-
 
 ## Error handling
 
-- **Bound method errors** are returned to the frontend, which shows them in a banner, except for `SaveAPIKey` errors. The key form shows those (see `saveApiKey` and `savingKey` in `App.svelte`), and the banner is left alone. Wails also logs them at Error level through the Wails logger (`wailslog.go`), so their text reaches `app.log`. Error text must therefore never contain the API key, and bound methods return constant messages or wrapped backend errors.
-- **Init errors** are not returned from `ServiceStartup`. They are kept in `AppState.InitError`, and the next call retries the init.
+- **Raw errors are logged, never shown.** The rule for every error: the raw error (paths reduced to base names by `redact.Paths`) goes to `app.log`, and the UI and any stored display text get a short plain sentence. Paths, SQL, driver text, OS error text, wrapped Go error chains and backend (Secret Service, D-Bus, Credential Manager) text never reach the UI or a display column. The app's error logs (`logText`) and the per-game failure log also scrub keys and SteamID64s with `steam.RedactSecrets`.
+- **Bound method errors** all go through `callBound`, which calls `userFacingError` (`app_errors.go`; see [app-service.md](app-service.md#error-boundary)). It logs the raw error once and returns only a `usererr` sentence, the keyring sentence, or the `steam.UserMessage` sentence. The frontend shows the error in a banner, except for `SaveAPIKey` errors. The key form shows those (see `saveApiKey` and `savingKey` in `App.svelte`), and the banner is left alone. Wails also logs the returned error at Error level through the Wails logger (`wailslog.go`), so that line carries only the sentence and the raw error is in the log once. Error text must therefore never contain the API key, and nothing built from raw text is returned.
+- **Init errors** are not returned from `ServiceStartup`. `AppState.InitError` holds a sentence (`The app could not create its folders.` or `The app could not open its database.`), `AppState.DataDir` and, once logging is up, `AppState.LogFile` tell the startup screen where to look, the startup log line carries the raw cause, and the next call retries the init.
 - **Background sync errors** are logged with the `log` package. A per-game failure is saved as a warning on that game's entries and counted in the run. A run ends as `success`, `partial` (some games failed), `failed` (run-level error or cancellation) or `canceled` (left `running` when the app restarted).
 - **Stale runs**: if a sync ends but its final status cannot be saved, the row stays `running`. `GetAppState` then reports it as `failed` without changing the row. The next start marks it `canceled`.
 - **Steam HTTP errors** keep the API key, the `steamid`, `steamids` and `vanityurl` query values and bare SteamID64s redacted in the URL of the error and in response bodies (`internal/steam`).

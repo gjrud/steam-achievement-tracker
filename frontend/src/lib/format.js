@@ -1,9 +1,28 @@
+// RuntimeError is exported through the Call namespace (the package index does not re-export it by name).
+import {Call} from '@wailsio/runtime'
+
 const numberFormatter = new Intl.NumberFormat()
 const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'short', hour12: false})
 
+// genericMessage is shown for any failure whose text was not written for the user: a JavaScript error, a bad argument
+// from the frontend, or a backend error the app did not map to a sentence. The details are in the log file.
+export const genericMessage = 'Something went wrong. See the log file for details.'
+
+// AppMessage is an error the frontend throws with a sentence written for the user. Use it instead of a plain Error so
+// formatMessage shows the sentence.
+export class AppMessage extends Error {
+  constructor(message, options) {
+    super(message, options)
+    this.name = 'AppMessage'
+  }
+}
+
+// formatMessage returns the text to show for a rejection. Only a RuntimeError (a bound method's Go error, whose text
+// the backend wrote for the user) and an AppMessage show their message. Anything else shows genericMessage.
 export function formatMessage(err) {
-  if (!err) return 'Unknown error'
-  return err.message || err.toString?.() || String(err)
+  if (!err) return genericMessage
+  if (err instanceof Call.RuntimeError || err instanceof AppMessage) return err.message || genericMessage
+  return genericMessage
 }
 
 export function integer(value) {

@@ -1,11 +1,13 @@
 package syncer
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -24,6 +26,7 @@ import (
 	"github.com/gjrud/steam-achievement-tracker/internal/images"
 	"github.com/gjrud/steam-achievement-tracker/internal/repository"
 	"github.com/gjrud/steam-achievement-tracker/internal/steam"
+	"github.com/gjrud/steam-achievement-tracker/internal/usererr"
 )
 
 func TestFullSyncRecordsPartialFailureAndKeepsSuccessfulGame(t *testing.T) {
@@ -44,7 +47,9 @@ func TestFullSyncRecordsPartialFailureAndKeepsSuccessfulGame(t *testing.T) {
 	requireLatestSyncRun(t, repo, profile.ID, expectedSyncResult{status: "partial", total: 2, synced: 1, failed: 1, hasError: true})
 
 	requireSummaryCounts(t, repo, profile.ID, summaryCounts{owned: 2, achievements: 2, unlocked: 1})
-	requireWarningCard(t, repo, profile.ID, 20, "player achievements unavailable")
+	// The fake answers the GetUserAchievements request with 403, which for a per-game endpoint means the data is not
+	// shared; the warning is that user-safe sentence, not the body text or a key message.
+	requireWarningCard(t, repo, profile.ID, 20, privacySteamText)
 	requireGoodGameState(t, repo, profile.ID, 10)
 }
 
@@ -57,7 +62,7 @@ func TestFullSyncClearsWarningAfterRecovery(t *testing.T) {
 
 	first := runFullSyncOK(t, repo, fake, profile)
 	requireSyncResult(t, first, expectedSyncResult{status: "partial", total: 1, synced: 0, failed: 1, hasError: true})
-	requireWarningCard(t, repo, profile.ID, 20, "temporary Steam failure")
+	requireWarningCard(t, repo, profile.ID, 20, privacySteamText)
 
 	fake.playerError[20] = ""
 	fake.player[20] = map[string]bool{"ACH_ONE": true, "ACH_TWO": true}
@@ -116,7 +121,7 @@ func TestFullSyncCancellationPersistsFailedRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run == nil || run.Status != "failed" || run.Error == nil || !strings.Contains(*run.Error, "context canceled") {
+	if run == nil || run.Status != "failed" || run.Error == nil || *run.Error != "The request was canceled." {
 		t.Fatalf("sync run = %#v, want persisted failed cancellation", run)
 	}
 	// Games interrupted in flight are not failures: no warning rows, and the stored data is kept.
@@ -172,7 +177,7 @@ func TestFullSyncCancelAfterAllGamesDispatchedFailsRun(t *testing.T) {
 		t.Fatalf("result = %#v, want no synced and no failed games for an interrupted sync", result)
 	}
 	run := requireLatestRun(t, repo, profile.ID)
-	if run.Status != "failed" || run.Error == nil || !strings.Contains(*run.Error, "context canceled") {
+	if run.Status != "failed" || run.Error == nil || *run.Error != "The request was canceled." {
 		t.Fatalf("sync run = %#v, want persisted failed cancellation", run)
 	}
 	if run.GamesSynced != 0 || run.GamesFailed != 0 {
@@ -205,15 +210,88 @@ func TestFullSyncGameTransportErrorWarningRedactsAPIKey(t *testing.T) {
 
 	result := runFullSyncOK(t, repo, fake, profile)
 	requireSyncResult(t, result, expectedSyncResult{status: "partial", total: 1, synced: 0, failed: 1, hasError: true})
-	requireWarningCard(t, repo, profile.ID, 20, "achievement schema: Get")
+	requireWarningCard(t, repo, profile.ID, 20, unreachableSteamText)
 	warnings := requireGameCards(t, repo, profile.ID, "warnings")
 	if len(warnings) != 1 || warnings[0].LastError == nil {
 		t.Fatalf("warnings = %#v, want one warning with text", warnings)
 	}
-	requireRedactedAPIKeyText(t, *warnings[0].LastError)
+	// The stored warning is the user-safe sentence, so it carries neither the key nor the request address.
+	requireNoAPIKeyText(t, *warnings[0].LastError)
+	if *warnings[0].LastError != unreachableSteamText {
+		t.Fatalf("warning = %q, want %q", *warnings[0].LastError, unreachableSteamText)
+	}
 	// The run error is only the per-game count summary here; it must not carry the key either.
 	if run := requireLatestRun(t, repo, profile.ID); run.Error != nil {
 		requireNoAPIKeyText(t, *run.Error)
+	}
+}
+
+// A game failure logs the sentence and the raw cause of a user-facing error (usererr.LogText, paths reduced, then
+// steam.RedactSecrets); the stored warning and the UI get only the sentence.
+func TestRecordGameFailureLogsCauseAndStoresSentence(t *testing.T) {
+	repo := testRepository(t)
+	profile := testProfile(t, repo)
+	var logs bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(prev)
+
+	run := &fullSyncRun{s: &Service{Repo: repo}, profile: *profile, runID: 1}
+	const sentence = "Steam did not provide achievements for this game."
+	const key = "0123456789ABCDEF0123456789ABCDEF"
+	const steamID = "76561198000000000"
+	game := steam.OwnedGame{AppID: 20, Name: "Broken Game"}
+	cause := "Profile is private for appid 20 with key " + key + " for " + steamID
+	run.recordGameFailure(game, usererr.Wrap(sentence, errors.New(cause)))
+
+	logged := logs.String()
+	if want := "appid 20: " + sentence + " (cause: Profile is private for appid 20 with key REDACTED for REDACTED)"; !strings.Contains(logged, want) {
+		t.Fatalf("log = %q, want %q", logged, want)
+	}
+	if strings.Contains(strings.ToUpper(logged), key) || strings.Contains(logged, steamID) {
+		t.Fatalf("log = %q carries a key or SteamID64", logged)
+	}
+	requireWarningCard(t, repo, profile.ID, 20, sentence)
+}
+
+// User-safe sentences from steam.UserMessage that the tests compare stored text against.
+const (
+	unreachableSteamText = "Could not reach Steam. Check your internet connection and try again."
+	keyRejectedSteamText = "Steam rejected the Web API key. Check that the key is correct and still valid, then replace it in Settings."
+	privacySteamText     = "Steam did not share achievements for this game. The profile's game details may be private."
+)
+
+// A cancel while GetOwnedGames is in flight fails the run with the constant context.Canceled text. The raw error is a
+// *url.Error with the request address (IPlayerService, key=), which must not reach sync_runs.error.
+func TestFullSyncCancelDuringOwnedGamesStoresConstantError(t *testing.T) {
+	repo := testRepository(t)
+	profile := testProfile(t, repo)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cancel()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	client := &steam.Client{APIKey: "test-key", BaseURL: server.URL, HTTPClient: server.Client()}
+	client.SetRetryBackoff(func(int) time.Duration { return 0 })
+
+	result, err := (&Service{Repo: repo, Steam: client}).FullSync(ctx, *profile)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	want := "The request was canceled."
+	if result.Error == nil || *result.Error != want {
+		t.Fatalf("result = %#v, want error %q", result, want)
+	}
+	run := requireLatestRun(t, repo, profile.ID)
+	if run.Status != "failed" || run.Error == nil || *run.Error != want {
+		t.Fatalf("sync run = %#v, want failed run with error %q", run, want)
+	}
+	for _, raw := range []string{"http", "key=", "IPlayerService", "test-key"} {
+		if strings.Contains(*run.Error, raw) {
+			t.Fatalf("sync run error = %q, contains %q", *run.Error, raw)
+		}
 	}
 }
 
@@ -227,16 +305,23 @@ func TestFullSyncOwnedGamesTransportErrorRedactsAPIKeyInSyncRun(t *testing.T) {
 	if err == nil {
 		t.Fatal("err = nil, want transport error")
 	}
+	// The returned error keeps the redacted raw text; the stored texts are the user-safe sentence.
 	requireRedactedAPIKeyText(t, err.Error())
 	if result.Error == nil {
 		t.Fatalf("result = %#v, want error text", result)
 	}
-	requireRedactedAPIKeyText(t, *result.Error)
+	requireNoAPIKeyText(t, *result.Error)
+	if *result.Error != unreachableSteamText {
+		t.Fatalf("result error = %q, want %q", *result.Error, unreachableSteamText)
+	}
 	run := requireLatestRun(t, repo, profile.ID)
 	if run.Status != "failed" || run.Error == nil {
 		t.Fatalf("sync run = %#v, want failed run with error", run)
 	}
-	requireRedactedAPIKeyText(t, *run.Error)
+	requireNoAPIKeyText(t, *run.Error)
+	if *run.Error != unreachableSteamText {
+		t.Fatalf("sync run error = %q, want %q", *run.Error, unreachableSteamText)
+	}
 }
 
 // syncTestSteamID has the 76561 prefix the redaction matches, so a leaked copy would be caught.
@@ -259,14 +344,18 @@ func TestTransportFailureStoresNoSteamID64OrKeyInSyncText(t *testing.T) {
 		if err == nil {
 			t.Fatal("err = nil, want transport error")
 		}
+		// The returned error keeps the redacted request address for the log; the stored run error is user-safe.
 		requireNoSyncSecrets(t, err.Error())
+		if !strings.Contains(err.Error(), "REDACTED") {
+			t.Fatalf("returned error = %q, want the redacted request address", err.Error())
+		}
 		run := requireLatestRun(t, repo, profile.ID)
 		if run.Error == nil {
 			t.Fatalf("sync run = %#v, want error text", run)
 		}
 		requireNoSyncSecrets(t, *run.Error)
-		if !strings.Contains(*run.Error, "REDACTED") {
-			t.Fatalf("sync run error = %q, want the redacted request address", *run.Error)
+		if *run.Error != unreachableSteamText {
+			t.Fatalf("sync run error = %q, want %q", *run.Error, unreachableSteamText)
 		}
 	})
 
@@ -288,8 +377,8 @@ func TestTransportFailureStoresNoSteamID64OrKeyInSyncText(t *testing.T) {
 			t.Fatalf("warnings = %#v, want one warning with text", warnings)
 		}
 		requireNoSyncSecrets(t, *warnings[0].LastError)
-		if !strings.Contains(*warnings[0].LastError, "REDACTED") {
-			t.Fatalf("profile_games.last_error = %q, want the redacted request address", *warnings[0].LastError)
+		if *warnings[0].LastError != unreachableSteamText {
+			t.Fatalf("profile_games.last_error = %q, want %q", *warnings[0].LastError, unreachableSteamText)
 		}
 	})
 }
@@ -1572,6 +1661,11 @@ func requireWarningCard(t *testing.T, repo *repository.Repository, profileID int
 		t.Fatalf("warning card = %#v, want sync warning", card)
 	}
 	requireStringPtrContains(t, card.LastError, message, card)
+	for _, raw := range []string{"Steam API /", "returned ", "<html", "HTTP/", "://"} {
+		if strings.Contains(*card.LastError, raw) {
+			t.Fatalf("warning text %q shows raw Steam output %q", *card.LastError, raw)
+		}
+	}
 }
 
 func requireGoodGameState(t *testing.T, repo *repository.Repository, profileID int64, appID int64) {

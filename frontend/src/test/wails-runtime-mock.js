@@ -1,6 +1,18 @@
 // Test stand-in for @wailsio/runtime (aliased in vite.config.js, test mode only). It keeps Events.On
 // subscriptions in memory so tests can emit events and count listeners.
 
+// RuntimeError mirrors the class of the same name in @wailsio/runtime 3.1 (dist/runtime.js). Wails rejects a bound
+// method that returned a Go error with a RuntimeError whose message is the Go error text.
+export class RuntimeError extends Error {
+  constructor(message, options) {
+    super(message, options)
+    this.name = 'RuntimeError'
+  }
+}
+
+// The runtime exports RuntimeError through its Call namespace; format.js reads it from there.
+export const Call = {RuntimeError}
+
 const listeners = new Map()
 
 export const Events = {
