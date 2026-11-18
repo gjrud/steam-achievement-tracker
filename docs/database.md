@@ -71,11 +71,13 @@ Build DSNs only through `sqliteDSN`. Do not concatenate paths into DSN strings (
 - Each migration's SQL and its bookkeeping are in the same transaction as the `user_version` bump. A failure rolls back and leaves the previous schema in place. Only an error from the migration's SQL is wrapped as `migration %03d %s: %w`. Errors from the `schema_migrations` insert or from setting `user_version` are returned unwrapped. All of them roll back the same way.
 - The `initial_schema` SQL uses `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`. It creates the whole schema as it was at version 1, including `cover_images.path`. No upgrade path from pre-release layouts exists (the comment on `initialSchemaSQL` says so). Do not edit it: installed databases already ran it.
 - Migration 2 `cover_cached_flag` (`coverCachedFlagSQL`) removes the absolute cover path, which held the OS user name:
+
   ```sql
   ALTER TABLE cover_images ADD COLUMN cached integer not null default 0;
   UPDATE cover_images SET cached = 1 WHERE path IS NOT NULL AND trim(path) <> '';
   ALTER TABLE cover_images DROP COLUMN path;
   ```
+
   `DROP COLUMN` needs SQLite 3.35 or newer; the bundled go-sqlite3 ships 3.54.
 - `compact: true` on a migration means that after its transaction commits, `compact` runs `VACUUM` and then `PRAGMA wal_checkpoint(TRUNCATE)`. `VACUUM` cannot run inside the transaction. Without it the dropped path bytes stay in free pages and in the WAL. `compact` runs only when a compacting migration ran in this open and the database already had user tables before the open (a fresh install holds no dropped data, so it is skipped). A failure is logged with `log.Printf("compact database: ...")` and not returned: `OpenAndMigrate` succeeds, the migration itself stays committed, and `compact` is not retried on the next open. The dropped bytes then stay in free pages and the WAL until SQLite reuses them or a later `VACUUM` runs.
 
