@@ -1,8 +1,8 @@
 # Steam client (`internal/steam`)
 
-`internal/steam` is the only package that talks to the Steam Web API. It wraps the endpoints the app uses, decodes their JSON, classifies failures, and keeps the Steam Web API key out of error text. It has no database or image code. Store and CDN asset requests live in `internal/images` (see [Store and asset URLs](#store-and-asset-urls)).
+`internal/steam` is the only package that calls the Steam Web API. It wraps the endpoints used by the app, decodes their JSON, classifies failures, and keeps the Steam Web API key out of error text. It contains no database or image code. Store and CDN asset requests live in `internal/images` (see [Store and asset URLs](#store-and-asset-urls)).
 
-Callers: `syncer.Service` (see [syncer.md](syncer.md)) for library, schema and unlock data, and `app.go` (profile validation: `ResolveProfileInput` then `GetPlayerSummary`). The package is internal; the frontend never reaches it directly. See [architecture.md](architecture.md) for where it sits.
+Callers: `syncer.Service` (see [syncer.md](syncer.md)) for library, schema, and unlock data, and `app.go` for profile validation (`ResolveProfileInput` followed by `GetPlayerSummary`). The package is internal; the frontend never calls it directly. See [architecture.md](architecture.md) for its place in the architecture.
 
 Source: `internal/steam/client.go`. Tests and fixtures: `internal/steam/client_test.go`, `internal/steam/testdata/`.
 
@@ -21,13 +21,13 @@ type Client struct {
 }
 ```
 
-- `New(apiKey string) *Client` returns a client with `BaseURL` set to `https://api.steampowered.com` and an `HTTPClient` with a 30 second timeout.
+- `New(apiKey string) *Client` returns a client with `BaseURL` set to `https://api.steampowered.com` and an `HTTPClient` with a 30-second timeout.
 - The zero value of `SkipUnvettedApps` and `ExcludePlayedFreeGames` means "include": unvetted apps and played free games are requested by default. `app.go` (`newSteamClient`) sets them per profile from the library settings, inverted: `SkipUnvettedApps = !IncludeUnvettedApps`, `ExcludePlayedFreeGames = !IncludePlayedFreeGames`. See [app-service.md](app-service.md).
 - `SetRetryBackoff(fn func(attempt int) time.Duration)` replaces the delay before each retry. `attempt` is 1-based. A `nil` fn restores the default. Production code never calls it; tests use it to avoid sleeping.
 
 ## Exported API
 
-All methods take a `context.Context` first. Every request is built with that context, so cancelling it aborts the HTTP call and any pending retry wait.
+Every method takes a `context.Context` first. Requests use that context, so cancellation aborts the HTTP call and any pending retry wait.
 
 | Method | Endpoint (path under `BaseURL`) | Parameters sent | Returns | Notes |
 | --- | --- | --- | --- | --- |
@@ -41,11 +41,11 @@ All methods take a `context.Context` first. Every request is built with that con
 | `GetPlayerAchievements(ctx, steamID64, appID)` | `/ISteamUserStats/GetPlayerAchievements/v1/` | `key`, `steamid`, `appid`, `l=english`, `format=json` | `([]PlayerAchievement, error)` | Legacy. When `success` is false and no achievements came back, the error is Steam's `error` text if present, else `player achievements unavailable`. `APIName` falls back to `name` when `apiname` is empty. |
 | `GetGlobalAchievementPercentages(ctx, appID)` | `/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v0002/` | `gameid`, `format=json` (no key) | `(map[string]float64, error)` | Legacy. Keyed by achievement API name. |
 
-Legacy means the pre-IPlayerService path, used only as a fallback by the syncer (see [syncer.md](syncer.md#per-game-refresh)). Remove these methods together with the legacy sync path once Steam documents `GetGameAchievements`.
+“Legacy” refers to the pre-IPlayerService path, used only as a syncer fallback (see [syncer.md](syncer.md#per-game-refresh)). Remove these methods together with the legacy sync path once Steam documents `GetGameAchievements`.
 
 ## Data sources
 
-This table maps each kind of data to the endpoint that provides it. Parameters are in the table above and in the sections below.
+This table maps each data type to its source endpoint. Parameters are listed in the table above and in the sections below.
 
 | Data | Endpoint | Key sent | Notes |
 | --- | --- | --- | --- |
@@ -53,13 +53,13 @@ This table maps each kind of data to the endpoint that provides it. Parameters a
 | Vanity name to SteamID64 | `ISteamUser/ResolveVanityURL/v1` | yes | Used for vanity names and `/id/<name>` URLs. |
 | Owned games, names, playtime, library capsule file name, purchased and vetted status | `IPlayerService/GetOwnedGames/v0001` (up to three calls) | yes | Unvetted apps are included unless the profile's **Include unvetted apps** setting is off, and played free games follow **Include played free games**. Any failed or unusable answer fails the run before a game is synced. See [Library fetch](#library-fetch-getownedgames). |
 | Achievement schema, sets, global unlock percentages | `IPlayerService/GetGameAchievements/v1` | yes | The main path. One call returns the whole schema of an app, including each achievement's `player_percent_unlocked`. |
-| Unlocked achievements of the profile | `IPlayerService/GetUserAchievements/v1` | yes | Main path. Needs the profile's game stats to be public. |
-| Legacy schema, unlock and percentage data | `ISteamUserStats/GetSchemaForGame/v2`, `ISteamUserStats/GetPlayerAchievements/v1`, `ISteamUserStats/GetGlobalAchievementPercentagesForApp/v0002` | yes (the percentages call sends none) | Fallback only, when `GetGameAchievements` fails with an error that is not transient or with an EResult error, and the game has no stored set data (`Repo.HasSetData` is false; see [syncer.md](syncer.md#per-game-refresh)). |
+| Unlocked achievements of the profile | `IPlayerService/GetUserAchievements/v1` | yes | Main path. Works for the key owner's own profile at any privacy setting. |
+| Legacy schema, unlock and percentage data | `ISteamUserStats/GetSchemaForGame/v2`, `ISteamUserStats/GetPlayerAchievements/v1`, `ISteamUserStats/GetGlobalAchievementPercentagesForApp/v0002` | yes (the percentages call sends none) | Fallback only, when `GetGameAchievements` fails with an error that is not transient or with an EResult error, and the game has no stored set data (`Repo.HasSetData` is false; see [syncer.md](syncer.md#per-game-refresh)). Unlike the main path, `GetPlayerAchievements` answers HTTP 403 `Profile is not public` when the profile is private, so for a private profile a fallback game that has achievements fails and appears in Sync errors. |
 | Store item assets (library, hero, header and main capsule file names) | `IStoreBrowseService/GetItems/v1` | no | One app per call. Only for stale DLC covers and for base games without a usable owned-games capsule. See [covers.md](covers.md). |
 | Cover image files | `https://shared.akamai.steamstatic.com/store_item_assets/` (primary) and `https://shared.steamstatic.com/store_item_assets/` (fallback) | no | Downloaded to the cover cache. See [covers.md](covers.md). |
 | Steam avatar image | The `avatarfull` (or `avatarmedium`) URL from `ISteamUser/GetPlayerSummaries/v2` | no | Not fetched by the Go client. The webview loads it as an `<img>` in the profile card. The URL is stored in `profiles.avatar_url`. |
 
-Nothing is sent to a non-Steam service.
+No data is sent to non-Steam services.
 
 ### Public types
 
@@ -74,14 +74,14 @@ Nothing is sent to a non-Steam service.
 
 ### Error types
 
-- `*HTTPStatusError{Path, Code, Status}` for non-2xx responses. `Code` is the HTTP status code; callers classify with `errors.As`, not by message. `Error()` is `Steam API <path> returned <status>`. For non-retryable statuses the trimmed body is appended (after key redaction). Retryable statuses (429, 500, 503) carry no body text.
+- `*HTTPStatusError{Path, Code, Status}` for non-2xx responses. `Code` is the HTTP status code; callers classify with `errors.As`, not by message. `Error()` is `Steam API <path> returned <status>`. For non-retryable statuses the trimmed body is appended (after key and ID redaction, see [Key and ID redaction](#key-and-id-redaction)). Retryable statuses (429, 500, 503) carry no body text.
 - `*EResultError{Path, Code}` for an `x-eresult` header other than 0, 1 or 42.
 
 Other errors are plain `errors.New` or `fmt.Errorf` values, for example `profile input is required`, `Steam profile not found`, `owned games unavailable; profile game details may be private`, `decode Steam API <path>: ...`, and `Steam API <path> returned invalid x-eresult "<value>"`.
 
 ## Endpoints
 
-All requests are `GET` with the query string built by `url.Values.Encode()`. The key is always sent as a query parameter named `key` except on `GetGlobalAchievementPercentages`. `BaseURL` is trimmed of trailing `/`.
+All requests use `GET`, with the query string built by `url.Values.Encode()`. The key is sent as a query parameter named `key` except for `GetGlobalAchievementPercentages`. Trailing `/` characters are trimmed from `BaseURL`.
 
 Store item lookups (`IStoreBrowseService/GetItems`) and CDN image URLs are not in this package.
 
@@ -97,7 +97,7 @@ Store item lookups (`IStoreBrowseService/GetItems`) and CDN image URLs are not i
    - If no segment matches, the error is `Steam profile URL must contain /profiles/{steamid64} or /id/{vanity}`.
 4. Otherwise the whole trimmed value is treated as a vanity name and sent to `ResolveVanityURL`.
 
-`ResolveVanityURL` succeeds only when `response.success == 1` and a `steamid` is returned. Otherwise it returns Steam's `message` (for example `No match`) or `could not resolve Steam vanity name "<name>"`.
+`ResolveVanityURL` succeeds only when `response.success == 1` and a `steamid` is returned. Otherwise it returns Steam's `message` (for example `No match`, redacted like any message), or when Steam sends no message, the constant error `no Steam profile matches that custom name`. The constant does not echo the typed input, so a SteamID64 typed as an `/id/` value or a mistyped name never reaches the error text, the log or the UI.
 
 Note: a URL without a scheme (for example `steamcommunity.com/id/name`) has no host to `url.Parse`, so it is sent to `ResolveVanityURL` as a literal vanity name and fails. Only inputs with `https://` (or another scheme) are parsed as profile URLs. The tests do not cover scheme-less URLs.
 
@@ -174,17 +174,25 @@ Response bodies are read through `io.LimitReader` with a 4 MiB cap. A larger bod
 
 An empty body with a 2xx status is accepted: `decodeJSONBody` returns nil and the target stays zero. See [syncer.md](syncer.md#surprising-behaviour) for what this means for achievement writes.
 
-## Key redaction
+## Key and ID redaction
 
-The key is in the request URL, so any error that includes the URL could leak it. The package removes it in two functions, both using the regular expression `apiKeyParam`:
+Request URLs carry the API key and the profile identifiers, so an error that includes a URL could leak them. `redactText` removes them from the error text the client builds from a request or a response:
 
-- `redactURLError`: when `HTTPClient.Do` or `http.NewRequestWithContext` fails with a `*url.Error`, a copy is returned with the `key=` query value replaced by `REDACTED`. `Op` and `Err` are kept, so `errors.Is`/`errors.As` and `Timeout()` still see the cause. Other errors pass through unchanged.
-- `redactBody`: for non-retryable non-2xx responses, the body is trimmed, the literal API key is replaced by `REDACTED`, and any `key=` query value is replaced too. Steam may echo the request URL in the body.
-- The regular expression is `([?&]key=)[^&]*`, matching the whole possibly-percent-encoded value.
+- the values of the `key`, `steamid`, `steamids` and `vanityurl` query parameters, in any letter case, are replaced by `REDACTED`. The name must follow a `?` or `&`, an HTML `&amp;` (matched by its `;`) or a JSON `\u0026`. A value ends at the first `&`, `#`, backslash, whitespace, quote or angle bracket, so a URL quoted in an HTML or JSON body does not take the text after it. The regular expression is `(?i)((?:[?&;]|\\u0026)(?:key|steamids?|vanityurl)=)[^&#\\\s"'<>]*` (Go raw-string form; the `\\u0026` alternative matches the literal text `\u0026`), which matches the whole possibly-percent-encoded value. Other parameters (`appid`, `language`, `format`) are kept for debugging;
+- a bare SteamID64 (a 17-digit number starting `76561`, pattern `\b76561\d{12}\b`) anywhere in the text is replaced. The prefix is `76561` rather than `7656119` because accounts created later have IDs from `76561200000000000` up;
+- the API key is replaced wherever it appears, raw, query-escaped and path-escaped, because a user can type the key as profile input.
 
-`HTTPStatusError.Path` and the other error paths never include the query string. `ResolveVanityURL` returns Steam's `message` text verbatim; that text is not passed through `redactBody`.
+Where it applies:
 
-Callers (`syncer`) also store error text in the database and logs, so this redaction is the only protection for those paths. Warnings saved by the syncer are checked in tests (see [syncer.md](syncer.md#tests)).
+- `redactURLError`: when `HTTPClient.Do` or `http.NewRequestWithContext` fails with a `*url.Error`, a copy is returned with its URL redacted. `Op` and `Err` are kept, so `errors.Is`/`errors.As` and `Timeout()` still see the cause. Other errors pass through unchanged.
+- `redactBody`: for non-retryable non-2xx responses, the trimmed body goes through `redactText`. Steam may echo the request URL in the body.
+- `ResolveVanityURL`: Steam's `message` text goes through `redactText`. The no-message fallback is a constant and never includes the typed name, so it needs no redaction.
+
+Identifiers are redacted in `redactText`, not only in URL errors, because bodies and Steam's messages can echo the request. Names, app IDs and timestamps are not matched by these patterns, so they stay. A vanity name is removed only where it is a `vanityurl` query value; a name echoed in other text is kept.
+
+`HTTPStatusError.Path` is the endpoint path without the query string. `EResultError`, the x-eresult error and the decode errors carry no request URL. A JSON decode error names the field and the type; for an out-of-range number it also quotes that number, which is not a profile field in any response the client decodes.
+
+Callers (`syncer`) also store error text in `sync_runs.error` and `profile_games.last_error` and write it to the log, so this redaction is the protection for those paths. Rows written before this redaction was in place keep whatever they stored. Tests: `TestRedactURLErrorIdentityParams`, `TestTransportErrorHidesIdentifiersAndKeepsCause`, `TestRedactBodyRemovesSteamID64` and `TestVanityFallbackDoesNotEchoTypedInput` in `client_test.go`. The syncer's `TestTransportFailureStoresNoSteamID64OrKeyInSyncText` checks the same redaction in `sync_runs.error` and `profile_games.last_error`.
 
 ## DLC detection
 

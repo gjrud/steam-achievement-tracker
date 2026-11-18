@@ -1,9 +1,6 @@
 # Frontend
 
-The frontend is a Svelte 5 single-page app built with Vite 8, in `frontend/`. It runs inside the
-Wails webview. It talks to the Go backend only through the generated bindings and the
-`sync:changed` event. Backend contracts are described in [app-service.md](app-service.md) and
-[architecture.md](architecture.md).
+The frontend is a Svelte 5 single-page app in `frontend/`, built with Vite 8. It runs inside the Wails webview and communicates with the Go backend only through generated bindings and the `sync:changed` event. Backend contracts are described in [app-service.md](app-service.md) and [architecture.md](architecture.md).
 
 ## Directory map
 
@@ -27,18 +24,17 @@ frontend/
   dist/                      production build, embedded by main.go (git-ignored)
 ```
 
-`App.svelte` is the only component that imports the generated bindings:
+`App.svelte` is the only component that imports generated bindings:
 
 ```js
 import {...} from '../bindings/github.com/gjrud/steam-achievement-tracker/app.js'
 ```
 
-Child components receive data and callbacks as props. `@wailsio/runtime` is imported directly in
-`App.svelte` (`Events`) and in `ApiKeyForm.svelte` (`Browser`).
+Child components receive data and callbacks through props. `@wailsio/runtime` is imported directly in `App.svelte` (`Events`) and in `ApiKeyForm.svelte` (`Browser`).
 
 ## Screens and routing
 
-`App.svelte` picks one screen from `state` (the last `GetAppState` result):
+`App.svelte` selects a screen from `state` (the most recent `GetAppState` result):
 
 | Condition (first match wins) | Screen |
 | --- | --- |
@@ -48,90 +44,55 @@ Child components receive data and callbacks as props. `@wailsio/runtime` is impo
 | `!state.profileExists` | `SetupView mode="profile"` (SteamID input, Validate, Save and sync, Replace key) |
 | otherwise | `DashboardShell` |
 
-Overlays on top of any screen: `ClearDataConfirmModal` (while `clearConfirmOpen`) and the game
-context menu (while `contextMenu` is set, rendered by `App.svelte` itself).
+Overlays can appear above any screen: `ClearDataConfirmModal` (while `clearConfirmOpen`) and the game context menu (while `contextMenu` is set; rendered by `App.svelte` itself).
 
 ## State model (App.svelte)
 
 ### State and the backend
 
-- `state` holds the `GetAppState` result. Fields used: `apiKeyPresent`, `apiKeyError`,
-  `profileExists`, `profile`, `dashboard`, `settings`, `syncInProgress`, `initError`, `logFile`,
-  `dataDir`, `cacheDir`, `logDir`.
+- `state` holds the `GetAppState` result. Fields used: `apiKeyPresent`, `apiKeyError`, `profileExists`, `profile`, `dashboard`, `settings`, `syncInProgress`, `initError`, `logFile`, `dataDir`, `cacheDir`, `logDir`.
 - `dashboard` holds `summary`, `suggestions`, `completed`, `warnings`, `disabled`, `latestSyncRun`.
-- Derived values use `$:`: `dashboard`, `latestSyncRun`, `syncIsRunning`, `summary`,
-  `completed`/`disabled` (sorted by title with `sortByTitle`; `suggestions` keeps the backend order), `warningGames`
-  (`syncWarning` set), tag filter counts and visible chips, `filtered*` lists, `viewFiltered`,
-  and `clearConfirmText` (the SteamID64, or the display name when there is no SteamID).
+- `$:` derives `dashboard`, `latestSyncRun`, `syncIsRunning`, `summary`, `completed`/`disabled` (sorted by title with `sortByTitle`; `suggestions` keeps the backend order), `warningGames` (`syncWarning` set), tag filter counts and visible chips, `filtered*` lists, `viewFiltered`, and `clearConfirmText` (the SteamID64, or the display name when there is no SteamID).
 
 ### Sync refresh (coalescing and events)
 
-- `onMount` subscribes to `sync:changed` with `Events.On(syncChangedEvent, requestRefresh)`
-  before the first read, so an event emitted during that read is not missed. The name is
-  `syncChangedEvent = 'sync:changed'`, and the backend uses the same string (checked by a test).
-- `requestRefresh` sets `refreshQueued` and calls `drainRefreshes`. A burst of events collapses
-  into one read.
-- `drainRefreshes` starts `refresh()` only when no read is in flight (`refreshing`), no action is
-  in flight (`busyActions === 0`), and a read is queued.
-- `refresh()` calls `GetAppState`. It discards a result if a newer request token exists (an action
-  took over) and re-queues the read. A successful read clears a failed-read banner
-  (`refreshError`).
-- Failed reads: if `isSyncing(state)` is true, `scheduleRetry()` arms one `setTimeout` for
-  `refreshRetryDelayMs = 2000`. The timer calls `requestRefresh`. Every call to `requestRefresh`, including each
-  `sync:changed` event, cancels the pending timer and starts an immediate read (once no read or action is in
-  flight). A successful read, or an action whose state is applied, also clears the timer. A failed action leaves
-  it armed. A failed read while the last applied state shows no sync schedules nothing. Otherwise the retry continues
-  until a read succeeds or an applied action replaces the state. The backend sync ending alone does not stop it,
-  because `isSyncing` checks the last applied state. Unmount clears it.
+- `onMount` subscribes to `sync:changed` with `Events.On(syncChangedEvent, requestRefresh)` before the first read, so an event emitted during that read is not missed. The name is `syncChangedEvent = 'sync:changed'`, and the backend uses the same string (checked by a test).
+- `requestRefresh` sets `refreshQueued` and calls `drainRefreshes`. A burst of events is coalesced into one read.
+- `drainRefreshes` starts `refresh()` only when no read is in flight (`refreshing`), no action is in flight (`busyActions === 0`), and a read is queued.
+- `refresh()` calls `GetAppState`. It discards a result if a newer request token exists (an action took over) and re-queues the read. A successful read clears a failed-read banner (`refreshError`).
+- Failed reads: when `isSyncing(state)` is true, `scheduleRetry()` arms one `setTimeout` for `refreshRetryDelayMs = 2000`. The timer calls `requestRefresh`. Every call to `requestRefresh`, including each `sync:changed` event, cancels the pending timer and starts an immediate read (once no read or action is in flight). A successful read, or an action whose state is applied, also clears the timer. A failed action leaves it armed. A failed read while the last applied state shows no sync schedules nothing. Otherwise the retry continues until a read succeeds or an applied action replaces the state. The backend sync ending alone does not stop it, because `isSyncing` checks the last applied state. Unmount clears it.
 - `isSyncing(s)` is true when `syncInProgress` is set or `latestSyncRun.status === 'running'`.
 
 ### Actions
 
-Every backend action uses `beginAction()` / `endAction()`:
+Each backend action uses `beginAction()` / `endAction()`:
 
-- `beginAction()` increments `busyActions`, clears `error` and `refreshError`, and takes a new
-  `stateRequestToken`. Any in-flight read is dropped.
-- `applyActionState(token, next)` stores the returned state only if the token is still current,
-  and clears the retry timer.
+- `beginAction()` increments `busyActions`, clears `error` and `refreshError`, and takes a new `stateRequestToken`. Any in-flight read is dropped.
+- `applyActionState(token, next)` stores the returned state only if the token is still current, and clears the retry timer.
 - `endAction()` decrements `busyActions` and calls `drainRefreshes()`.
 
-Actions: `retryKey` (`RetryAPIKey`), `validateProfile` (`ValidateProfile`, no begin/end: it only
-sets `validating` and `preview`), `saveProfile` (`SaveProfile`), `syncNow` (`SyncNow`),
-`saveLibrarySettings` (`SetLibrarySettings`), `confirmClearActiveUserData`
-(`ClearActiveUserData`), and `runGameAction` (`MarkGamePreviouslyCompleted`,
-`ToggleGameMissingAchievementsInDLC`, `DisableGame`, `EnableGame`).
+Actions: `retryKey` (`RetryAPIKey`), `validateProfile` (`ValidateProfile`, no begin/end: it only sets `validating` and `preview`), `saveProfile` (`SaveProfile`), `syncNow` (`SyncNow`), `saveLibrarySettings` (`SetLibrarySettings`), `confirmClearActiveUserData` (`ClearActiveUserData`), and `runGameAction` (`MarkGamePreviouslyCompleted`, `ToggleGameMissingAchievementsInDLC`, `DisableGame`, `EnableGame`).
 
-`saveApiKey` is the exception: it calls `SaveAPIKey` without `beginAction`, so the form, not the
-app banner, shows failures. On success it clears `preview`, drops the error banner, and calls
-`requestRefresh`. It throws on failure so the form can display the error.
+`saveApiKey` is the exception: it calls `SaveAPIKey` without `beginAction`, so the form, not the app banner, shows failures. On success it clears `preview`, drops the error banner, and calls `requestRefresh`. It throws on failure so the form can display the error.
 
-On a failed clear-data call the app re-reads state, because the backend may already have deleted
-the key before the failing step.
+On a failed clear-data call the app re-reads state, because the backend may already have deleted the key before the failing step.
 
 ### Errors
 
-- `error` is the single banner string shown in `DashboardShell` (`.error-banner`, `aria-live`
-  polite) and in the setup screens.
-- `refreshError` marks whether `error` came from a failed state read. Only such an error is
-  cleared by a later successful read. An action error survives event-driven reads until the next
-  action succeeds (test: `keeps an action error through event reads until a later action succeeds`).
+- `error` is the single banner string shown in `DashboardShell` (`.error-banner`, `aria-live` polite) and in the setup screens.
+- `refreshError` marks whether `error` came from a failed state read. Only such an error is cleared by a later successful read. An action error survives event-driven reads until the next action succeeds (test: `keeps an action error through event reads until a later action succeeds`).
 - `formatMessage(err)` (in `format.js`) turns any rejection into text.
 
 ### Other interaction
 
-- Global keydown (`handleGlobalKeydown`): Escape closes the context menu and the clear-data
-  modal. In the list views (`suggestions`, `completed`, `warnings`, `disabled`), a printable key
-  pressed outside a field or an interactive element focuses the view search box and appends the
-  key.
-- Context menu (`openGameMenu`): positioned at the pointer, then clamped to the viewport by
-  `positionGameMenu` (12 px margin). The menu is `visibility: hidden` until positioned.
-- Clear-data confirmation: `confirmClearActiveUserData` runs only when the typed text equals
-  `clearConfirmText`. Switch values are passed as `ClearActiveUserData(deleteProfileData, deleteAPIKey)`.
+- Global keydown (`handleGlobalKeydown`): Escape closes the context menu and the clear-data modal. In the list views (`suggestions`, `completed`, `warnings`, `disabled`), a printable key pressed outside a field or an interactive element focuses the view search box and appends the key.
+- Context menu (`openGameMenu`): positioned at the pointer, then clamped to the viewport by `positionGameMenu` (12 px margin). The menu is `visibility: hidden` until positioned.
+- Clear-data confirmation: `confirmClearActiveUserData` runs only when the typed text equals `clearConfirmText`. Switch values are passed as `ClearActiveUserData(deleteProfileData, deleteAPIKey)`.
 - Tab change (`changeView`) resets the tag filter.
 
 ## lib/ modules
 
-Pure functions. The modules import only from each other. Each has an exported list below.
+These modules contain pure functions and import only from one another. Their exports are listed below.
 
 | Module | Exports | Purpose |
 | --- | --- | --- |
@@ -142,13 +103,11 @@ Pure functions. The modules import only from each other. Each has an exported li
 | `sync.js` | `syncBand` | Describes the profile card's sync band: `tone`, `icon`, `headline`, `detail`, `time`, and the screen-reader `announce`. Covers running, starting, no run, success, partial, failed, canceled and unknown statuses. |
 | `disabled.js` | `showDisabledReasonLabel` | Returns the "Disabled" badge label. |
 
-`tagTone` values are `success`, `info`, `accent`, `warn`, `danger` and `neutral`. `toneClass`
-prefixes them with `tone-`.
+`tagTone` returns `success`, `info`, `accent`, `warn`, `danger` or `neutral`. `toneClass` adds the `tone-` prefix.
 
 ### Sync band wording
 
-`syncBand` (`lib/sync.js`) builds the profile card's band from the latest run. The user guide describes the states in
-plain words. These are the strings the code produces:
+`syncBand` (`lib/sync.js`) builds the profile card's band from the latest run. The user guide describes these states in plain language; the table lists the strings produced by the code:
 
 | Run state | Icon | Headline | Second line |
 | --- | --- | --- | --- |
@@ -162,27 +121,17 @@ plain words. These are the strings the code produces:
 | `canceled` | stop | `Sync canceled` | `X / Y games synced` |
 | Any other status | stop | The status text, or `Unknown` | `X / Y games synced` |
 
-`countsOf` (`lib/sync.js`) returns an empty string whenever the run's total is 0, for every finished state, not only
-`success`. The counts part of the second line is then omitted, and the band shows the headline and time only.
+`countsOf` (`lib/sync.js`) returns an empty string whenever the run's total is 0. This applies to every finished state, not only `success`. The counts part of the second line is then omitted, and the band shows the headline and time only.
 
-Time: a finished run is dated by `finishedAt` (or `startedAt` when that is missing); a running run by `startedAt`. An
-unparseable or missing time gives no time text. `formatRelativeTime` (`lib/format.js`) reads `just now` under a minute,
-`N min ago` under an hour, `1 hour ago` or `N hours ago` under a day, and `1 day ago` or `N days ago` under seven days.
-From seven days on it shows the absolute date and time from `formatDateTime`. `ProfileCard.svelte` also sets that
-absolute time as the hover title and re-evaluates the relative text every 30 s. Its live region changes only on a state
-transition, never with counts or time.
+Time: a finished run is dated by `finishedAt` (or `startedAt` when that is missing); a running run by `startedAt`. An unparseable or missing time gives no time text. `formatRelativeTime` (`lib/format.js`) reads `just now` under a minute, `N min ago` under an hour, `1 hour ago` or `N hours ago` under a day, and `1 day ago` or `N days ago` under seven days. From seven days on it shows the absolute date and time from `formatDateTime`. `ProfileCard.svelte` also sets that absolute time as the hover title and re-evaluates the relative text every 30 s. Its live region changes only on a state transition, never with counts or time.
 
 ### Dashboard counters
 
-`SummaryStats.svelte` shows three groups: **Library** (`All games`, `Purchased`), **Completed** (`Completed games`,
-`Completed sets`) and **Unlocked** (`Achievements`). A completed counter shows `vetted (total)` only when some counted
-entries are unvetted. Its hover title and screen-reader text say `N vetted of M total`. The header stacks below 1180 px
-(`@media (max-width: 1180px)` in `app.css`).
+`SummaryStats.svelte` displays three groups: **Library** (`All games`, `Purchased`), **Completed** (`Completed games`, `Completed sets`) and **Unlocked** (`Achievements`). A completed counter shows `vetted (total)` only when some counted entries are unvetted. Its hover title and screen-reader text say `N vetted of M total`. The header stacks below 1180 px (`@media (max-width: 1180px)` in `app.css`).
 
 ### Tag order and labels
 
-`lib/tag.js` keeps the chip order in `suggestionTagOptions`. Cards and filter chips sort their tags by that list, with
-`completed` first. Unknown tags come last in their stored order. The labels come from `tagLabel`:
+`lib/tag.js` defines chip order in `suggestionTagOptions`. Cards and filter chips sort tags by that list, with `completed` first. Unknown tags come last in their stored order. The labels come from `tagLabel`:
 
 | Key | Label |
 | --- | --- |
@@ -200,9 +149,7 @@ entries are unvetted. Its hover title and screen-reader text say `N vetted of M 
 | `sync_warning` | Sync error |
 | `completed` | Completed (first on completed cards, not in the chip list) |
 
-`gameTags` hides `new_achievements_added` and `missing_achievements_in_dlc` on completed cards, even when a stored tag
-is present. The backend's own read order differs (see [repository.md](repository.md)); the frontend order is the one
-users see.
+`gameTags` hides `new_achievements_added` and `missing_achievements_in_dlc` on completed cards, even when a stored tag is present. The backend's own read order differs (see [repository.md](repository.md)); the frontend order is the one users see.
 
 ## Components (lib/components)
 
@@ -222,18 +169,11 @@ users see.
 
 ### Svelte syntax
 
-The components use the legacy (non-runes) Svelte syntax: `export let` props, `$:` reactive
-statements, `on:` event directives, `<slot>` for item rendering, and `<script context="module">`
-for shared constants. Follow that style when adding or changing a component so the code stays
-consistent. `SummaryStats.svelte` is the only component that uses `{#snippet}` and `{@render}`.
-Do not copy that pattern into other components on its own; it would need a decision for the whole
-frontend.
+The components use legacy (non-runes) Svelte syntax: `export let` props, `$:` reactive statements, `on:` event directives, `<slot>` for item rendering, and `<script context="module">` for shared constants. Follow that style when adding or changing a component so the code stays consistent. `SummaryStats.svelte` is the only component that uses `{#snippet}` and `{@render}`. Do not copy that pattern into other components on its own; it would need a decision for the whole frontend.
 
 ## Incremental card grid
 
-`IncrementalGrid.svelte` keeps the DOM small for large libraries. Constants are declared in a
-`<script context="module">` block so tests can import them. Only the Not completed and Completed tabs use it
-(`DashboardShell.svelte`); `SyncErrorsView` and `DisabledView` render every row.
+`IncrementalGrid.svelte` limits DOM size for large libraries. Constants are declared in a `<script context="module">` block so tests can import them. Only the Not completed and Completed tabs use it (`DashboardShell.svelte`); `SyncErrorsView` and `DisabledView` render every row.
 
 | Constant | Value | Meaning |
 | --- | --- | --- |
@@ -244,53 +184,36 @@ frontend.
 
 Behavior:
 
-- `limit` starts at `INITIAL`. `resetKey` (trimmed search text plus tag filter) resets it. Other
-  refreshes keep the grown limit. Switching tabs remounts the grid, so it also starts at `INITIAL`.
+- `limit` starts at `INITIAL`. `resetKey` (trimmed search text plus tag filter) resets it. Other refreshes keep the grown limit. Switching tabs remounts the grid, so it also starts at `INITIAL`.
 - The `{#each}` renders `items.slice(0, limit)` and uses `entryKey` as the key.
-- A "Show more (shown of total)" button and a spacer sit after the grid. The spacer's height
-  reserves the space of unmounted rows so the document keeps its full height. It is computed from
-  the average row pitch (row height plus row gap) and the column count from
-  `getComputedStyle(...).gridTemplateColumns`.
-- An `IntersectionObserver` watches the button box. On intersection, `grow(viewportBatch())`
-  adds enough rows to clear the viewport plus the margin. If the box is already within that reach,
-  the whole remainder loads. The observer is re-armed after each growth so growth continues while
-  the box stays visible.
+- A "Show more (shown of total)" button and a spacer sit after the grid. The spacer's height reserves the space of unmounted rows so the document keeps its full height. It is computed from the average row pitch (row height plus row gap) and the column count from `getComputedStyle(...).gridTemplateColumns`.
+- An `IntersectionObserver` watches the button box. On intersection, `grow(viewportBatch())` adds enough rows to clear the viewport plus the margin. If the box is already within that reach, the whole remainder loads. The observer is re-armed after each growth so growth continues while the box stays visible.
 - A `ResizeObserver` re-measures on width changes.
-- Without an `IntersectionObserver` (jsdom), only the button grows the list, by one `STEP`. Without a
-  usable layout, observer hits and button clicks both add one `STEP`.
-- Focus: when the button itself had focus and the list is complete, focus moves to the first
-  newly revealed card with `preventScroll`, so the page does not jump.
+- Without an `IntersectionObserver` (jsdom), only the button grows the list, by one `STEP`. Without a usable layout, observer hits and button clicks both add one `STEP`.
+- Focus: when the button itself had focus and the list is complete, focus moves to the first newly revealed card with `preventScroll`, so the page does not jump.
 
 ## Styling
 
-- `style.css`: base rules (html and body colors, font stack, `box-sizing`, form controls inherit
-  font, selection color). It is the first import.
-- `app.css`: all component classes (`game-card`, `profile-card`, `tab`, `banner`, `context-menu`,
-  `confirm-modal`, etc.). The CSS is global, so class names must stay unique across components.
-  `.sr-only` is defined here and used for screen-reader-only text.
+- `style.css`: base rules (html and body colors, font stack, `box-sizing`, form controls inherit font, selection color). It is the first import.
+- `app.css`: all component classes (`game-card`, `profile-card`, `tab`, `banner`, `context-menu`, `confirm-modal`, etc.). The CSS is global, so class names must stay unique across components. `.sr-only` is defined here and used for screen-reader-only text.
 - Tone classes (`tone-success`, `tone-warn`, and so on) come from `toneClass`.
 
 ## Error banners
 
-Four kinds of message reach the user:
+Four kinds of messages can reach the user:
 
 1. Startup error: `state.initError` on the startup-error screen.
 2. Keyring error: `state.apiKeyError` on the missing-key screen.
-3. Action or read error: `error` in `DashboardShell` (`.error-banner`). It is cleared by the next
-   action and by a successful read when it came from a read.
+3. Action or read error: `error` in `DashboardShell` (`.error-banner`). It is cleared by the next action and by a successful read when it came from a read.
 4. Form errors: `ApiKeyForm` (`role="alert"`) and `SetupView` (`.error-text`).
 
 ## Build and dev server (vite.config.js)
 
 - Plugin: `@sveltejs/vite-plugin-svelte`.
-- Dev server: host `127.0.0.1`, port `WAILS_VITE_PORT` or 9245, `strictPort`. The Taskfile passes
-  `--port` and `--strictPort` as well.
-- Scripts (`package.json`): `dev` (vite), `build` (`vite build`), `build:dev`
-  (non-minified, development mode), `test` (`vitest run`), `preview`.
-- `build:frontend` in `build/Taskfile.yml` sets `PRODUCTION=true` (or `false` for dev) and runs
-  `build` or `build:dev`. It depends on `generate:bindings`.
-- Output is `frontend/dist/`. `main.go` embeds `all:frontend/dist`. CI creates a placeholder
-  `dist` before generating bindings, because the Go build needs the directory.
+- Dev server: host `127.0.0.1`, port `WAILS_VITE_PORT` or 9245, `strictPort`. The Taskfile passes `--port` and `--strictPort` as well.
+- Scripts (`package.json`): `dev` (vite), `build` (`vite build`), `build:dev` (non-minified, development mode), `test` (`vitest run`), `preview`.
+- `build:frontend` in `build/Taskfile.yml` sets `PRODUCTION=true` (or `false` for dev) and runs `build` or `build:dev`. It depends on `generate:bindings`.
+- Output is `frontend/dist/`. `main.go` embeds `all:frontend/dist`. CI creates a placeholder `dist` before generating bindings, because the Go build needs the directory.
 - Wails' `/game-covers/...` route is served by `CoverService`, not Vite (see [covers.md](covers.md)).
 
 ## Test setup (frontend/src/test)
@@ -303,22 +226,17 @@ Four kinds of message reach the user:
 | `app-fixtures.js` | State builders (`baseState`, `dashboardState`, `missingKeyState`, `profileSetupState`, `game`, `manyGames`, `syncRun`, `syncingState`, `finishedState`), `emitSyncChanged`, `settle`, `advance` (fake-timer helpers), `rejecting`, and click helpers. |
 | `wails-bindings.test.js` | Drift checks; see below. |
 
-The test alias (`vite.config.js`, mode `test` only) maps `../bindings/.../app.js` to
-`wails-app-mock.js` and `@wailsio/runtime` to `wails-runtime-mock.js`. Test mode also sets the
-`browser` resolve condition, and jsdom is the environment.
+The test alias (`vite.config.js`, mode `test` only) maps `../bindings/.../app.js` to `wails-app-mock.js` and `@wailsio/runtime` to `wails-runtime-mock.js`. Test mode also sets the `browser` resolve condition, and jsdom is the environment.
 
 Drift checks (`wails-bindings.test.js`):
 
-- Every mock export exists in the generated bindings with the same argument count, and the mock
-  uses no rest parameters.
+- Every mock export exists in the generated bindings with the same argument count, and the mock uses no rest parameters.
 - Every generated binding has a mock.
 - Every name `App.svelte` imports exists in the generated bindings.
 - `syncChangedEvent` in `app.go` equals the one in `App.svelte`.
-- When `CI` is `1` or `true`, a missing `frontend/bindings` fails the suite. Locally, the
-  generated-bindings tests are skipped.
+- When `CI` is `1` or `true`, a missing `frontend/bindings` fails the suite. Locally, the generated-bindings tests are skipped.
 
-When a backend binding changes: run `wails3 generate bindings`, then update
-`wails-app-mock.js` to match.
+When a backend binding changes: run `wails3 generate bindings`, then update `wails-app-mock.js` to match.
 
 ## Test suites
 
@@ -331,16 +249,11 @@ When a backend binding changes: run `wails3 generate bindings`, then update
 | `lib/components/*.test.js` | `ApiKeyForm`, `ClearDataConfirmModal`, `ProfileCard`, `SettingsView`, `SummaryStats`. |
 | `test/wails-bindings.test.js` | Drift checks above. |
 
-`filter.js`, `game.js` and `disabled.js` have no direct test file; they are exercised through the
-App and component tests. Fake timers are used in `App.sync.test.js` and `ProfileCard.test.js`.
-Under fake timers, use `settle()` and `advance()` from `app-fixtures.js` rather than `waitFor`.
+`filter.js`, `game.js` and `disabled.js` have no direct test file; they are exercised through the App and component tests. Fake timers are used in `App.sync.test.js` and `ProfileCard.test.js`. Under fake timers, use `settle()` and `advance()` from `app-fixtures.js` rather than `waitFor`.
 
-Run with `cd frontend && npm test` (`vitest run`). Build and test are both run in CI
-(see [build-and-release.md](build-and-release.md) and [testing.md](testing.md)).
+Run with `cd frontend && npm test` (`vitest run`). Build and test are both run in CI (see [build-and-release.md](build-and-release.md) and [testing.md](testing.md)).
 
 ## Tooling notes
 
-- There is no ESLint, Prettier or typecheck script. `jsconfig.json` holds editor settings only
-  (`checkJs` and other compiler options) for editor feedback.
-- Dependencies: Svelte 5, Vite 8, vitest 5, jsdom 31, `@testing-library/svelte` 5, `@testing-library/user-event`,
-  and `@wailsio/runtime` 3.1.0 (pinned exactly, to match the Wails CLI).
+- There is no ESLint, Prettier or typecheck script. `jsconfig.json` holds editor settings only (`checkJs` and other compiler options) for editor feedback.
+- Dependencies: Svelte 5, Vite 8, vitest 5, jsdom 31, `@testing-library/svelte` 5, `@testing-library/user-event`, and `@wailsio/runtime` 3.1.0 (pinned exactly, to match the Wails CLI).

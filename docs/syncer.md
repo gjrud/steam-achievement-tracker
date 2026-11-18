@@ -1,8 +1,8 @@
 # Syncer (`internal/syncer`)
 
-The syncer runs one full sync for one profile: it loads the library from Steam, refreshes every syncable game's achievement sets, writes the results through the repository, refreshes covers, and records the run's status. Source: `internal/syncer/syncer.go`. Tests: `internal/syncer/*_test.go`.
+The syncer runs one full sync for a profile: it loads the profile's library from Steam, refreshes each syncable game's achievement sets, writes results through the repository, refreshes covers, and records the run status. Source: `internal/syncer/syncer.go`. Tests: `internal/syncer/*_test.go`.
 
-The syncer does not own goroutines or cancellation. `app.go` (`startSync`) creates the context, starts `FullSync` in a goroutine, and wires notifications. See [app-service.md](app-service.md). Data it reads and writes goes through `internal/repository` (see [repository.md](repository.md) and [database.md](database.md)). Steam requests go through `internal/steam` (see [steam-client.md](steam-client.md)). Cover files go through `internal/images` (see [covers.md](covers.md)).
+The syncer does not own goroutines or cancellation. `app.go` (`startSync`) creates the context, starts `FullSync` in a goroutine, and wires notifications. See [app-service.md](app-service.md). The syncer's database reads and writes go through `internal/repository` (see [repository.md](repository.md) and [database.md](database.md)). Steam requests go through `internal/steam` (see [steam-client.md](steam-client.md)). Cover files go through `internal/images` (see [covers.md](covers.md)).
 
 ## Public API
 
@@ -25,7 +25,7 @@ type Result struct {
 func (s *Service) FullSync(ctx context.Context, profile repository.Profile) (Result, error)
 ```
 
-`FullSync` returns `(Result, error)`. The error is non-nil only for a failed run (or a failure to start one, see below); a partial run returns a nil error. The run row is written either way.
+`FullSync` returns `(Result, error)`. The error is non-nil only when the run fails (or cannot start; see below); a partial run returns a nil error. The run row is written either way.
 
 Everything else in the file is unexported. Exported values from other packages used here: `repository.Profile`, `steam.OwnedGame`, `steam.Client` methods, `images.Cache` methods.
 
@@ -89,7 +89,7 @@ sequenceDiagram
     Sy-->>App: OnChange
 ```
 
-Steps in `FullSync`:
+`FullSync` steps:
 
 1. `Repo.StartSyncRun` inserts a `sync_runs` row with status `running`. On error, `FullSync` returns immediately: no row, no `OnChange`, no status.
 2. `OnChange` is called once the row exists.
@@ -101,7 +101,7 @@ Steps in `FullSync`:
 
 Failure of the whole run goes through `fail(err)`: status `failed`, error text from `err`, then `finish`.
 
-`GamesTotal` reaches the row through `UpdateSyncRunProgress`, which runs after each game finishes, and through `FinishSyncRun`. So `games_total` stays 0 while the first game is in progress and is only visible after that. A run with no syncable games, or one that fails before any game finishes, gets its total only from `FinishSyncRun`.
+`GamesTotal` reaches the row through `UpdateSyncRunProgress`, called after each game finishes, and through `FinishSyncRun`. Thus, `games_total` remains 0 while the first game is in progress and becomes visible only afterward. A run with no syncable games, or one that fails before any game finishes, gets its total only from `FinishSyncRun`.
 
 ## Run statuses
 
@@ -279,7 +279,7 @@ The URL rules, the capsule chain and the freshness intervals are in [covers.md](
 
 ## Surprising behaviour
 
-Points a maintainer should know. They follow from the code as written.
+Maintainers should know about these quirks in the current implementation.
 
 - **An empty achievement schema wipes the game's entries.** `GetGameAchievements` with an `x-eresult` of 1 (or no header) and a body without achievements, such as `{"response":{}}`, is decoded as "no achievements". `syncGame` then takes the `saveGameWithoutAchievements` path, which deletes this profile's unlock rows for the game (`profile_achievements`), deletes the shared `achievements` rows of the game only where no profile references them, and deletes all of the game's entries except group 0. No warning is recorded. The same holds for an empty 2xx body. `GetOwnedGames` guards against this, `GetGameAchievements` does not.
 - **An unusable user-achievement response reads as zero progress.** `GetUserAchievements` with `{"response":{}}` (EResult 1 or 42) returns no unlocks. Entries are then written with 0 unlocked achievements and are not warned.

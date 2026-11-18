@@ -8,9 +8,7 @@ Only the latest commit on `main` is supported. Fixes are not backported.
 
 Please do **not** open a public issue for security problems.
 
-Report privately through GitHub:
-[Report a vulnerability](https://github.com/gjrud/steam-achievement-tracker/security/advisories/new)
-(repository **Security** tab → **Report a vulnerability**).
+Report privately through GitHub: [Report a vulnerability](https://github.com/gjrud/steam-achievement-tracker/security/advisories/new) (repository **Security** tab → **Report a vulnerability**).
 
 Include:
 

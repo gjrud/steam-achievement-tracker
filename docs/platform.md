@@ -1,8 +1,6 @@
 # Platform packages
 
-Small cross-cutting Go packages used by the backend. They have no dependency on app
-logic. Other docs cover the packages built on top of them: [architecture.md](architecture.md),
-[app-service.md](app-service.md), [database.md](database.md), [covers.md](covers.md).
+Small, cross-cutting Go packages used by the backend. They do not depend on app logic. Other docs describe packages built on top of them: [architecture.md](architecture.md), [app-service.md](app-service.md), [database.md](database.md), [covers.md](covers.md).
 
 | Package | Purpose |
 | --- | --- |
@@ -12,10 +10,11 @@ logic. Other docs cover the packages built on top of them: [architecture.md](arc
 | `internal/keyring` | Stores, reads and deletes the Steam Web API key in the OS keyring. |
 | `internal/logging` | Process-wide `log` output to a rotating file, with a stderr fallback. |
 | `internal/fsretry` | `Rename`, `Remove`, `RemoveAll` that retry transient Windows file-lock errors. |
+| `internal/redact` | `Paths`: reduces file paths in `fs.PathError` and `os.LinkError` to base names before an error reaches a log or the UI. |
 
 ## internal/config
 
-Holds constants only. No behavior and no tests.
+Contains constants only; it has no behavior or tests.
 
 | Name | Value | Used for |
 | --- | --- | --- |
@@ -25,10 +24,7 @@ Holds constants only. No behavior and no tests.
 | `DBFileName` | `steam-achievement-tracker.db` | SQLite file name inside the data directory. |
 | `KeyringUser` | `steam-web-api-key` | Keyring user (account) name for the API key. |
 
-Gotcha: `config.AppID` is not the reverse-DNS application id. The Wayland app id and
-desktop file name use `io.github.gjrud.steam-achievement-tracker` (`ApplicationID` in
-`main.go`, `APP_ID` in `build/linux/Taskfile.yml`). Do not mix them: the keyring service
-and directory names must stay `steam-achievement-tracker`.
+Note: `config.AppID` is not the reverse-DNS application id. The Wayland app id and desktop file name use `io.github.gjrud.steam-achievement-tracker` (`ApplicationID` in `main.go`, `APP_ID` in `build/linux/Taskfile.yml`). Do not mix them: the keyring service and directory names must stay `steam-achievement-tracker`.
 
 ## internal/appdata
 
@@ -42,7 +38,7 @@ and directory names must stay `steam-achievement-tracker`.
 
 ### Path layout
 
-`xdg` (`github.com/adrg/xdg`) supplies the base directories. `config.AppDirName` is appended.
+`xdg` (`github.com/adrg/xdg`) provides the base directories. `config.AppDirName` is appended to each.
 
 | Path | Linux | Windows |
 | --- | --- | --- |
@@ -54,20 +50,16 @@ and directory names must stay `steam-achievement-tracker`.
 | `Logs` / `LogFile` | `StateDir/logs`, `StateDir/logs/app.log` | `StateDir\logs`, `StateDir\logs\app.log` |
 | `DB` | `DataDir/steam-achievement-tracker.db` | `DataDir\steam-achievement-tracker.db` |
 
-`XDG_DATA_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME` override the base directories on
-both OSes (the `xdg` library reads them on Windows too).
+`XDG_DATA_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME` override the base directories on both OSes (the `xdg` library reads them on Windows too).
 
 The WebView2 profile lives under `CacheDir/webview`; `main.go` creates it on Windows only.
 
 ### Behavior
 
-- `Resolve` is pure. It reads the `xdg` variables as they were when `xdg` last loaded.
-  Call `xdg.Reload` after changing them. Tests do this through `appdatatest`.
+- `Resolve` is pure: it reads the `xdg` variables as they were at the last `xdg` load. Call `xdg.Reload` after changing them. Tests reload through `appdatatest`.
 - `Ensure` is idempotent. Re-running it tightens existing directories to `0700`.
 - `Ensure` fails when a path component is a regular file (`MkdirAll` error).
-- Production call order in `App.ensureInitialized` (`app.go`): `appdata.Resolve()` ->
-  `appdata.Ensure(paths)` -> `logging.Init(paths.LogFile)` -> database open. If `Ensure` fails,
-  `logging.Fallback()` runs and the init error is shown on the startup-error screen.
+- Production call order in `App.ensureInitialized` (`app.go`): `appdata.Resolve()` -> `appdata.Ensure(paths)` -> `logging.Init(paths.LogFile)` -> database open. If `Ensure` fails, `logging.Fallback()` runs and the init error is shown on the startup-error screen.
 
 ### appdatatest (tests only)
 
@@ -80,15 +72,12 @@ The WebView2 profile lives under `CacheDir/webview`; `main.go` creates it on Win
 Gotchas:
 
 - Do not isolate with `HOME`. On Windows `appdata.Resolve` does not use `HOME`.
-- Cleanup order matters: `set` registers `xdg.Reload` before `t.Setenv`, so it runs after the
-  variables are restored (Go cleanups run last-in first-out).
-- Tests that use `Isolate` or `Block` must not call `t.Parallel`, because they change process
-  environment variables.
+- Cleanup order matters: `set` registers `xdg.Reload` before `t.Setenv`, so it runs after the variables are restored (Go cleanups run last-in first-out).
+- Tests that use `Isolate` or `Block` must not call `t.Parallel`, because they change process environment variables.
 
 ## Files on disk
 
-Every file the app writes, and the code that creates it. `<data>`, `<cache>` and `<state>` are the three roots from the
-path layout above.
+The table lists every file the app writes and the code that creates it. `<data>`, `<cache>` and `<state>` are the three roots in the path layout above.
 
 | Path | Created by | Purpose |
 | --- | --- | --- |
@@ -105,20 +94,13 @@ path layout above.
 | `<state>/logs/app.log` | `logging.Init` | Current log: app messages plus Wails warnings and errors. |
 | `<state>/logs/app-*.log` | Log rotation (lumberjack) | Rotated logs. Each up to 5 MB, with up to 5 backups kept. |
 
-The Steam Web API key is not a file. It is one keyring item outside the app folders: Secret Service with
-`service=steam-achievement-tracker`, `username=steam-web-api-key` on Linux, and a Credential Manager generic credential
-named `steam-achievement-tracker:steam-web-api-key` on Windows. `keyring.SetSteamAPIKey` writes it when the user saves the
-key, and only `ClearActiveUserData(_, true)` deletes it (see [app-service.md](app-service.md)).
+The Steam Web API key is not a file. It is one keyring item outside the app folders: Secret Service with `service=steam-achievement-tracker`, `username=steam-web-api-key` on Linux, and a Credential Manager generic credential named `steam-achievement-tracker:steam-web-api-key` on Windows. `keyring.SetSteamAPIKey` writes it when the user saves the key, and only `ClearActiveUserData(_, true)` deletes it (see [app-service.md](app-service.md)).
 
-Deleting the cache folder is safe. The next sync downloads the covers again. The `cover_images` rows then point at missing
-files, and `NeedsRefresh` treats a missing file as stale (see [covers.md](covers.md)).
+Deleting the cache folder is safe. The next sync downloads the covers again. The `cover_images` rows then point at missing files, and `NeedsRefresh` treats a missing file as stale (see [covers.md](covers.md)).
 
 ## internal/keyring
 
-Stores the Steam Web API key only in the OS keyring, through `github.com/zalando/go-keyring`:
-Secret Service on Linux, Windows Credential Manager on Windows (go-keyring also
-supports macOS, which this project does not target). No environment-variable or plaintext
-fallback exists.
+Stores the Steam Web API key exclusively in the OS keyring via `github.com/zalando/go-keyring`: Secret Service on Linux, Windows Credential Manager on Windows (go-keyring also supports macOS, which this project does not target). No environment-variable or plaintext fallback exists.
 
 ### Exported API
 
@@ -135,41 +117,28 @@ Storage identity:
 
 - Service: `config.AppID` (`steam-achievement-tracker`).
 - User: `config.KeyringUser` (`steam-web-api-key`).
-- On Windows, go-keyring builds the generic credential target `service + ":" + user`, that is
-  `steam-achievement-tracker:steam-web-api-key` (verified in go-keyring v0.2.8 source).
+- On Windows, go-keyring builds the generic credential target `service + ":" + user`, that is `steam-achievement-tracker:steam-web-api-key` (verified in go-keyring v0.2.8 source).
 
 ### Behavior
 
-- Read path (`GetSteamAPIKey`) is called at startup and by actions that need the key (`app.go`).
-  `ErrMissing` leads to the missing-key screen. Another read error is kept as `apiKeyError` in
-  app state and shown on that same screen (`SetupView.svelte`).
+- Read path (`GetSteamAPIKey`) is called at startup and by actions that need the key (`app.go`). `ErrMissing` leads to the missing-key screen. Another read error is kept as `apiKeyError` in app state and shown on that same screen (`SetupView.svelte`).
 - Write path (`SetSteamAPIKey`) returns the trimmed key. Callers never log it.
-- Error text never contains the key. Tests check this for set and delete
-  (`TestSetSteamAPIKeyErrorsNeverContainTheKey`, `TestDeleteSteamAPIKeyErrorNeverContainsKey`).
+- Error text never contains the key. Tests check this for set and delete (`TestSetSteamAPIKeyErrorsNeverContainTheKey`, `TestDeleteSteamAPIKeyErrorNeverContainsKey`).
 
 ### Test seams and mock backend
 
-- Package variables `zkSet`, `zkGet`, `zkDelete` wrap the go-keyring calls so tests can
-  simulate a silent non-store (read-back mismatch) or a failing backend.
-- `GetSteamAPIKey` calls `zk.Get` directly, not through the `zkGet` seam. Read-path backend
-  errors are tested with the go-keyring mock instead (`TestGetSteamAPIKeyPassesThroughBackendErrors`).
-- Tests use go-keyring's in-memory provider: `zk.MockInit()` (values survive across calls in one
-  test) and `zk.MockInitWithError(err)` (every call fails). Tests that swap seams must not run in
-  parallel and restore the originals with `t.Cleanup`.
+- Package variables `zkSet`, `zkGet`, `zkDelete` wrap the go-keyring calls so tests can simulate a silent non-store (read-back mismatch) or a failing backend.
+- `GetSteamAPIKey` calls `zk.Get` directly, not through the `zkGet` seam. Read-path backend errors are tested with the go-keyring mock instead (`TestGetSteamAPIKeyPassesThroughBackendErrors`).
+- Tests use go-keyring's in-memory provider: `zk.MockInit()` (values survive across calls in one test) and `zk.MockInitWithError(err)` (every call fails). Tests that swap seams must not run in parallel and restore the originals with `t.Cleanup`.
 
 Gotchas:
 
-- go-keyring's Windows backend rejects values longer than 2560 bytes (`ErrSetDataTooBig`).
-  `SetSteamAPIKey` does not pre-check length; the error comes back wrapped as
-  `store api key: ...`. Steam keys are far shorter.
-- `SetSteamAPIKey` only verifies by read-back. On Linux, a dismissed unlock or create prompt in
-  Secret Service is ignored silently by go-keyring, which is why `ErrNotStored` exists. Windows
-  Credential Manager shows no prompt.
+- go-keyring's Windows backend rejects values longer than 2560 bytes (`ErrSetDataTooBig`). `SetSteamAPIKey` does not pre-check length; the error comes back wrapped as `store api key: ...`. Steam keys are far shorter.
+- `SetSteamAPIKey` only verifies by read-back. On Linux, a dismissed unlock or create prompt in Secret Service is ignored silently by go-keyring, which is why `ErrNotStored` exists. Windows Credential Manager shows no prompt.
 
 ## internal/logging
 
-Routes the standard `log` package to a rotating file. Before `Init` and after `Fallback`, output
-goes to stderr.
+Routes the standard `log` package to a rotating file. Output goes to stderr before `Init` and after `Fallback`.
 
 ### Exported API
 
@@ -182,32 +151,21 @@ goes to stderr.
 ### Behavior
 
 - `init()` calls `log.SetOutput(Writer())` once. Output is never re-pointed under the lock.
-- All writes take a package mutex, so a write cannot reach a closed file, and `Init` or
-  `Fallback` cannot race a write.
-- Rotation (from `lumberjack`): `MaxSize: 5` (MB), `MaxBackups: 5`, `Compress: false`.
-  `MaxAge` is unset, so old backups are kept until the count limit removes them. Rotated files
-  keep the mode of the file they replace (lumberjack copies it).
-- Log flags: `LstdFlags | Lmicroseconds | Lshortfile`, set by `Init`. Output is therefore
-  `date time.micro file:line: message`.
+- All writes take a package mutex, so a write cannot reach a closed file, and `Init` or `Fallback` cannot race a write.
+- Rotation (from `lumberjack`): `MaxSize: 5` (MB), `MaxBackups: 5`, `Compress: false`. `MaxAge` is unset, so old backups are kept until the count limit removes them. Rotated files keep the mode of the file they replace (lumberjack copies it).
+- Log flags: `LstdFlags | Lmicroseconds | Lshortfile`, set by `Init`. Output is therefore `date time.micro file:line: message`.
 - File permissions: directory `0700` and file `0600` on POSIX. Windows ignores POSIX bits.
-- `wailslog.go` forwards Wails' logger to `Writer()`, and `App.ensureInitialized` calls `Init`.
-  See [app-service.md](app-service.md).
+- `wailslog.go` forwards Wails' logger to `Writer()`, and `App.ensureInitialized` calls `Init`. See [app-service.md](app-service.md).
 
 Gotchas:
 
-- Windows: an open log file blocks removal of its directory. This is why `Init` and `Fallback`
-  close the previous logger. Any test that removes a log directory must call `Fallback` first.
-  `TestFallbackReleasesLogFile` and `TestInitClosesPreviousLogFile` check this.
-- `Init` ignores errors from `MkdirAll`, `OpenFile` and `Chmod`. If the file cannot be created,
-  logging falls back to nothing visible: `lumberjack` retries on write, and the `log` package
-  ignores write errors. Check the path if logs are missing.
-- Never enable Debug on the Wails logger. Debug logs bound-call arguments, including the key
-  (see `wailslog.go` and `AGENTS.md`).
+- Windows: an open log file blocks removal of its directory. This is why `Init` and `Fallback` close the previous logger. Any test that removes a log directory must call `Fallback` first. `TestFallbackReleasesLogFile` and `TestInitClosesPreviousLogFile` check this.
+- `Init` ignores errors from `MkdirAll`, `OpenFile` and `Chmod`. If the file cannot be created, logging falls back to nothing visible: `lumberjack` retries on write, and the `log` package ignores write errors. Check the path if logs are missing.
+- Never enable Debug on the Wails logger. Debug logs bound-call arguments, including the key (see `wailslog.go` and `AGENTS.md`).
 
 ## internal/fsretry
 
-Wrappers over `os.Rename`, `os.Remove` and `os.RemoveAll` that retry briefly on Windows when
-another process (antivirus, indexer, the cover server, the WebView) holds a file.
+Wrappers around `os.Rename`, `os.Remove` and `os.RemoveAll`. On Windows, they retry briefly when another process (antivirus, indexer, the cover server or WebView) holds a file.
 
 ### Exported API
 
@@ -219,41 +177,26 @@ another process (antivirus, indexer, the cover server, the WebView) holds a file
 
 ### Behavior
 
-- Constants: `maxAttempts = 5` total calls, `retryDelay = 30ms` between them. A transient error
-  therefore costs at most four waits (120 ms) before it is returned.
-- `run(policy, op)` calls `op` once. It retries only when `policy.transient(err)` is true and
-  attempts remain. Any other error returns on the first call, exactly like the `os` function.
+- Constants: `maxAttempts = 5` total calls, `retryDelay = 30ms` between them. A transient error therefore costs at most four waits (120 ms) before it is returned.
+- `run(policy, op)` calls `op` once. It retries only when `policy.transient(err)` is true and attempts remain. Any other error returns on the first call, exactly like the `os` function.
 - Transient classification (`isTransient`):
-  - `transient_windows.go` (`//go:build windows`): `ERROR_ACCESS_DENIED` (5), sharing violation
-    (32), lock violation (33). `ERROR_FILE_NOT_FOUND` is not transient. Access denied is retried on
-    purpose: a file held by the cover server or WebView reports it. The cost is the 120 ms above for
-    a truly read-only file.
+  - `transient_windows.go` (`//go:build windows`): `ERROR_ACCESS_DENIED` (5), sharing violation (32), lock violation (33). `ERROR_FILE_NOT_FOUND` is not transient. Access denied is retried on purpose: a file held by the cover server or WebView reports it. The cost is the 120 ms above for a truly read-only file.
   - `transient_other.go` (`//go:build !windows`): always false. Every call is a single `os` call.
 - `RemoveAll` is safe to retry: `os.RemoveAll` returns nil for missing paths.
-- `policy` is a value (attempts, delay, sleep, transient) so tests inject a fake sleep and a
-  fake classifier.
+- `policy` is a value (attempts, delay, sleep, transient) so tests inject a fake sleep and a fake classifier.
 
-Call sites: `internal/images` (cover temp-file rename and removal), `internal/db`
-(`writeBackupFile` removes a partial backup copy after close), and `app.go`
-(`removeCachedGameImages` on clear-data).
+Call sites: `internal/images` (cover temp-file rename and removal), `internal/db` (`writeBackupFile` removes a partial backup copy after close), and `app.go` (`removeCachedGameImages` on clear-data).
 
 Gotchas:
 
-- Use these wrappers only for files that the WebView or cover server may hold open. Plain
-  `os` calls are fine elsewhere.
-- `transient_windows_test.go` is `//go:build windows` and does not compile on Linux CI. The
-  generic retry tests in `fsretry_test.go` run everywhere.
+- Use these wrappers only for files that the WebView or cover server may hold open. Plain `os` calls are fine elsewhere.
+- `transient_windows_test.go` is `//go:build windows` and does not compile on Linux CI. The generic retry tests in `fsretry_test.go` run everywhere.
 
 ## Testing these packages
 
-- `appdata`: `appdata_test.go` covers path layout, no directory creation by `Resolve`, `0700`
-  creation and tightening, and error returns for file-blocked paths.
-- `keyring`: `keyring_test.go` (uses go-keyring mock) covers round-trip, trim, invalid input,
-  read-back mismatches and error redaction.
-- `logging`: `logging_test.go` covers private file modes (skipped for mode checks on Windows),
-  stderr fallback, a race between `Writer` and `Init`/`Fallback`, and previous-logger closing.
-- `fsretry`: `fsretry_test.go` covers retry counts, non-transient errors returning immediately,
-  success on first try, and `os` error parity.
+- `appdata`: `appdata_test.go` covers path layout, no directory creation by `Resolve`, `0700` creation and tightening, and error returns for file-blocked paths.
+- `keyring`: `keyring_test.go` (uses go-keyring mock) covers round-trip, trim, invalid input, read-back mismatches and error redaction.
+- `logging`: `logging_test.go` covers private file modes (skipped for mode checks on Windows), stderr fallback, a race between `Writer` and `Init`/`Fallback`, and previous-logger closing.
+- `fsretry`: `fsretry_test.go` covers retry counts, non-transient errors returning immediately, success on first try, and `os` error parity.
 
-Run with `go test ./internal/appdata/... ./internal/keyring/... ./internal/logging/... ./internal/fsretry/...`
-and `-race` for the logging race test. See [testing.md](testing.md).
+Run `go test ./internal/appdata/... ./internal/keyring/... ./internal/logging/... ./internal/fsretry/...`; add `-race` for the logging race test. See [testing.md](testing.md).

@@ -1,6 +1,6 @@
 # Repository
 
-Developer reference for `internal/repository`. The package is the only code that issues SQL against the app database. It owns the dashboard model, the tag computation, profile lifecycle and the cover cache rows. Schema and migrations are in [database.md](database.md). Callers are the app service (see [app-service.md](app-service.md)) and the sync engine (see [syncer.md](syncer.md)). Cover file handling is in [covers.md](covers.md).
+Developer reference for `internal/repository`. This is the only package that issues SQL against the app database. It owns the dashboard model, tag computation, profile lifecycle and cover-cache rows. Schema and migrations are documented in [database.md](database.md). Callers are the app service (see [app-service.md](app-service.md)) and sync engine (see [syncer.md](syncer.md)). Cover-file handling is documented in [covers.md](covers.md).
 
 ## Repository type
 
@@ -10,14 +10,14 @@ func New(db *sql.DB) *Repository
 func (r *Repository) Close() error
 ```
 
-`New` wraps a `*sql.DB` created by `db.OpenAndMigrate`. The handle has one connection (see [database.md](database.md#overview)). Consequences for code in this package:
+`New` wraps a `*sql.DB` created by `db.OpenAndMigrate`. The handle has a single connection (see [database.md](database.md#overview)). This has two consequences for package code:
 
-- Never issue a query on `r.db` while a transaction or an open `rows` from the same handle is alive. Close `rows` (and finish reading) before the next statement. The existing code does this in `profileGameTags`, `loadGameCards`, `profileAppIDs`, `profileDLCImageAppIDs` and `entriesForImageApp`.
+- Never query `r.db` while a transaction or an open `rows` from the same handle is active. Finish reading and close `rows` before issuing the next statement. Existing code follows this rule in `profileGameTags`, `loadGameCards`, `profileAppIDs`, `profileDLCImageAppIDs` and `entriesForImageApp`.
 - Helpers that take a `*sql.Tx` (`pruneStaleEntries`, `upsertEntry`, `recomputeGameTagsTx`, ...) are the way to compose work inside one transaction.
 
 ### Transaction semantics
 
-Each exported method is listed in the sections below with its behaviour. Summary:
+Each exported method's behavior is described in the sections below. In summary:
 
 - Single autocommit statement: `DeactivateProfile`, `TouchProfileSynced`, `SaveLibrarySettings`, `StartSyncRun`, `FinishSyncRun`, `UpdateSyncRunProgress`, `CancelRunningSyncRuns`, `HasSetData`, and all read methods.
 - One transaction: `SaveProfile`, `ClearProfileData` (the deletes; reads happen before it), `UpsertOwnedGame`, `SaveGameSync`, `SaveGameWarning` (warning part; `UpsertOwnedGame` runs first in its own transaction), `MarkGamePreviouslyCompleted`, `DisableMissingOwnedGames`, `DisableProfileGame`, `EnableProfileGame`, `RecomputeGameTags`, `SaveCover`.
@@ -37,7 +37,7 @@ Each exported method is listed in the sections below with its behaviour. Summary
 | `ProfileGameState` | `repository.go` | State of one entry, including flags; `Exists` is false for history-only reads. |
 | `GameSyncUpdate` | `repository.go` | One game's sync: owned facts plus all eligible `Sets`. An empty `Sets` prunes every entry of the game. |
 | `SetSyncUpdate` | `repository.go` | One entry (`GroupID`) within a `GameSyncUpdate`, including its achievements. |
-| `CoverUpdate` | `repository.go` | Input for `SaveCover`: `ImageAppID`, `Kind`, `FileName`, `Path`, `SourceURL`, `Downloaded`. |
+| `CoverUpdate` | `repository.go` | Input for `SaveCover`: `ImageAppID`, `Kind`, `FileName`, `Cached` (bool, never a path), `SourceURL`, `Downloaded`. |
 | `CoverRecord` | `repository.go` | Stored cover row returned by `GetCover` and `ListCovers`. |
 | `LibrarySettings` | `settings.go` | Per-profile library sync options: `IncludeUnvettedApps`, `IncludePlayedFreeGames`. |
 
@@ -49,7 +49,7 @@ Constant `almostThereThreshold = 40` (score threshold for the `almost_there` tag
 
 ## Entry model
 
-A profile entry is the key `(profile_id, appid, groupid)` in `profile_games`. `groupid 0` is the base game. Other groupids are achievement sets, either named sets of the base game or DLC-bound sets (`game_sets.dlcappid <> 0`). The frontend identifies a card by `EntryKey`.
+A profile entry is identified by the key `(profile_id, appid, groupid)` in `profile_games`. `groupid 0` denotes the base game. Other groupids denote achievement sets: named sets of the base game or DLC-bound sets (`game_sets.dlcappid <> 0`). The frontend identifies each card by `EntryKey`.
 
 Cards are built from:
 
@@ -89,7 +89,7 @@ Per-profile library options are not in `settings`; they are in `profile_library_
 
 ### Profile removal
 
-`ClearProfileData(profileID)` runs in this order:
+`ClearProfileData(profileID)` follows this sequence:
 
 1. Outside the transaction: check whether the profile is active; collect every app id the profile references (`profileAppIDs`: union over `profile_games`, `profile_achievements`, `profile_game_flags`, `profile_game_tags`, `game_snapshots`, `profile_owned_games`); collect the DLC image ids of its sets (`profileDLCImageAppIDs`).
 2. One transaction:
@@ -100,7 +100,7 @@ Per-profile library options are not in `settings`; they are in `profile_library_
    - `deleteOrphanCoverRows` over the union of app ids and DLC image ids: delete `cover_images` rows that no remaining `profile_games` entry displays. An image id is still used when some entry's image owner equals it (`imageAppIDSQL`), or when it is the game id of an entry of that game (DLC entries fall back to the game's cover). Returns the deleted ids.
 3. Commit.
 
-The caller (`ClearActiveUserData` in `app.go`, documented in [app-service.md](app-service.md)) then removes `<GameImages>/<id>` for the returned ids. Covers still used by another profile stay on disk. The `profile_library_settings` row is removed with the profile; re-adding the same SteamID64 starts from `DefaultLibrarySettings()`.
+The caller (`ClearActiveUserData` in `app.go`, documented in [app-service.md](app-service.md)) then removes `<GameImages>/<id>` for the returned ids. Covers still used by another profile remain on disk. Removing the profile also removes its `profile_library_settings` row; re-adding the same SteamID64 starts with `DefaultLibrarySettings()`.
 
 Not removed by `ClearProfileData`: `achievements`/`games` rows still referenced by another profile, and `cover_images` rows still displayed by another profile. Logs and the Steam API key are outside the database (the key is in the system keyring).
 
@@ -174,7 +174,7 @@ Used when a game's sync fails. Calls `UpsertOwnedGame` first (its own transactio
 
 ### The four lists
 
-Each list is a subset of the cards, with `disabled` as the first gate.
+Each list is a subset of the cards; `disabled` is the first filter.
 
 | List | Filter (`includeGameCard`) | Sort (`sortGameCards`) |
 | --- | --- | --- |
@@ -232,7 +232,7 @@ Tags are stored per entry in `profile_game_tags` and read into `GameCard.Tags`. 
 | `new_achievements_added` | issue | not completed and `newly_incomplete = 1` | | `previously completed, now incomplete` |
 | `missing_achievements_in_dlc` | issue | not completed and `missing_achievements_in_dlc` flag | | `manual DLC-missing flag` |
 | `dlc_not_owned` | issue | `dlc_not_owned = 1` | | `DLC for this set is not owned` |
-| `missing_cover_art` | issue | no cover path for the entry (after DLC fallback) | | `no cached cover image` |
+| `missing_cover_art` | issue | no cached cover file for the entry (after DLC fallback) | | `no cached cover image` |
 | `sync_warning` | issue | `sync_warning = 1` | | `latest sync warning` |
 
 Notes on the rules:
@@ -278,15 +278,15 @@ This is only the backend read order. The frontend re-sorts card tags: `gameTags`
 
 Repository side of the cover cache. Files are handled by `internal/images`.
 
-- `SaveCover(CoverUpdate) error`: rejects `ImageAppID <= 0`. One transaction: upserts `cover_images` (`kind`, `file_name`, `path`, `source_url`; `path` and `source_url` are stored as NULL when empty; `checked_at = now`). `downloaded_at` is set to now only when `Downloaded` is true; otherwise the previous value is kept (`coalesce`). Then recomputes tags for the entries returned by `entriesForImageApp`: entries whose owning image id equals the saved id, plus every entry of the game with that id as its app id.
+- `SaveCover(CoverUpdate) error`: rejects `ImageAppID <= 0`. One transaction: upserts `cover_images` (`kind`, `file_name`, `cached` from `CoverUpdate.Cached`, `source_url`; `source_url` is stored as NULL when empty; `checked_at = now`). No file path is passed to or stored by the repository. `downloaded_at` is set to now only when `Downloaded` is true; otherwise the previous value is kept (`coalesce`). Then recomputes tags for the entries returned by `entriesForImageApp`: entries whose owning image id equals the saved id, plus every entry of the game with that id as its app id.
 - `GetCover(imageAppID) (CoverRecord, bool, error)`: returns `ok = false` when no row exists.
 - `ListCovers() (map[int64]CoverRecord, error)`: every cover row, keyed by image id. No production caller exists; only the repository tests use it. The syncer's refresh path uses `GetCover` per image id.
 
-Display URL (`coverURL`, unexported): empty when `path` is blank, `file_name` is empty or `image_appid <= 0`. Otherwise `/game-covers/<image_appid>/<file_name>`, with `?v=<downloaded_at>` when `downloaded_at` is set. The `?v=` value changes only on a new download, which busts the browser cache.
+Display URL (`coverURL`, unexported): empty when `cached` is false, `file_name` is empty or `image_appid <= 0`. Otherwise `/game-covers/<image_appid>/<file_name>`, with `?v=<downloaded_at>` when `downloaded_at` is set. The `?v=` value changes only on a new download, which busts the browser cache.
 
 ### DLC fallback
 
-A DLC-bound entry (`game_sets.dlcappid <> 0`) displays the DLC's cover when `cover_images` has a row for that DLC id with a non-blank `path`. Otherwise it displays the parent game's cover (`effectiveCoverAppIDSQL`). Non-DLC entries always use the game id. The fallback is applied in SQL at read time, so a DLC cover saved later replaces the fallback without a rewrite of the entry.
+A DLC-bound entry (`game_sets.dlcappid <> 0`) displays the DLC's cover when `cover_images` has a row for that DLC id with `cached = 1`. Otherwise it displays the parent game's cover (`effectiveCoverAppIDSQL`). Non-DLC entries always use the game id. The fallback is applied in SQL at read time, so a DLC cover saved later replaces the fallback without a rewrite of the entry.
 
 ## Settings notes and other queries
 
@@ -295,7 +295,7 @@ A DLC-bound entry (`game_sets.dlcappid <> 0`) displays the DLC's cover when `cov
 
 ## Notes and observations
 
-These are facts about the current code that differ from what a reader might expect:
+These notes record current-code behavior that may be unexpected:
 
 - `Summary.TotalUnlockedCount` and `Summary.TotalAchievementsUnlocked` use the same expression and always have equal values. Both are exported in JSON.
 - `Summary.NewlyIncompleteGamesCount` counts entries, not distinct games.

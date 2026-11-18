@@ -1,6 +1,6 @@
 # Covers
 
-Developer reference for the game cover cache: the download logic in `internal/images` (`images.go`), the sync-side decision in `internal/syncer` (`refreshCover`), the cover rows in `internal/repository` (`covers.go`, `cover_images`), display URLs and DLC fallback, and the HTTP handler `CoverService` in the root package (`covers.go`).
+Developer reference for the game cover cache: the download logic in `internal/images` (`images.go`), the sync-side decision in `internal/syncer` (`refreshCover`), cover rows in `internal/repository` (`covers.go`, `cover_images`), display URLs and DLC fallback, and the root package's HTTP handler `CoverService` (`covers.go`).
 
 Related: [syncer.md](syncer.md) (when refresh runs during a sync), [steam-client.md](steam-client.md) (owned-games `capsule_filename`), [repository.md](repository.md) (SQL and tags), [database.md](database.md) (`cover_images` columns), [app-service.md](app-service.md) (service wiring and `ClearActiveUserData`), [platform.md](platform.md) (paths, Windows file rules), [frontend.md](frontend.md) (how cards render the URL), [testing.md](testing.md).
 
@@ -19,7 +19,7 @@ Related: [syncer.md](syncer.md) (when refresh runs during a sync), [steam-client
 
 ## Cover kinds and file names
 
-Four kinds. Each is stored in `cover_images.kind` and written to a fixed file name under `<GameImages>/<image_appid>/`.
+There are four kinds. Each is stored in `cover_images.kind` and written to a fixed file name under `<GameImages>/<image_appid>/`.
 
 | Kind | File name | Steam source |
 | --- | --- | --- |
@@ -28,7 +28,7 @@ Four kinds. Each is stored in `cover_images.kind` and written to a fixed file na
 | `header` | `header.jpg` | `header` from the store |
 | `main` | `main_capsule.jpg` | `main_capsule` from the store |
 
-The `header` and `main` capsules are landscape images; the UI renders those kinds differently (comment in `images.go`).
+The `header` and `main` capsules are landscape images; the UI renders these kinds differently (see the comment in `images.go`).
 
 The file name is fixed per kind. The file always uses the `.jpg` extension, even when Steam serves PNG or WebP (see [Validation](#download-validation)). `''` as kind and file name means "checked, no cover". The file name set is exported as `images.LibraryFileName`, `HeroFileName`, `HeaderFileName`, `MainFileName`. `CoverService` whitelists exactly these four.
 
@@ -56,7 +56,7 @@ Asset hosts (`images.go`):
 
 ## Sync-side decision (`refreshCover`)
 
-This runs for each image id of a game after a successful game sync (`coverImageAppIDs`: the game id, then each distinct DLC id of its entries). A failure is logged (`refresh cover <id>: ...`) and never fails the game sync.
+This runs for each image id associated with a game after a successful game sync (`coverImageAppIDs`: the game id, followed by each distinct DLC id among its entries). Failures are logged (`refresh cover <id>: ...`) and never fail the game sync.
 
 1. Read the stored state (`storedCover` -> `images.Stored{Kind, FileName, CheckedAt}`). `CheckedAt` is parsed from RFC3339; an unparseable value counts as never checked.
 2. `NeedsRefresh(imageAppID, prev, now)`. If false, return with no network I/O.
@@ -67,15 +67,15 @@ This runs for each image id of a game after a successful game sync (`coverImageA
    - Otherwise fall through to step 4 (the owned capsule was not found or no file was downloaded).
 4. Store lookup: `lookupItemAssets` -> `StoreItemAssets([id])`. A missing item gives empty assets. An error returns the error (nothing saved). Then `RefreshCover` with those assets and `prev`. If it returns an error, or a result with `Skipped` set, nothing is saved (`if err != nil || res.Skipped { return err }`). `Skipped` is a defensive guard: the same staleness check already ran in step 2, so it is practically unreachable. Otherwise `saveCover`.
 
-So a base game whose owned-games capsule works costs no store request. A DLC cover always costs one store request when it is stale. A base game with no capsule, or whose capsule URL is not found, costs one store request.
+Thus, a base game with a working owned-games capsule requires no store request. A stale DLC cover always requires one store request. A base game with no capsule, or whose capsule URL is not found, requires one store request.
 
-`saveCover` maps `images.Result` to `repository.CoverUpdate` (`Kind`, `FileName`, `Path`, `SourceURL`, `Downloaded`). `SaveCover` always writes `checked_at = now`, and writes `downloaded_at = now` only when `Downloaded` is true.
+`saveCover` maps `images.Result` to `repository.CoverUpdate` (`Kind`, `FileName`, `Cached` set from `Result.Path != ""`, `SourceURL`, `Downloaded`). `Result.Path` stays in memory and is never persisted. `SaveCover` always writes `checked_at = now`, and writes `downloaded_at = now` only when `Downloaded` is true.
 
 Note: when the owned capsule is not found but a cached file exists, `RefreshCover` keeps that file and returns `Downloaded = false`. The syncer then still performs the store lookup and a second `RefreshCover`.
 
 ## Staleness (`NeedsRefresh`)
 
-Returns true (refresh) in these cases, in order:
+Returns true (refresh required) in these cases, in order:
 
 1. Never checked: `CheckedAt` is zero.
 2. Stored kind is `''` and the last check is at least `MissingCoverRecheckInterval` (7 days) old.
@@ -89,7 +89,7 @@ Otherwise it returns false. A "not found" result is rechecked after 7 days, and 
 
 ## Fetch chain (`RefreshCover`)
 
-Chain, in priority order (`coverCandidates`): library, hero, header, main. Each candidate is tried only when Steam lists that asset (non-empty value). A candidate with no listed value gets no URLs and is skipped. For each listed candidate the URLs are tried in order: primary host, then fallback host. The first valid image response wins.
+The chain tries candidates in priority order (`coverCandidates`): library, hero, header, main. A candidate is tried only when Steam lists that asset (non-empty value); candidates without a listed value produce no URLs and are skipped. For each listed candidate, URLs are tried in order: primary host, then fallback host. The first valid image response wins.
 
 Steps:
 
@@ -105,7 +105,7 @@ Steps:
    - Else return an empty result with `CheckedAt = now` and no error. This records "checked, no cover".
 5. Response found: `writeCover` (below). Then `removeOtherCovers` deletes the other three known file names for this id. Result: kind and file name of the candidate, `Path`, `SourceURL`, `Downloaded = true`, `Changed` when kind or file name differs from the input. `Changed` is informational; the syncer does not read it.
 
-The "keep the previous cover on failure" rule means a transient failure does not blank a cover that was already downloaded. Only a non-found result with no file on disk records an empty state.
+The “keep the previous cover on failure” rule means a transient failure does not blank a previously downloaded cover. Only a non-found result with no file on disk records an empty state.
 
 ## Asset URLs and mirrors
 
@@ -120,7 +120,7 @@ The "keep the previous cover on failure" rule means a transient failure does not
 
 The owned-games capsule uses the default format: `primary/steam/apps/<appid>/<capsule_filename>`. Store lookups use Steam's own `asset_url_format` and the listed capsule value.
 
-The app never guesses file names. Only the owned-games `capsule_filename` (trimmed by the Steam client) and store-listed assets are requested.
+The app never guesses file names. It requests only the owned-games `capsule_filename` (trimmed by the Steam client) and store-listed assets.
 
 ## Store item lookup (`StoreItemAssets`)
 
@@ -177,15 +177,15 @@ The cache is disposable. Deleting it removes the files; the next sync downloads 
 
 ## Database state
 
-`cover_images` (see [database.md](database.md#cover_images)): one row per image app id, with `kind`, `file_name`, `path`, `source_url`, `checked_at`, `downloaded_at`. `SaveCover` upserts it and recomputes tags for the entries returned by `entriesForImageApp` (owning image id equal to the saved id, plus every entry of the game with that app id).
+`cover_images` (see [database.md](database.md#cover_images)): one row per image app id, with `kind`, `file_name`, `cached`, `source_url`, `checked_at`, `downloaded_at`. `SaveCover` upserts it and recomputes tags for the entries returned by `entriesForImageApp` (owning image id equal to the saved id, plus every entry of the game with that app id).
 
-- `path` is the absolute file path at save time. Only its presence (non-blank) is used for display and tags. The served URL is built from `file_name`.
+- `cached` is `1` when a file was returned by `images` at save time (`images.Result.Path` non-empty). Only that flag is used for display and tags; the absolute path is never stored (the database must not carry the OS user name). The served URL is built from `file_name`. Before migration 2 the column was `path`; it is dropped there (see [database.md](database.md#migrations)).
 - `downloaded_at` changes only on a new download. It is the cache-busting value in the URL.
 - A kept file or a "not found" result does not change `downloaded_at`.
 
 ## Display: URL and DLC fallback
 
-Repository (`coverURL`): empty when `path` is blank, `file_name` is empty, or the image id is `<= 0`. Otherwise:
+Repository (`coverURL`): empty when `cached` is `0`, `file_name` is empty, or the image id is `<= 0`. Otherwise:
 
 ```text
 /game-covers/<image_appid>/<file_name>[?v=<downloaded_at>]
@@ -196,12 +196,11 @@ The query string is added only when `downloaded_at` is set.
 Which image id is displayed for an entry (`effectiveCoverAppIDSQL`):
 
 - Non-DLC entries (`game_sets.dlcappid = 0` or no set row): the game's id.
-- DLC-bound entries: the DLC id, when `cover_images` has a row for it with a non-blank `path`. Otherwise the game's id.
+- DLC-bound entries: the DLC id, when `cover_images` has a row for it with `cached = 1`. Otherwise the game's id.
 
 So a DLC set without its own cover shows the parent game's cover, and a DLC cover saved later takes over at the next read. The `missing_cover_art` tag uses the same rule, so a DLC set counts as covered when its parent is.
 
-When the displayed image URL is empty, `GameCard.svelte` renders a placeholder: the first letter of the game title and a
-small **Missing cover art** label. The image is loaded with `loading="lazy"`.
+When the displayed image URL is empty, `GameCard.svelte` renders a placeholder: the first letter of the game title and a small **Missing cover art** label. The image is loaded with `loading="lazy"`.
 
 Ownership for refresh and orphan cleanup uses a different rule (`imageAppIDSQL`): the DLC id for DLC-bound entries, else the game id. This decides which cover row an entry writes to, not what it shows.
 
@@ -241,7 +240,7 @@ Because the file name is whitelisted and the id is numeric, the handler cannot r
 | Cancelled sync context, no file on disk | Context error | Nothing saved. |
 | Cancelled sync context, previous file on disk | Context error from the store lookup | Nothing saved. |
 
-Cover failures are logged by the syncer and never fail a game sync or the sync run status.
+Cover failures are logged by the syncer and never fail a game sync or the sync run status. Log lines pass the error through `redact.Paths` (`internal/redact`), which reduces the file paths of `*fs.PathError` and `*os.LinkError` to base names, so the log does not carry the user's profile directory. The cache-removal error in `removeCachedGameImages` (app.go) is redacted the same way before it is wrapped, since `ClearActiveUserData` returns it to the UI. Use `redact.Paths` for any new log line or UI message that can carry a cache or image file error.
 
 ## Notes
 

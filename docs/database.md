@@ -1,18 +1,19 @@
 # Database
 
-Developer reference for the SQLite layer in `internal/db` (`db.go`, `dsn.go`). The schema is created and evolved only by the migration list in `db.go`. Query code that uses these tables lives in `internal/repository` (see [repository.md](repository.md)). For where the database is opened in the app lifecycle see [app-service.md](app-service.md); for the overall layering see [architecture.md](architecture.md).
+Developer reference for the SQLite layer in `internal/db` (`db.go`, `dsn.go`). The migration list in `db.go` is the sole source for creating and evolving the schema. Query code for these tables lives in `internal/repository` (see [repository.md](repository.md)). See [app-service.md](app-service.md) for where the app opens the database in its lifecycle, and [architecture.md](architecture.md) for the overall layering.
 
 ## Overview
 
 - Driver: `github.com/mattn/go-sqlite3` (CGO). `go.mod` pins v1.14.x.
-- One database file: `<data>/steam-achievement-tracker.db` (`config.DBFileName`), where `<data>` is `appdata.Paths.DataDir`. Backups go to `<data>/backups/`.
+- One database file: `<data>/steam-achievement-tracker.db` (`config.DBFileName`), with `<data>` set to `appdata.Paths.DataDir`. Backups go in `<data>/backups/`.
+- Privacy (GDPR): all data in this file stays on the user's machine. The app sends it nowhere; its only network traffic is to Steam (Web API and CDN), and the README "Where your data stays" section says the same. The database never stores filesystem paths, since they carry the OS user name. Cover files are found from `image_appid` and `file_name` only (`cover_images.cached` is the flag). Two things can still hold personal data, and the README privacy section tells users about them. The sync error text (`sync_runs.error`, `profile_games.last_error`) no longer carries a SteamID64 or vanity name from new requests, since the client redacts them from request addresses before the text is stored (see [steam-client.md](steam-client.md#key-and-id-redaction)); rows written by earlier versions may still hold a request address with the SteamID64, and backups made before migration 2 still hold the old `cover_images.path` values.
 - Journal mode WAL. Foreign keys enforced.
-- Connection pool capped at one open and one idle connection (`SetMaxOpenConns(1)`, `SetMaxIdleConns(1)`). Every query, including nested ones, shares that single connection. Do not run a query on `*sql.DB` while a transaction or an open `*sql.Rows` on the same handle is still in use: it blocks forever. The repository code closes `rows` before issuing the next statement for this reason (see `loadGameCards` and `profileGameTags` comments).
+- Connection pool capped at one open and one idle connection (`SetMaxOpenConns(1)`, `SetMaxIdleConns(1)`). Every query, including nested queries, shares that connection. Do not query `*sql.DB` while a transaction or an open `*sql.Rows` on the same handle remains in use; the query blocks forever. Repository code closes `rows` before issuing the next statement for this reason (see the comments in `loadGameCards` and `profileGameTags`).
 - Timestamps are stored as text. The repository writes `time.Now().UTC().Format(time.RFC3339)`. `SaveGameSync` takes its timestamp (`SyncedAt`) from the caller.
 
 ## Open flow
 
-`OpenAndMigrate(paths appdata.Paths)` is the single entry point. The app calls it from `App` initialisation and then builds `repository.New(db)`.
+`OpenAndMigrate(paths appdata.Paths)` is the single entry point. The app calls it during `App` initialization, then constructs `repository.New(db)`.
 
 1. `sqliteDSN(paths.DB)` builds the DSN (see below).
 2. `sql.Open("sqlite3", dsn)`; `SetMaxOpenConns(1)`, `SetMaxIdleConns(1)`.
@@ -23,7 +24,7 @@ Developer reference for the SQLite layer in `internal/db` (`db.go`, `dsn.go`). T
 7. `secureDBFiles(paths)` again (WAL/SHM files may have been created by migration).
 8. Return the connection. On any error before step 8 the connection is closed.
 
-The DSN parameters apply to the single connection. WAL mode is persistent in the database file, so the `journal_mode` statement only needs to succeed once per open.
+The DSN parameters apply to the single connection. WAL mode persists in the database file, so the `journal_mode` statement needs to succeed only once per open.
 
 ### DSN parameters and pragmas
 
@@ -34,14 +35,15 @@ The DSN parameters apply to the single connection. WAL mode is persistent in the
 | `journal_mode` | `PRAGMA` in `OpenAndMigrate` | `WAL` | Executed once per open. |
 | `user_version` | `PRAGMA` in migration code | schema version | Read in `inspectSchema`, set in `setUserVersion` inside the migration transaction. |
 | `wal_checkpoint(TRUNCATE)` | `PRAGMA` in `backupDB` | | Run before copying the file for a backup. |
+| `VACUUM`, `wal_checkpoint(TRUNCATE)` | `compact` | | Run after a compacting migration (migration 2) commits, so the dropped path bytes leave the files. |
 
-No other pragmas are set. `synchronous`, `cache_size`, `temp_store`, `auto_vacuum` and `secure_delete` keep SQLite defaults.
+No other pragmas are set. SQLite defaults remain in effect for `synchronous`, `cache_size`, `temp_store`, `auto_vacuum` and `secure_delete`.
 
 ## DSN rules (`dsn.go`)
 
-`sqliteDSN(path)` picks the Windows rules when `runtime.GOOS == "windows"`; `sqliteDSNFor(path, windows)` is the testable core. Result: `<file URI>?_busy_timeout=5000&_foreign_keys=on`.
+`sqliteDSN(path)` selects the Windows rules when `runtime.GOOS == "windows"`; `sqliteDSNFor(path, windows)` is the testable core. It returns `<file URI>?_busy_timeout=5000&_foreign_keys=on`.
 
-go-sqlite3 hands a `file:` DSN to `sqlite3_open_v2` unchanged with `SQLITE_OPEN_URI` set. SQLite therefore parses the query string itself and everything before the first `?` is the path. A raw `?` or `#` in the path would end it early, and a raw `%` would be decoded. The path is escaped accordingly.
+go-sqlite3 passes a `file:` DSN unchanged to `sqlite3_open_v2` with `SQLITE_OPEN_URI` set. SQLite then parses the query string itself; everything before the first `?` is the path. A raw `?` or `#` would terminate the path, and a raw `%` would be decoded, so the path is escaped accordingly.
 
 `sqliteURIFile(path, windows)` follows the conversion steps in the SQLite URI documentation:
 
@@ -50,13 +52,13 @@ go-sqlite3 hands a `file:` DSN to `sqlite3_open_v2` unchanged with `SQLITE_OPEN_
 - Relative path uses the `file:` form.
 - `escapeURIPath` percent-encodes every byte except ASCII letters, digits and `-._~/:`. This covers `%`, `?`, `#`, spaces, control characters and all non-ASCII UTF-8 bytes. Because the Linux path does not convert `\`, a backslash in a POSIX path is encoded as `%5C`.
 
-Build DSNs only through `sqliteDSN`. Do not concatenate paths into DSN strings (AGENTS.md rule; `dsn_test.go` covers the cases).
+Build DSNs only through `sqliteDSN`. Do not concatenate paths into DSN strings (per AGENTS.md; see the cases in `dsn_test.go`).
 
 ## Migrations
 
 ### Mechanism
 
-- `migrations` is an ordered slice of `migration{version, name, sql}` in `db.go`. Currently one entry: `{version: 1, name: "initial_schema", sql: initialSchemaSQL}`.
+- `migrations` is an ordered slice of `migration{version, name, sql, compact}` in `db.go`. Currently two entries: `{version: 1, name: "initial_schema", sql: initialSchemaSQL}` and `{version: 2, name: "cover_cached_flag", sql: coverCachedFlagSQL, compact: true}`.
 - `latestVersion()` is the maximum `version` in that slice. A fully migrated database has `user_version = latestVersion()` and a `schema_migrations` row for every version.
 - `schema_migrations(version integer primary key, name text not null, applied_at text not null)` is created by `ensureMigrationsTable` inside the migration transaction (`CREATE TABLE IF NOT EXISTS`). `applied_at` is UTC RFC3339.
 - `inspectSchema` reads `PRAGMA user_version`, whether `schema_migrations` exists, whether any user table exists, and `max(version)` from `schema_migrations` (0 if absent). The user-table check is `name not like 'sqlite_%'`. In SQL `LIKE`, `_` is a one-character wildcard, so the pattern also excludes names that start with `sqlite` followed by any single character; `LIKE` matching is ASCII case-insensitive. No table in the schema is affected.
@@ -67,11 +69,19 @@ Build DSNs only through `sqliteDSN`. Do not concatenate paths into DSN strings (
   4. If the database has user tables, `backupDB` runs (see below). A new database (no user tables) is not backed up.
   5. Begin one transaction: create `schema_migrations` if needed; for each migration with `version > state.version` run its SQL, insert its `schema_migrations` row, and set `user_version` to that version; then set `user_version = target`; commit.
 - Each migration's SQL and its bookkeeping are in the same transaction as the `user_version` bump. A failure rolls back and leaves the previous schema in place. Only an error from the migration's SQL is wrapped as `migration %03d %s: %w`. Errors from the `schema_migrations` insert or from setting `user_version` are returned unwrapped. All of them roll back the same way.
-- The `initial_schema` SQL uses `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`. It creates the whole current schema. No upgrade path from pre-release layouts exists (the comment on `initialSchemaSQL` says so).
+- The `initial_schema` SQL uses `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`. It creates the whole schema as it was at version 1, including `cover_images.path`. No upgrade path from pre-release layouts exists (the comment on `initialSchemaSQL` says so). Do not edit it: installed databases already ran it.
+- Migration 2 `cover_cached_flag` (`coverCachedFlagSQL`) removes the absolute cover path, which held the OS user name:
+  ```sql
+  ALTER TABLE cover_images ADD COLUMN cached integer not null default 0;
+  UPDATE cover_images SET cached = 1 WHERE path IS NOT NULL AND trim(path) <> '';
+  ALTER TABLE cover_images DROP COLUMN path;
+  ```
+  `DROP COLUMN` needs SQLite 3.35 or newer; the bundled go-sqlite3 ships 3.54.
+- `compact: true` on a migration means that after its transaction commits, `compact` runs `VACUUM` and then `PRAGMA wal_checkpoint(TRUNCATE)`. `VACUUM` cannot run inside the transaction. Without it the dropped path bytes stay in free pages and in the WAL. `compact` runs only when a compacting migration ran in this open and the database already had user tables before the open (a fresh install holds no dropped data, so it is skipped). A failure is logged with `log.Printf("compact database: ...")` and not returned: `OpenAndMigrate` succeeds, the migration itself stays committed, and `compact` is not retried on the next open. The dropped bytes then stay in free pages and the WAL until SQLite reuses them or a later `VACUUM` runs.
 
 ### Backup before migration
 
-Runs only when a migration is actually pending and the database already has user tables.
+Runs only when a migration is pending and the database already contains user tables.
 
 - `backupDB` creates `<data>/backups` with `MkdirAll` and `Chmod` to `0700`.
 - Runs `PRAGMA wal_checkpoint(TRUNCATE)`. Fails unless `busy == 0` and `log frames == checkpointed frames`, so the main file is complete before copying.
@@ -80,11 +90,12 @@ Runs only when a migration is actually pending and the database already has user
 - On copy or sync failure the partial file is removed after `Close` through `fsretry.Remove` (Windows cannot delete an open file). A file that could not be created is never removed.
 - No retention or pruning. Backups accumulate; nothing in the code deletes them.
 - The backup is not rolled back or restored automatically. A failed migration leaves the backup file behind for manual recovery.
+- Backups made before migration 2 still hold the old absolute cover paths (`cover_images.path`), and so do backups from before any later upgrade. The app never reads or deletes them. Users who care about the OS user name in them must delete the files in `<data>/backups/` (see the README privacy section).
 
 ### Adding a migration
 
-1. Add a SQL constant next to `initialSchemaSQL` in `db.go` (for example `migrationV2SQL`). Use plain SQL. Multiple statements per migration are fine (the initial migration has many).
-2. Append an entry to `migrations`: `{version: 2, name: "descriptive_name", sql: migrationV2SQL}`. Use the next integer; keep versions contiguous and strictly increasing. `latestVersion()` takes the maximum, so a gap is not an error, but a gap is confusing.
+1. Add a SQL constant next to `initialSchemaSQL` in `db.go` (for example `migrationV2SQL`). Use plain SQL. A migration may contain multiple statements, as the initial migration does.
+2. Append an entry to `migrations`: `{version: 3, name: "descriptive_name", sql: migrationV3SQL}` (set `compact: true` only if the migration drops data). Use the next integer; keep versions contiguous and strictly increasing. `latestVersion()` takes the maximum, so a gap is not an error, but a gap is confusing.
 3. Never edit `initialSchemaSQL` or any applied migration. Existing databases will not re-run it.
 4. Update the table reference and mermaid diagram below, plus `repository.md` if query code changes.
 5. Update tests that pin the current version or schema: `internal/db/db_test.go` and `db_gap_test.go` (version stamps, `user_version`, backup naming). Add a test that migrates a database at the previous version and checks the new rows and `user_version`.
@@ -93,7 +104,7 @@ Runs only when a migration is actually pending and the database already has user
 
 ## Schema reference
 
-All tables are created by migration 1 (`initial_schema`), except `schema_migrations`, which `migrate` creates. Columns are listed in definition order. "PK" is primary key; "FK" is foreign key. No `ON DELETE` or `ON UPDATE` actions are declared anywhere, so the default `NO ACTION` applies: deleting a referenced parent row fails while children exist. The repository deletes children first (see `ClearProfileData` in [repository.md](repository.md)). Besides primary keys, `NOT NULL` and foreign keys, the only uniqueness constraint is `UNIQUE` on `profiles.steam_id64`. There are no `CHECK` constraints.
+All tables are created by migration 1 (`initial_schema`), except `schema_migrations`, which `migrate` creates. Migration 2 changes only `cover_images` (its `path` column is replaced by `cached`). Columns are listed in definition order. "PK" is primary key; "FK" is foreign key. No `ON DELETE` or `ON UPDATE` actions are declared anywhere, so the default `NO ACTION` applies: deleting a referenced parent row fails while children exist. The repository deletes children first (see `ClearProfileData` in [repository.md](repository.md)). Besides primary keys, `NOT NULL` and foreign keys, the only uniqueness constraint is `UNIQUE` on `profiles.steam_id64`. There are no `CHECK` constraints.
 
 ### `settings`
 
@@ -118,8 +129,7 @@ Created by `migrate`, not by a migration.
 
 ### `profiles`
 
-One row per connected Steam account. Removing a profile without **Delete profile data** keeps its row, so connecting the
-same SteamID64 again restores its data (see [app-service.md](app-service.md)).
+One row per connected Steam account. Removing a profile without **Delete profile data** keeps its row, so connecting the same SteamID64 again restores its data (see [app-service.md](app-service.md)).
 
 | Column | Type | Null | Key | Notes |
 | --- | --- | --- | --- | --- |
@@ -166,8 +176,8 @@ Cached cover state per image app id (the game, or the DLC app id for DLC sets). 
 | `image_appid` | integer | no | PK | |
 | `kind` | text | no | | `library`, `hero`, `header`, `main`, or `''` (checked, no cover). |
 | `file_name` | text | no | | One of the cache file names, or `''`. |
-| `path` | text | yes | | Absolute path of the cached file, NULL/empty when no cover is available. |
 | `source_url` | text | yes | | |
+| `cached` | integer | no | | `1` when a cover file exists under `<GameImages>/<image_appid>/<file_name>`, `0` when none. Added by migration 2 (default 0). No file path is stored. |
 | `checked_at` | text | yes | | Last check, set on every save. |
 | `downloaded_at` | text | yes | | Last successful download. Drives `?v=` cache-busting in the URL. |
 
@@ -269,9 +279,7 @@ Rows are removed only by `ClearProfileData`. No pruning exists, so the table gro
 
 One row per sync run.
 
-A `running` row with no live sync is one whose final status could not be saved (`FinishSyncRun` failed). The app reports
-that run as `failed` with a stale-run message when it reads the row, and leaves the row as it is. The next app start sets
-such rows to `canceled` (`CancelRunningSyncRuns`). See [syncer.md](syncer.md#run-statuses).
+A `running` row with no live sync is one whose final status could not be saved (`FinishSyncRun` failed). The app reports that run as `failed` with a stale-run message when it reads the row, and leaves the row as it is. The next app start sets such rows to `canceled` (`CancelRunningSyncRuns`). See [syncer.md](syncer.md#run-statuses).
 
 | Column | Type | Null | Key | Default | Notes |
 | --- | --- | --- | --- | --- | --- |
@@ -434,9 +442,10 @@ erDiagram
         integer image_appid PK
         text kind
         text file_name
-        text path
+        text source_url
         text checked_at
         text downloaded_at
+        integer cached
     }
     settings {
         text key PK
@@ -459,7 +468,7 @@ erDiagram
 - At most one connection is open per `*sql.DB`. No nested queries while a transaction or `rows` cursor is open.
 - `games` rows are shared. Per-profile state lives only in `profile_*` tables. `ClearProfileData` removes a `games` row only when nothing in the database references it (`deleteOrphanRowsForAppIDs`).
 - `profile_games` and `profile_game_flags` are separate on purpose: pruning an entry (a set Steam no longer reports) deletes the `profile_games` row and its tags, but keeps the flags and snapshots.
-- A `cover_images` row with a non-empty `path` refers to a file under `<GameImages>/<image_appid>/<file_name>` (see [covers.md](covers.md)). The `path` value is the absolute path at save time; the file name is what is served.
+- A `cover_images` row with `cached = 1` refers to a file under `<GameImages>/<image_appid>/<file_name>` (see [covers.md](covers.md)). The database never stores filesystem paths: the file is found from the image id and file name only.
 - Disabled entries have no `profile_game_tags` rows. Every path that disables an entry deletes its tags, and recompute returns early (after deleting) for disabled entries.
 - Database files and backups are restricted to the owner where the OS supports it: directories `0700`, DB, WAL, SHM, backup files `0600`. Windows ignores these bits; ACLs apply.
 - Backups are written only before a migration on a database that already has user tables. They are never deleted automatically.
