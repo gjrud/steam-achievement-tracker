@@ -115,10 +115,29 @@ func (c *Client) SetRetryBackoff(fn func(attempt int) time.Duration) {
 	c.retryBackoff = fn
 }
 
+// errAPIKeyAsProfileInput is returned without sending a request when the profile input, or the vanity name
+// decoded from it, holds the API key.
+var errAPIKeyAsProfileInput = errors.New("this looks like your Steam Web API key; enter your profile URL, SteamID64 or custom name instead")
+
+// minGuardedKeyLen skips the input guard for keys too short to be real (real keys are 32 characters),
+// where a substring match would reject ordinary input.
+const minGuardedKeyLen = 8
+
+// inputContainsAPIKey reports whether input holds the API key, ignoring case.
+func (c *Client) inputContainsAPIKey(input string) bool {
+	if len(c.APIKey) < minGuardedKeyLen {
+		return false
+	}
+	return strings.Contains(strings.ToLower(input), strings.ToLower(c.APIKey))
+}
+
 func (c *Client) ResolveProfileInput(ctx context.Context, input string) (string, error) {
 	value := strings.TrimSpace(input)
 	if value == "" {
 		return "", errors.New("profile input is required")
+	}
+	if c.inputContainsAPIKey(value) {
+		return "", errAPIKeyAsProfileInput
 	}
 	if steamID64Regexp.MatchString(value) {
 		return value, nil
@@ -143,6 +162,10 @@ func (c *Client) ResolveProfileInput(ctx context.Context, input string) (string,
 }
 
 func (c *Client) ResolveVanityURL(ctx context.Context, vanity string) (string, error) {
+	// Every key-bearing input ends up here after URL decoding, so the guard repeats on the decoded name.
+	if c.inputContainsAPIKey(vanity) {
+		return "", errAPIKeyAsProfileInput
+	}
 	var payload struct {
 		Response struct {
 			Success int    `json:"success"`
@@ -156,9 +179,9 @@ func (c *Client) ResolveVanityURL(ctx context.Context, vanity string) (string, e
 	}
 	if payload.Response.Success != 1 || payload.Response.SteamID == "" {
 		if payload.Response.Message != "" {
-			return "", errors.New(payload.Response.Message)
+			return "", errors.New(c.redactText(payload.Response.Message))
 		}
-		return "", fmt.Errorf("could not resolve Steam vanity name %q", vanity)
+		return "", fmt.Errorf("could not resolve Steam vanity name %q", c.redactText(vanity))
 	}
 	return payload.Response.SteamID, nil
 }
@@ -341,7 +364,7 @@ func (c *Client) GetPlayerAchievements(ctx context.Context, steamID64 string, ap
 	}
 	if !successValue(payload.PlayerStats.Success) && len(payload.PlayerStats.Achievements) == 0 {
 		if payload.PlayerStats.Error != "" {
-			return nil, errors.New(payload.PlayerStats.Error)
+			return nil, errors.New(c.redactText(payload.PlayerStats.Error))
 		}
 		return nil, errors.New("player achievements unavailable")
 	}
@@ -613,11 +636,11 @@ func (c *Client) waitRetry(ctx context.Context, attempt int) error {
 func (c *Client) getJSONBody(ctx context.Context, path, endpoint string) ([]byte, string, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, "", false, redactURLError(err)
+		return nil, "", false, c.redactURLError(err)
 	}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, "", true, redactURLError(err)
+		return nil, "", true, c.redactURLError(err)
 	}
 	eresult := resp.Header.Get("x-eresult")
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -638,25 +661,37 @@ func (c *Client) getJSONBody(ctx context.Context, path, endpoint string) ([]byte
 // The whole (possibly percent-encoded) value is matched, so only the key value is replaced.
 var apiKeyParam = regexp.MustCompile(`([?&]key=)[^&]*`)
 
+// redactText removes the API key from text that may carry a request URL, a response body or user input.
+// The key= query parameter is replaced by pattern. The key value itself is also replaced wherever it
+// appears, in raw, query-escaped and path-escaped form, because a user can type the key as profile input
+// and it then travels in other parameters (vanityurl) and in messages that echo that input.
+func (c *Client) redactText(s string) string {
+	s = apiKeyParam.ReplaceAllString(s, "${1}REDACTED")
+	if c.APIKey == "" {
+		return s
+	}
+	for _, form := range []string{url.QueryEscape(c.APIKey), url.PathEscape(c.APIKey), c.APIKey} {
+		s = regexp.MustCompile("(?i)"+regexp.QuoteMeta(form)).ReplaceAllString(s, "REDACTED")
+	}
+	return s
+}
+
 // redactURLError removes the API key from a *url.Error (as returned by Client.Do and
-// NewRequestWithContext) by replacing the key value in a copy of its URL. Op and Err are kept so
-// errors.Is/As and Timeout() still see the original cause. Other errors, including nil, are returned unchanged.
-func redactURLError(err error) error {
+// NewRequestWithContext) by redacting a copy of its URL. Op and Err are kept so errors.Is/As and
+// Timeout() still see the original cause. Other errors, including nil, are returned unchanged.
+func (c *Client) redactURLError(err error) error {
 	urlErr, ok := err.(*url.Error)
 	if !ok {
 		return err
 	}
 	redacted := *urlErr
-	redacted.URL = apiKeyParam.ReplaceAllString(urlErr.URL, "${1}REDACTED")
+	redacted.URL = c.redactText(urlErr.URL)
 	return &redacted
 }
 
 // redactBody removes the API key from a non-2xx response body, which Steam may echo back.
 func (c *Client) redactBody(body string) string {
-	if c.APIKey != "" {
-		body = strings.ReplaceAll(body, c.APIKey, "REDACTED")
-	}
-	return apiKeyParam.ReplaceAllString(body, "${1}REDACTED")
+	return c.redactText(body)
 }
 
 func retryableSteamStatus(status int) bool {

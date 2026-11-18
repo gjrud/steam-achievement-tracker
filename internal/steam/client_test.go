@@ -1176,7 +1176,7 @@ func TestRedactURLError(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			orig := &url.Error{Op: "Get", URL: tc.rawURL, Err: sentinel}
-			got := redactURLError(orig)
+			got := (&Client{APIKey: "test-key"}).redactURLError(orig)
 			var ue *url.Error
 			if !errors.As(got, &ue) {
 				t.Fatalf("got %#v, want *url.Error", got)
@@ -1195,12 +1195,158 @@ func TestRedactURLError(t *testing.T) {
 }
 
 func TestRedactURLErrorPassThroughAndPlainErrors(t *testing.T) {
-	if got := redactURLError(nil); got != nil {
+	c := &Client{APIKey: "test-key"}
+	if got := c.redactURLError(nil); got != nil {
 		t.Fatalf("nil error became %v", got)
 	}
 	plain := errors.New("connection reset")
-	if got := redactURLError(plain); got != plain {
+	if got := c.redactURLError(plain); got != plain {
 		t.Fatalf("non-url.Error changed: %v", got)
+	}
+}
+
+func TestRedactTextRemovesKeyValueEverywhere(t *testing.T) {
+	const key = "AB12+/=cd"
+	c := &Client{APIKey: key}
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "raw", in: "typed " + key + " here", want: "typed REDACTED here"},
+		{name: "query escaped", in: "?vanityurl=" + url.QueryEscape(key), want: "?vanityurl=REDACTED"},
+		{name: "path escaped", in: "/id/" + url.PathEscape(key), want: "/id/REDACTED"},
+		{name: "key param and vanity", in: "?key=" + url.QueryEscape(key) + "&vanityurl=" + url.QueryEscape(key), want: "?key=REDACTED&vanityurl=REDACTED"},
+		{name: "other case", in: "typed " + strings.ToLower(key) + " here", want: "typed REDACTED here"},
+		{name: "lower-case percent hex", in: "/id/" + strings.ToLower(url.PathEscape(key)), want: "/id/REDACTED"},
+		{name: "unrelated text kept", in: "https://h/x?steamid=1", want: "https://h/x?steamid=1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := c.redactText(tc.in); got != tc.want {
+				t.Fatalf("redactText(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+	if got := (&Client{}).redactText("plain"); got != "plain" {
+		t.Fatalf("empty key changed text: %q", got)
+	}
+}
+
+// testLongKey looks like a real key (32 hex characters) and does not repeat, so partial matches show up.
+const testLongKey = "9F3C1A7E5B2D8046A1C7E3B9D5F20846"
+
+// shortTestKey is below minGuardedKeyLen, so the input guard is off and only redaction is under test.
+const shortTestKey = "abc-key"
+
+// A user can paste the API key into the profile field. ResolveProfileInput rejects it before any request.
+func TestResolveProfileInputRejectsAPIKey(t *testing.T) {
+	var hits atomic.Int32
+	client, closeServer := vanityTestClient(t, &hits)
+	defer closeServer()
+	client.APIKey = testLongKey
+	inputs := map[string]string{
+		"bare":            testLongKey,
+		"lower case":      strings.ToLower(testLongKey),
+		"mixed case":      "9f3c1a7e5b2d8046A1C7E3B9D5F20846",
+		"padded":          "  " + testLongKey + "  ",
+		"profile URL":     "https://steamcommunity.com/id/" + testLongKey,
+		"URL without id":  "https://steamcommunity.com/" + testLongKey,
+		"embedded in url": "https://steamcommunity.com/id/gabe?key=" + testLongKey,
+		// The path is decoded after the raw-input check, so a percent-encoded letter hides the key from it
+		// (an encoded digit would not: %39 still ends in "9"). ResolveVanityURL must catch the decoded name.
+		"percent-encoded letter, lower case": "https://steamcommunity.com/id/9%66" + strings.ToLower(testLongKey)[2:],
+		"percent-encoded letter, upper case": "https://steamcommunity.com/id/9%46" + testLongKey[2:],
+	}
+	for name, input := range inputs {
+		t.Run(name, func(t *testing.T) {
+			_, err := client.ResolveProfileInput(context.Background(), input)
+			if !errors.Is(err, errAPIKeyAsProfileInput) {
+				t.Fatalf("err = %v, want errAPIKeyAsProfileInput", err)
+			}
+			if strings.Contains(strings.ToLower(err.Error()), strings.ToLower(testLongKey)) {
+				t.Fatalf("error echoes the key: %q", err.Error())
+			}
+		})
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("vanity lookups = %d, want 0 (no request for key input)", hits.Load())
+	}
+	if _, err := client.ResolveProfileInput(context.Background(), "gabelogan"); err != nil {
+		t.Fatalf("ordinary input rejected: %v", err)
+	}
+}
+
+// A key too short for the guard (or any input it misses) still must not leak: a transport failure embeds
+// the request URL, where the typed name rides in vanityurl.
+func TestResolveVanityURLTransportErrorDoesNotLeakAPIKey(t *testing.T) {
+	httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("boom: connection refused")
+	})}
+	client := &Client{APIKey: shortTestKey, BaseURL: "http://steam.invalid", HTTPClient: httpClient}
+	client.retryBackoff = func(int) time.Duration { return 0 }
+
+	_, err := client.ResolveVanityURL(context.Background(), shortTestKey)
+	if err == nil {
+		t.Fatal("err = nil, want transport error")
+	}
+	if strings.Contains(err.Error(), shortTestKey) {
+		t.Fatalf("error leaks API key: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "vanityurl=REDACTED") {
+		t.Fatalf("error = %q, want vanityurl redacted", err.Error())
+	}
+}
+
+// The fallback error echoes the typed name, and Steam's own message may echo anything.
+func TestResolveVanityURLNoMatchErrorsDoNotLeakAPIKey(t *testing.T) {
+	tests := []struct {
+		name, key, vanity, body string
+	}{
+		{name: "fallback echoes typed name", key: shortTestKey, vanity: shortTestKey, body: `{"response":{"success":42}}`},
+		{name: "steam message echoes key", key: testLongKey, vanity: "someone", body: `{"response":{"success":42,"message":"No match for ` + testLongKey + `"}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client, closeServer := testClient(t, map[string]string{"/ISteamUser/ResolveVanityURL/v1/": tc.body})
+			defer closeServer()
+			client.APIKey = tc.key
+			_, err := client.ResolveVanityURL(context.Background(), tc.vanity)
+			if err == nil || strings.Contains(err.Error(), tc.key) || !strings.Contains(err.Error(), "REDACTED") {
+				t.Fatalf("err = %v, want a redacted error without the API key", err)
+			}
+		})
+	}
+}
+
+func TestGetPlayerAchievementsSteamErrorRedactsAPIKey(t *testing.T) {
+	client, closeServer := testClient(t, map[string]string{
+		"/ISteamUserStats/GetPlayerAchievements/v1/": `{"playerstats":{"success":false,"error":"bad key ` + testLongKey + `"}}`,
+	})
+	defer closeServer()
+	client.APIKey = testLongKey
+	_, err := client.GetPlayerAchievements(context.Background(), testSteamID, 10)
+	if err == nil || strings.Contains(err.Error(), testLongKey) || !strings.Contains(err.Error(), "REDACTED") {
+		t.Fatalf("err = %v, want a redacted error without the API key", err)
+	}
+}
+
+func TestInputContainsAPIKeyThreshold(t *testing.T) {
+	tests := []struct {
+		name, key, input string
+		want             bool
+	}{
+		{name: "empty key matches nothing", key: "", input: "gabelogan", want: false},
+		{name: "short key is not guarded", key: shortTestKey, input: shortTestKey, want: false},
+		{name: "long key at threshold", key: "12345678", input: "x12345678y", want: true},
+		{name: "long key absent", key: testLongKey, input: "gabelogan", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := (&Client{APIKey: tc.key}).inputContainsAPIKey(tc.input); got != tc.want {
+				t.Fatalf("inputContainsAPIKey = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
