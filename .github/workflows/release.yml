@@ -112,7 +112,7 @@ jobs:
             fi
           done
 
-      # An empty or stale VERSION does not make packaging fail, so check the result.
+      # A stale or wrong VERSION does not make packaging fail, so check the result.
       # Debian writes a pre-release '-' as '~' and appends the nfpm release '-1'.
       - name: Package version matches the tag
         run: |
@@ -224,7 +224,7 @@ jobs:
             fi
           done
 
-      # An empty or stale VERSION does not make packaging fail, so check the result.
+      # A stale or wrong VERSION does not make packaging fail, so check the result.
       # Windows resources take X.Y.Z.W: pre-release and build metadata are dropped
       # (0.1.0-rc.1 -> 0.1.0.0), so compare against the numeric core plus '.0'.
       - name: Package version matches the tag
