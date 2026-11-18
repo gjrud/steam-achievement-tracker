@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gjrud/steam-achievement-tracker/internal/images"
+	"github.com/gjrud/steam-achievement-tracker/internal/redact"
 	"github.com/gjrud/steam-achievement-tracker/internal/repository"
 	"github.com/gjrud/steam-achievement-tracker/internal/steam"
 )
@@ -612,7 +613,7 @@ func (s *Service) refreshCovers(ctx context.Context, game steam.OwnedGame, image
 	}
 	for _, imageAppID := range imageAppIDs {
 		if err := s.refreshCover(ctx, game, imageAppID); err != nil {
-			log.Printf("refresh cover %d: %v", imageAppID, err)
+			log.Printf("refresh cover %d: %v", imageAppID, redact.Paths(err))
 		}
 	}
 }
@@ -653,10 +654,11 @@ func (s *Service) refreshCover(ctx context.Context, game steam.OwnedGame, imageA
 
 // saveCover stores the cover state of one image app id.
 func (s *Service) saveCover(imageAppID int64, res images.Result) error {
-	// SaveCover overwrites kind, file, path and source; RefreshCover returns the kept file's values when
-	// it could not download, so the stored cover stays consistent with what is on disk.
+	// SaveCover overwrites kind, file, cached and source; RefreshCover returns the kept file's values when
+	// it could not download, so the stored cover stays consistent with what is on disk. The file path itself
+	// is not stored: Cached only records that a file exists under the game images directory.
 	return s.Repo.SaveCover(repository.CoverUpdate{
-		ImageAppID: imageAppID, Kind: res.Kind, FileName: res.FileName, Path: res.Path,
+		ImageAppID: imageAppID, Kind: res.Kind, FileName: res.FileName, Cached: res.Path != "",
 		SourceURL: res.SourceURL, Downloaded: res.Downloaded,
 	})
 }

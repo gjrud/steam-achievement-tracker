@@ -33,9 +33,9 @@ func (r *Repository) SaveCover(c CoverUpdate) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`insert into cover_images(image_appid, kind, file_name, path, source_url, checked_at, downloaded_at) values(?,?,?,?,?,?,?)
-		on conflict(image_appid) do update set kind=excluded.kind, file_name=excluded.file_name, path=excluded.path, source_url=excluded.source_url, checked_at=excluded.checked_at, downloaded_at=coalesce(excluded.downloaded_at, cover_images.downloaded_at)`,
-		c.ImageAppID, c.Kind, c.FileName, nullString(c.Path), nullString(c.SourceURL), now, downloadedAt); err != nil {
+	if _, err := tx.Exec(`insert into cover_images(image_appid, kind, file_name, cached, source_url, checked_at, downloaded_at) values(?,?,?,?,?,?,?)
+		on conflict(image_appid) do update set kind=excluded.kind, file_name=excluded.file_name, cached=excluded.cached, source_url=excluded.source_url, checked_at=excluded.checked_at, downloaded_at=coalesce(excluded.downloaded_at, cover_images.downloaded_at)`,
+		c.ImageAppID, c.Kind, c.FileName, boolInt(c.Cached), nullString(c.SourceURL), now, downloadedAt); err != nil {
 		return err
 	}
 	entries, err := entriesForImageApp(tx, c.ImageAppID)
@@ -52,7 +52,7 @@ func (r *Repository) SaveCover(c CoverUpdate) error {
 
 // GetCover returns the cached cover row for an image app id. ok is false when none is stored.
 func (r *Repository) GetCover(imageAppID int64) (CoverRecord, bool, error) {
-	row := r.db.QueryRow(`select image_appid, kind, file_name, coalesce(path,''), coalesce(source_url,''), checked_at, downloaded_at from cover_images where image_appid=?`, imageAppID)
+	row := r.db.QueryRow(`select image_appid, kind, file_name, cached, coalesce(source_url,''), checked_at, downloaded_at from cover_images where image_appid=?`, imageAppID)
 	c, err := scanCover(row)
 	if err == sql.ErrNoRows {
 		return CoverRecord{}, false, nil
@@ -65,7 +65,7 @@ func (r *Repository) GetCover(imageAppID int64) (CoverRecord, bool, error) {
 
 // ListCovers returns every cached cover keyed by image app id (for staleness checks).
 func (r *Repository) ListCovers() (map[int64]CoverRecord, error) {
-	rows, err := r.db.Query(`select image_appid, kind, file_name, coalesce(path,''), coalesce(source_url,''), checked_at, downloaded_at from cover_images`)
+	rows, err := r.db.Query(`select image_appid, kind, file_name, cached, coalesce(source_url,''), checked_at, downloaded_at from cover_images`)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +84,7 @@ func (r *Repository) ListCovers() (map[int64]CoverRecord, error) {
 func scanCover(scanner rowScanner) (CoverRecord, error) {
 	var c CoverRecord
 	var checked, downloaded sql.NullString
-	if err := scanner.Scan(&c.ImageAppID, &c.Kind, &c.FileName, &c.Path, &c.SourceURL, &checked, &downloaded); err != nil {
+	if err := scanner.Scan(&c.ImageAppID, &c.Kind, &c.FileName, &c.Cached, &c.SourceURL, &checked, &downloaded); err != nil {
 		return CoverRecord{}, err
 	}
 	c.CheckedAt = stringPtr(checked)

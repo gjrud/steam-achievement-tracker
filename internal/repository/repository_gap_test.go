@@ -722,7 +722,7 @@ func TestSaveCoverRejectsNonPositiveImageAppID(t *testing.T) {
 
 func TestCoverURLWithoutImageAppIDIsEmpty(t *testing.T) {
 	downloaded := sql.NullString{String: "2026-11-14T10:00:00Z", Valid: true}
-	if got := coverURL(0, "library_600x900.jpg", "/cache/0/library_600x900.jpg", downloaded); got != "" {
+	if got := coverURL(0, "library_600x900.jpg", true, downloaded); got != "" {
 		t.Fatalf("cover url for image appid 0 = %q, want empty", got)
 	}
 }

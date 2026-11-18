@@ -16,6 +16,7 @@ import (
 	"github.com/gjrud/steam-achievement-tracker/internal/images"
 	"github.com/gjrud/steam-achievement-tracker/internal/keyring"
 	"github.com/gjrud/steam-achievement-tracker/internal/logging"
+	"github.com/gjrud/steam-achievement-tracker/internal/redact"
 	"github.com/gjrud/steam-achievement-tracker/internal/repository"
 	"github.com/gjrud/steam-achievement-tracker/internal/steam"
 	"github.com/gjrud/steam-achievement-tracker/internal/syncer"
@@ -57,7 +58,9 @@ type App struct {
 	// It is read under mu and called only after mu is released.
 	emit func(name string)
 
-	initialized    bool
+	initialized bool
+	// initError is the init failure text shown in AppState, with paths on purpose. It is set by setInitError on a
+	// failed init and cleared on success.
 	initError      string
 	paths          appdata.Paths
 	repo           *repository.Repository
@@ -111,6 +114,9 @@ func NewApp() *App {
 // they surface to the UI through AppState.InitError, so the app still starts.
 func (a *App) ServiceStartup(_ context.Context, _ application.ServiceOptions) error {
 	if err := a.ensureInitialized(); err != nil {
+		// ensureInitialized returns errors passed through redact.Paths, which reduces *fs.PathError and
+		// *os.LinkError paths to base names. Do not format a path into an init error message: only those two error
+		// types are scrubbed. The UI gets InitError unchanged.
 		log.Printf("startup init: %v", err)
 		return nil
 	}
@@ -419,10 +425,7 @@ func (a *App) ensureInitialized() error {
 
 	a.mu.Lock()
 	if a.initialized {
-		defer a.mu.Unlock()
-		if a.initError != "" {
-			return errors.New(a.initError)
-		}
+		a.mu.Unlock()
 		return nil
 	}
 	a.mu.Unlock()
@@ -432,13 +435,13 @@ func (a *App) ensureInitialized() error {
 		err = fmt.Errorf("create app directories: %w", err)
 		logging.Fallback()
 		a.setInitError(err)
-		return err
+		return redact.Paths(err)
 	}
 	logging.Init(paths.LogFile)
 	db, err := dbinit.OpenAndMigrate(paths)
 	if err != nil {
 		a.setInitError(err)
-		return err
+		return redact.Paths(err)
 	}
 	repo := repository.New(db)
 	if err := repo.CancelRunningSyncRuns("app restarted before sync completed"); err != nil {
@@ -773,7 +776,7 @@ func removeCachedGameImages(root string, appIDs []int64) error {
 		}
 		path := filepath.Join(root, strconv.FormatInt(appID, 10))
 		if err := fsretry.RemoveAll(path); err != nil {
-			return fmt.Errorf("remove cached images for appid %d: %w", appID, err)
+			return fmt.Errorf("remove cached images for appid %d: %w", appID, redact.Paths(err))
 		}
 	}
 	return nil

@@ -791,16 +791,16 @@ func TestClearProfileDataKeepsGameCoverUsedByDLCEntryOfOtherProfile(t *testing.T
 
 func TestCoverURLForLibraryAndHero(t *testing.T) {
 	downloaded := sql.NullString{String: "2026-11-14T10:00:00Z", Valid: true}
-	if got, want := coverURL(42, "library_600x900.jpg", "/cache/42/library_600x900.jpg", downloaded), "/game-covers/42/library_600x900.jpg?v=2026-11-14T10:00:00Z"; got != want {
+	if got, want := coverURL(42, "library_600x900.jpg", true, downloaded), "/game-covers/42/library_600x900.jpg?v=2026-11-14T10:00:00Z"; got != want {
 		t.Fatalf("library cover url = %q, want %q", got, want)
 	}
-	if got, want := coverURL(4173830, "hero_capsule.jpg", "/cache/4173830/hero_capsule.jpg", sql.NullString{}), "/game-covers/4173830/hero_capsule.jpg"; got != want {
+	if got, want := coverURL(4173830, "hero_capsule.jpg", true, sql.NullString{}), "/game-covers/4173830/hero_capsule.jpg"; got != want {
 		t.Fatalf("hero cover url = %q, want %q", got, want)
 	}
-	if got, want := coverURL(4173830, "main_capsule.jpg", "/cache/4173830/main_capsule.jpg", downloaded), "/game-covers/4173830/main_capsule.jpg?v=2026-11-14T10:00:00Z"; got != want {
+	if got, want := coverURL(4173830, "main_capsule.jpg", true, downloaded), "/game-covers/4173830/main_capsule.jpg?v=2026-11-14T10:00:00Z"; got != want {
 		t.Fatalf("main cover url = %q, want %q", got, want)
 	}
-	if got := coverURL(42, "library_600x900.jpg", "", downloaded); got != "" {
+	if got := coverURL(42, "library_600x900.jpg", false, downloaded); got != "" {
 		t.Fatalf("cover url without path = %q, want empty", got)
 	}
 }
@@ -1670,14 +1670,14 @@ func TestSaveCoverRecomputesMissingCoverTagForEntryImage(t *testing.T) {
 
 func TestCoverRoundTripKeepsDownloadTimeWhenNotDownloaded(t *testing.T) {
 	repo := testRepository(t)
-	if err := repo.SaveCover(CoverUpdate{ImageAppID: 42, Kind: "library", FileName: "library_600x900.jpg", Path: "/cache/42/library_600x900.jpg", SourceURL: "https://example.com/42.jpg", Downloaded: true}); err != nil {
+	if err := repo.SaveCover(CoverUpdate{ImageAppID: 42, Kind: "library", FileName: "library_600x900.jpg", Cached: true, SourceURL: "https://example.com/42.jpg", Downloaded: true}); err != nil {
 		t.Fatal(err)
 	}
 	first, ok, err := repo.GetCover(42)
 	if err != nil || !ok {
 		t.Fatalf("GetCover() ok=%v err=%v, want stored cover", ok, err)
 	}
-	if first.Kind != "library" || first.FileName != "library_600x900.jpg" || first.Path == "" || first.SourceURL == "" || first.CheckedAt == nil || first.DownloadedAt == nil {
+	if first.Kind != "library" || first.FileName != "library_600x900.jpg" || !first.Cached || first.SourceURL == "" || first.CheckedAt == nil || first.DownloadedAt == nil {
 		t.Fatalf("cover = %#v, want library cover with timestamps", first)
 	}
 
@@ -1686,7 +1686,7 @@ func TestCoverRoundTripKeepsDownloadTimeWhenNotDownloaded(t *testing.T) {
 	if _, err := repo.db.Exec(`update cover_images set downloaded_at=?, checked_at=? where image_appid=42`, oldDownload, oldDownload); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.SaveCover(CoverUpdate{ImageAppID: 42, Kind: "library", FileName: "library_600x900.jpg", Path: "/cache/42/library_600x900.jpg", SourceURL: "https://example.com/42.jpg", Downloaded: false}); err != nil {
+	if err := repo.SaveCover(CoverUpdate{ImageAppID: 42, Kind: "library", FileName: "library_600x900.jpg", Cached: true, SourceURL: "https://example.com/42.jpg", Downloaded: false}); err != nil {
 		t.Fatal(err)
 	}
 	second, _, err := repo.GetCover(42)
@@ -1701,7 +1701,7 @@ func TestCoverRoundTripKeepsDownloadTimeWhenNotDownloaded(t *testing.T) {
 	}
 
 	// A real download replaces the stored time.
-	if err := repo.SaveCover(CoverUpdate{ImageAppID: 42, Kind: "library", FileName: "library_600x900.jpg", Path: "/cache/42/library_600x900.jpg", SourceURL: "https://example.com/42.jpg", Downloaded: true}); err != nil {
+	if err := repo.SaveCover(CoverUpdate{ImageAppID: 42, Kind: "library", FileName: "library_600x900.jpg", Cached: true, SourceURL: "https://example.com/42.jpg", Downloaded: true}); err != nil {
 		t.Fatal(err)
 	}
 	downloaded, _, err := repo.GetCover(42)
@@ -1731,7 +1731,7 @@ func TestGameCardCoverURLCacheBusts(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedGameSync(t, repo, profile.ID, 42)
-	if err := repo.SaveCover(CoverUpdate{ImageAppID: 42, Kind: "library", FileName: "library_600x900.jpg", Path: "/tmp/cache/images/games/42/library_600x900.jpg", SourceURL: "https://example.com/cover.jpg", Downloaded: true}); err != nil {
+	if err := repo.SaveCover(CoverUpdate{ImageAppID: 42, Kind: "library", FileName: "library_600x900.jpg", Cached: true, SourceURL: "https://example.com/cover.jpg", Downloaded: true}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2054,14 +2054,14 @@ func saveSeedGame(t *testing.T, repo *Repository, profileID, appID int64, gameNa
 
 func mustSaveHeroCover(t *testing.T, repo *Repository, imageAppID int64) {
 	t.Helper()
-	if err := repo.SaveCover(CoverUpdate{ImageAppID: imageAppID, Kind: "hero", FileName: "hero_capsule.jpg", Path: fmt.Sprintf("/cache/images/games/%d/hero_capsule.jpg", imageAppID), SourceURL: "https://example.com/hero.jpg", Downloaded: true}); err != nil {
+	if err := repo.SaveCover(CoverUpdate{ImageAppID: imageAppID, Kind: "hero", FileName: "hero_capsule.jpg", Cached: true, SourceURL: "https://example.com/hero.jpg", Downloaded: true}); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func mustSaveLibraryCover(t *testing.T, repo *Repository, imageAppID int64) {
 	t.Helper()
-	if err := repo.SaveCover(CoverUpdate{ImageAppID: imageAppID, Kind: "library", FileName: "library_600x900.jpg", Path: fmt.Sprintf("/cache/images/games/%d/library_600x900.jpg", imageAppID), SourceURL: "https://example.com/library.jpg", Downloaded: true}); err != nil {
+	if err := repo.SaveCover(CoverUpdate{ImageAppID: imageAppID, Kind: "library", FileName: "library_600x900.jpg", Cached: true, SourceURL: "https://example.com/library.jpg", Downloaded: true}); err != nil {
 		t.Fatal(err)
 	}
 }

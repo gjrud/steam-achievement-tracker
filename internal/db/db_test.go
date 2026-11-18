@@ -28,12 +28,14 @@ func TestOpenAndMigrateFreshDB(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 1)
+	assertUserVersion(t, conn, 2)
 	assertMigration(t, conn, 1)
-	assertCount(t, conn, `select count(*) from schema_migrations`, 1)
+	assertMigration(t, conn, 2)
+	assertCount(t, conn, `select count(*) from schema_migrations`, 2)
 	assertCount(t, conn, `select count(*) from schema_migrations where version=1 and name='initial_schema'`, 1)
 	assertTableList(t, conn, currentTables)
 	assertColumns(t, conn, "games", gamesColumns)
+	assertColumns(t, conn, "cover_images", coverImagesColumns)
 }
 
 func TestFreshSchemaDefaultsAndKeys(t *testing.T) {
@@ -110,8 +112,9 @@ func TestOpenAndMigrateUnversionedDBWithTablesIsBackedUp(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 1)
+	assertUserVersion(t, conn, 2)
 	assertMigration(t, conn, 1)
+	assertMigration(t, conn, 2)
 	assertTable(t, conn, "profile_games")
 	assertCount(t, conn, `select count(*) from other where id=7`, 1)
 	entries := backupFiles(t, paths)

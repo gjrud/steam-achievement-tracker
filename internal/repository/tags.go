@@ -3,7 +3,6 @@ package repository
 import (
 	"database/sql"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -71,7 +70,7 @@ func (r *Repository) recomputeGameTagsTx(tx *sql.Tx, profileID, appID, groupID i
 type gameTagFacts struct {
 	hasAchievements int
 	playtimeForever int
-	coverPath       string
+	coverCached     bool
 	flagDisabled    int
 	missingDLC      int
 	total           int
@@ -87,7 +86,7 @@ type gameTagFacts struct {
 }
 
 func loadTagFacts(tx *sql.Tx, profileID, appID, groupID int64) (gameTagFacts, bool, error) {
-	row := tx.QueryRow(`select g.has_achievements, coalesce(po.playtime_forever,0), coalesce(ci.path,''), coalesce(f.disabled,0), coalesce(f.missing_achievements_in_dlc,0),
+	row := tx.QueryRow(`select g.has_achievements, coalesce(po.playtime_forever,0), coalesce(ci.cached,0), coalesce(f.disabled,0), coalesce(f.missing_achievements_in_dlc,0),
 		pg.total_achievements, pg.unlocked_achievements, pg.completion_percent, pg.missing_avg_unlock, pg.suggestion_score, pg.is_completed, pg.newly_incomplete, pg.sync_warning, pg.last_synced_at, pg.dlc_not_owned
 		from profile_games pg join games g on g.appid=pg.appid
 		left join game_sets gs on gs.appid=pg.appid and gs.groupid=pg.groupid
@@ -96,7 +95,7 @@ func loadTagFacts(tx *sql.Tx, profileID, appID, groupID int64) (gameTagFacts, bo
 		left join profile_owned_games po on po.profile_id=pg.profile_id and po.appid=pg.appid
 		where pg.profile_id=? and pg.appid=? and pg.groupid=?`, profileID, appID, groupID)
 	var facts gameTagFacts
-	err := row.Scan(&facts.hasAchievements, &facts.playtimeForever, &facts.coverPath, &facts.flagDisabled, &facts.missingDLC, &facts.total, &facts.unlocked, &facts.completion, &facts.missingAvg, &facts.suggestionScore, &facts.isCompleted, &facts.newlyIncomplete, &facts.syncWarning, &facts.lastSyncedAt, &facts.dlcNotOwned)
+	err := row.Scan(&facts.hasAchievements, &facts.playtimeForever, &facts.coverCached, &facts.flagDisabled, &facts.missingDLC, &facts.total, &facts.unlocked, &facts.completion, &facts.missingAvg, &facts.suggestionScore, &facts.isCompleted, &facts.newlyIncomplete, &facts.syncWarning, &facts.lastSyncedAt, &facts.dlcNotOwned)
 	if err == sql.ErrNoRows {
 		return gameTagFacts{}, false, nil
 	}
@@ -214,7 +213,7 @@ func issueTagCandidates(f gameTagFacts) []tagCandidate {
 	if f.notOwned() {
 		tags = append(tags, tagCandidate{name: "dlc_not_owned", reason: "DLC for this set is not owned"})
 	}
-	if strings.TrimSpace(f.coverPath) == "" {
+	if !f.coverCached {
 		tags = append(tags, tagCandidate{name: "missing_cover_art", reason: "no cached cover image"})
 	}
 	if f.syncWarning == 1 {

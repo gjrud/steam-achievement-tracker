@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -18,6 +19,8 @@ type migration struct {
 	version int
 	name    string
 	sql     string
+	// compact marks a migration that drops data; the database is compacted after it commits (see compact).
+	compact bool
 }
 
 type schemaState struct {
@@ -85,7 +88,51 @@ func migrate(conn *sql.DB, paths appdata.Paths) error {
 	if err := setUserVersion(tx, target); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// A fresh database holds no dropped data, so it is not compacted. The migration is already committed here, so a
+	// failed compaction is logged and not returned: failing startup would not undo the migration, and compact is not
+	// retried on later opens.
+	if shouldCompact(state, target) {
+		if err := compact(conn); err != nil {
+			// compact's errors already start with "compact database:"; this line only says the migration itself held.
+			log.Printf("migration committed; %v", err)
+		}
+	}
+	return nil
+}
+
+// shouldCompact reports whether the open that migrates state to target compacts afterwards: the database held user
+// tables before the migration (a fresh one has none) and a migration in (version, target] dropped data.
+func shouldCompact(state schemaState, target int) bool {
+	return state.hasUserTables && needsCompaction(state.version, target)
+}
+
+// needsCompaction reports whether a migration in (current, target] dropped data that must leave the file.
+func needsCompaction(current, target int) bool {
+	for _, m := range migrations {
+		if m.compact && m.version > current && m.version <= target {
+			return true
+		}
+	}
+	return false
+}
+
+// compact rewrites the database with VACUUM and truncates the WAL, so freed pages and WAL frames holding dropped
+// data are no longer in the database files. VACUUM cannot run inside a transaction, so it runs after the commit.
+func compact(conn *sql.DB) error {
+	if _, err := conn.Exec("VACUUM"); err != nil {
+		return fmt.Errorf("compact database: %w", err)
+	}
+	var busy, logFrames, checkpointedFrames int
+	if err := conn.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointedFrames); err != nil {
+		return fmt.Errorf("compact database: %w", err)
+	}
+	if busy != 0 || logFrames != checkpointedFrames {
+		return fmt.Errorf("compact database: checkpoint incomplete: busy=%d log=%d checkpointed=%d", busy, logFrames, checkpointedFrames)
+	}
+	return nil
 }
 
 // latestVersion is the highest version in migrations, the version a fully migrated database reports.
@@ -239,7 +286,17 @@ func secureDBFiles(paths appdata.Paths) {
 
 var migrations = []migration{
 	{version: 1, name: "initial_schema", sql: initialSchemaSQL},
+	{version: 2, name: "cover_cached_flag", sql: coverCachedFlagSQL, compact: true},
 }
+
+// coverCachedFlagSQL replaces the stored absolute cover path with a cached flag. The path held the OS user name
+// (GDPR: no filesystem paths in the database). Nothing reads it: covers are served by image app id and file name.
+// Column drops need SQLite 3.35 or newer; the bundled go-sqlite3 ships a newer one.
+const coverCachedFlagSQL = `
+ALTER TABLE cover_images ADD COLUMN cached integer not null default 0;
+UPDATE cover_images SET cached = 1 WHERE path IS NOT NULL AND trim(path) <> '';
+ALTER TABLE cover_images DROP COLUMN path;
+`
 
 // initialSchemaSQL creates the complete current schema in one step. Nothing older than this layout was ever shipped,
 // so there is no upgrade path from earlier layouts. Later schema changes go in new entries appended to migrations.

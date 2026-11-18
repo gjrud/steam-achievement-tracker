@@ -119,6 +119,10 @@ func (c *Client) SetRetryBackoff(fn func(attempt int) time.Duration) {
 // decoded from it, holds the API key.
 var errAPIKeyAsProfileInput = errors.New("this looks like your Steam Web API key; enter your profile URL, SteamID64 or custom name instead")
 
+// errNoVanityMatch is the ResolveVanityURL fallback when Steam sends no message. It is a constant on purpose: the
+// typed name is never echoed, so a SteamID64 typed as a /id/ value cannot reach logs, the UI or the sync history.
+var errNoVanityMatch = errors.New("no Steam profile matches that custom name")
+
 // minGuardedKeyLen skips the input guard for keys too short to be real (real keys are 32 characters),
 // where a substring match would reject ordinary input.
 const minGuardedKeyLen = 8
@@ -181,7 +185,7 @@ func (c *Client) ResolveVanityURL(ctx context.Context, vanity string) (string, e
 		if payload.Response.Message != "" {
 			return "", errors.New(c.redactText(payload.Response.Message))
 		}
-		return "", fmt.Errorf("could not resolve Steam vanity name %q", c.redactText(vanity))
+		return "", errNoVanityMatch
 	}
 	return payload.Response.SteamID, nil
 }
@@ -657,16 +661,33 @@ func (c *Client) getJSONBody(ctx context.Context, path, endpoint string) ([]byte
 	return body, eresult, false, nil
 }
 
-// apiKeyParam matches the key query parameter of a Steam request URL, up to the next '&'.
-// The whole (possibly percent-encoded) value is matched, so only the key value is replaced.
-var apiKeyParam = regexp.MustCompile(`([?&]key=)[^&]*`)
+// queryIdentityParam matches the query parameters of a Steam request URL that carry the API key or a profile
+// identifier: key, steamid, steamids and vanityurl, in any letter case. The name follows a '?' or '&', an HTML
+// escaped '&amp;' (matched by ';'), or a JSON escaped '\u0026'. The value runs up to the next '&', '#', '\',
+// whitespace, quote or angle bracket, so a request URL quoted in an HTML or JSON body does not take the text after
+// it. The whole (possibly percent-encoded) value is matched, so only the value is replaced and the name, like appid,
+// is kept.
+var queryIdentityParam = regexp.MustCompile(`(?i)((?:[?&;]|\\u0026)(?:key|steamids?|vanityurl)=)[^&#\\\s"'<>]*`)
 
-// redactText removes the API key from text that may carry a request URL, a response body or user input.
-// The key= query parameter is replaced by pattern. The key value itself is also replaced wherever it
-// appears, in raw, query-escaped and path-escaped form, because a user can type the key as profile input
-// and it then travels in other parameters (vanityurl) and in messages that echo that input.
+// steamID64Text matches a bare SteamID64 (an individual account in universe 1) anywhere in text. The prefix is
+// 76561, not 7656119: accounts created later have IDs from 76561200000000000 up. The \b word boundaries are
+// required: an ID glued to a letter, digit or underscore is not matched, so an ID inside percent-encoded JSON
+// (%2276561...%22) is missed. All current requests send IDs only in plain steamid/steamids params, which
+// queryIdentityParam covers. A future request that embeds IDs in encoded JSON needs an explicit rule. Appids and
+// unix times are never 17 digits, so they are not matched.
+var steamID64Text = regexp.MustCompile(`\b76561\d{12}\b`)
+
+// redactText removes the API key and profile identifiers from text that may carry a request URL, a response body
+// or user input. It replaces the values of the key, steamid, steamids and vanityurl query parameters and any bare
+// SteamID64. The API key is also replaced wherever it appears, in raw, query-escaped and path-escaped form, because
+// a user can type the key as profile input and it then travels in other parameters and in messages that echo it.
+// Identifiers are redacted here rather than only in URL errors because the other callers carry them too: a
+// response body can echo the request URL (TestHTTPStatusErrorBodyRedactsAPIKey models this), Steam's message can
+// echo the input, and the vanity fallback echoes a typed /id/ value that may be a SteamID64. Names, appids and
+// timestamps are not matched by these patterns and are kept.
 func (c *Client) redactText(s string) string {
-	s = apiKeyParam.ReplaceAllString(s, "${1}REDACTED")
+	s = queryIdentityParam.ReplaceAllString(s, "${1}REDACTED")
+	s = steamID64Text.ReplaceAllString(s, "REDACTED")
 	if c.APIKey == "" {
 		return s
 	}
@@ -676,9 +697,10 @@ func (c *Client) redactText(s string) string {
 	return s
 }
 
-// redactURLError removes the API key from a *url.Error (as returned by Client.Do and
-// NewRequestWithContext) by redacting a copy of its URL. Op and Err are kept so errors.Is/As and
-// Timeout() still see the original cause. Other errors, including nil, are returned unchanged.
+// redactURLError redacts a copy of the URL of a *url.Error (as returned by Client.Do and
+// NewRequestWithContext) with redactText, so the key and the SteamID64/vanity query values are gone. Op and Err
+// are kept so errors.Is/As and Timeout() still see the original cause. Other errors, including nil, are returned
+// unchanged.
 func (c *Client) redactURLError(err error) error {
 	urlErr, ok := err.(*url.Error)
 	if !ok {
@@ -689,7 +711,7 @@ func (c *Client) redactURLError(err error) error {
 	return &redacted
 }
 
-// redactBody removes the API key from a non-2xx response body, which Steam may echo back.
+// redactBody removes the API key and profile identifiers from a non-2xx response body, which may echo the request.
 func (c *Client) redactBody(body string) string {
 	return c.redactText(body)
 }

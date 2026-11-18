@@ -1156,6 +1156,50 @@ func TestHTTPStatusErrorBodyRedactsAPIKey(t *testing.T) {
 	}
 }
 
+// A non-2xx body can echo a SteamID64 as a JSON field or inside a request URL. Both forms must be removed.
+func TestRedactBodyRemovesSteamID64(t *testing.T) {
+	c := &Client{APIKey: testLongKey}
+	tests := []struct{ name, in, want string }{
+		{name: "json field", in: `{"error":"bad request","steamid":"` + realSteamID + `"}`, want: `{"error":"bad request","steamid":"REDACTED"}`},
+		{name: "query value", in: "see https://h/x?steamid=" + realSteamID + "&appid=440", want: "see https://h/x?steamid=REDACTED&appid=440"},
+		{name: "bare in text", in: "player " + realSteamID + " not found", want: "player REDACTED not found"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := c.redactBody(tc.in)
+			if got != tc.want {
+				t.Fatalf("redactBody(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if strings.Contains(got, realSteamID) {
+				t.Fatalf("redactBody kept the SteamID64: %q", got)
+			}
+		})
+	}
+}
+
+func TestHTTPStatusErrorBodyRedactsSteamID64(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"forbidden","steamid":"` + realSteamID + `","request":"https://h/x?steamid=` + realSteamID + `&appid=440"}`))
+	}))
+	defer server.Close()
+	client := &Client{APIKey: testLongKey, BaseURL: server.URL, HTTPClient: server.Client()}
+	client.retryBackoff = func(int) time.Duration { return 0 }
+
+	_, err := client.GetOwnedGames(context.Background(), testSteamID)
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.Code != http.StatusForbidden {
+		t.Fatalf("err = %#v, want 403 *HTTPStatusError", err)
+	}
+	if strings.Contains(err.Error(), realSteamID) {
+		t.Fatalf("error leaks SteamID64: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), `"steamid":"REDACTED"`) || !strings.Contains(err.Error(), "appid=440") {
+		t.Fatalf("error = %q, want the body kept with the SteamID64 redacted", err.Error())
+	}
+}
+
 func TestRedactURLError(t *testing.T) {
 	sentinel := errors.New("dial tcp 127.0.0.1:1: connection refused")
 	tests := []struct {
@@ -1163,14 +1207,14 @@ func TestRedactURLError(t *testing.T) {
 		rawURL string
 		want   string
 	}{
-		{name: "key first", rawURL: "https://api.steampowered.com/x/?key=test-key&steamid=1", want: "https://api.steampowered.com/x/?key=REDACTED&steamid=1"},
-		{name: "key middle", rawURL: "https://h/x?steamid=1&key=test-key&format=json", want: "https://h/x?steamid=1&key=REDACTED&format=json"},
-		{name: "key last", rawURL: "https://h/x?steamid=1&key=test-key", want: "https://h/x?steamid=1&key=REDACTED"},
+		{name: "key first", rawURL: "https://api.steampowered.com/x/?key=test-key&steamid=1", want: "https://api.steampowered.com/x/?key=REDACTED&steamid=REDACTED"},
+		{name: "key middle", rawURL: "https://h/x?steamid=1&key=test-key&format=json", want: "https://h/x?steamid=REDACTED&key=REDACTED&format=json"},
+		{name: "key last", rawURL: "https://h/x?appid=1&key=test-key", want: "https://h/x?appid=1&key=REDACTED"},
 		{name: "key only param", rawURL: "https://h/x?key=test-key", want: "https://h/x?key=REDACTED"},
 		{name: "empty key value", rawURL: "https://h/x?key=&a=1", want: "https://h/x?key=REDACTED&a=1"},
 		{name: "url-encoded key value", rawURL: "https://h/x?key=a%2Bb%3Dc&x=1", want: "https://h/x?key=REDACTED&x=1"},
-		{name: "no key param", rawURL: "https://h/x?steamid=1", want: "https://h/x?steamid=1"},
-		{name: "similar param name kept", rawURL: "https://h/x?monkey=banana&steamid=1", want: "https://h/x?monkey=banana&steamid=1"},
+		{name: "no key param", rawURL: "https://h/x?appid=1", want: "https://h/x?appid=1"},
+		{name: "similar param name kept", rawURL: "https://h/x?monkey=banana&appid=1", want: "https://h/x?monkey=banana&appid=1"},
 		{name: "unparsable URL text", rawURL: "://bad host?key=test-key", want: "://bad host?key=REDACTED"},
 	}
 	for _, tc := range tests {
@@ -1205,6 +1249,150 @@ func TestRedactURLErrorPassThroughAndPlainErrors(t *testing.T) {
 	}
 }
 
+// realSteamID is a SteamID64 in the shape Steam issues. No error text may contain it.
+const realSteamID = "76561198000000001"
+
+func TestRedactURLErrorIdentityParams(t *testing.T) {
+	sentinel := errors.New("dial tcp 127.0.0.1:1: connection refused")
+	tests := []struct {
+		name   string
+		rawURL string
+		want   string
+	}{
+		{name: "steamid with key and appid", rawURL: "https://h/x?key=test-key&steamid=" + realSteamID + "&appid=440", want: "https://h/x?key=REDACTED&steamid=REDACTED&appid=440"},
+		{name: "steamids with key", rawURL: "https://h/x?key=test-key&steamids=" + realSteamID, want: "https://h/x?key=REDACTED&steamids=REDACTED"},
+		{name: "vanityurl with key and format", rawURL: "https://h/x?format=json&key=test-key&vanityurl=gabelogan", want: "https://h/x?format=json&key=REDACTED&vanityurl=REDACTED"},
+		{name: "uppercase names", rawURL: "https://h/x?KEY=test-key&SteamID=" + realSteamID + "&STEAMIDS=" + realSteamID + "&VanityURL=gabelogan", want: "https://h/x?KEY=REDACTED&SteamID=REDACTED&STEAMIDS=REDACTED&VanityURL=REDACTED"},
+		{name: "percent-encoded vanity value", rawURL: "https://h/x?vanityurl=a%26steamid%3D" + realSteamID + "&appid=440", want: "https://h/x?vanityurl=REDACTED&appid=440"},
+		{name: "appid and timestamps kept", rawURL: "https://h/x?appid=2968420&unlocktime=1700000000&language=english&steamid=" + realSteamID, want: "https://h/x?appid=2968420&unlocktime=1700000000&language=english&steamid=REDACTED"},
+		{name: "similar names kept", rawURL: "https://h/x?steamidx=1&steamidlist=2&monkey=banana&appid=440", want: "https://h/x?steamidx=1&steamidlist=2&monkey=banana&appid=440"},
+		{name: "bare SteamID64 in text", rawURL: "https://h/profiles/" + realSteamID + "/x?appid=440", want: "https://h/profiles/REDACTED/x?appid=440"},
+		{name: "clan id kept", rawURL: "https://h/x?clanid=103582791429521408", want: "https://h/x?clanid=103582791429521408"},
+		{name: "clansteamid and monkey kept, html separators", rawURL: "https://h/x?clansteamid=1&amp;monkey=banana&amp;appid=440", want: "https://h/x?clansteamid=1&amp;monkey=banana&amp;appid=440"},
+		// HTML-escaped separators: '&amp;' is matched by its ';'.
+		{name: "html escaped vanityurl, appid kept", rawURL: "https://h/x?format=json&amp;vanityurl=gabelogan&amp;appid=5", want: "https://h/x?format=json&amp;vanityurl=REDACTED&amp;appid=5"},
+		{name: "plain ampersand vanityurl, appid kept", rawURL: "https://h/x?format=json&vanityurl=gabelogan&appid=5", want: "https://h/x?format=json&vanityurl=REDACTED&appid=5"},
+		// JSON-escaped separators: Go's encoding/json writes '&' as \u0026 in a body, and the value stops at the backslash.
+		{name: "json escaped vanityurl, appid kept", rawURL: `{"url":"https://h/x?format=json\u0026vanityurl=gabelogan\u0026appid=5"}`, want: `{"url":"https://h/x?format=json\u0026vanityurl=REDACTED\u0026appid=5"}`},
+		// The key value differs from the client's APIKey, so only the parameter pattern can redact it (the literal
+		// key replacement would not match). The steamid value (12345) is not SteamID64-shaped, so the bare-ID rule cannot mask it. This pins the \u0026 prefix alternative for steamid and key.
+		{name: "json escaped steamid and key", rawURL: `{"url":"https://h/x?appid=5\u0026steamid=12345\u0026key=other-key"}`, want: `{"url":"https://h/x?appid=5\u0026steamid=REDACTED\u0026key=REDACTED"}`},
+		{name: "html escaped key other than client key", rawURL: "https://h/x?appid=5&amp;key=other-key&amp;appid=6", want: "https://h/x?appid=5&amp;key=REDACTED&amp;appid=6"},
+		// A value ends at '&', '#', whitespace, a quote or an angle bracket, so text after a URL quoted in a body survives.
+		{name: "json value kept after", rawURL: `{"url":"https://h/x?vanityurl=gabelogan","appid":440}`, want: `{"url":"https://h/x?vanityurl=REDACTED","appid":440}`},
+		{name: "html attribute value kept after", rawURL: `<a href="https://h/x?key=test-key">open</a> and steamid text`, want: `<a href="https://h/x?key=REDACTED">open</a> and steamid text`},
+		{name: "whitespace ends value", rawURL: "see https://h/x?steamid=" + realSteamID + " next", want: "see https://h/x?steamid=REDACTED next"},
+		{name: "fragment ends value", rawURL: "https://h/x?steamids=" + realSteamID + "#top", want: "https://h/x?steamids=REDACTED#top"},
+		{name: "single quote ends value", rawURL: "'https://h/x?vanityurl=gabelogan'", want: "'https://h/x?vanityurl=REDACTED'"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := &url.Error{Op: "Get", URL: tc.rawURL, Err: sentinel}
+			got := (&Client{APIKey: "test-key"}).redactURLError(orig)
+			var ue *url.Error
+			if !errors.As(got, &ue) {
+				t.Fatalf("got %#v, want *url.Error", got)
+			}
+			if ue.URL != tc.want {
+				t.Fatalf("URL = %q, want %q", ue.URL, tc.want)
+			}
+			if ue.Op != "Get" || !errors.Is(got, sentinel) {
+				t.Fatalf("Op/Err not preserved: %#v", ue)
+			}
+			if strings.Contains(got.Error(), realSteamID) || strings.Contains(got.Error(), "test-key") || strings.Contains(got.Error(), "other-key") || strings.Contains(got.Error(), "steamid=12345") {
+				t.Fatalf("error leaks identifiers: %q", got.Error())
+			}
+		})
+	}
+}
+
+// Real requests through a transport that times out. Every error in the chain must be free of the key and the
+// SteamIDs/vanity name, and errors.Is(DeadlineExceeded) and Timeout() must still hold after redaction.
+func TestTransportErrorHidesIdentifiersAndKeepsCause(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(c *Client) error
+	}{
+		{name: "owned games steamid", call: func(c *Client) error {
+			_, err := c.GetOwnedGames(context.Background(), realSteamID)
+			return err
+		}},
+		{name: "player summary steamids", call: func(c *Client) error {
+			_, err := c.GetPlayerSummary(context.Background(), realSteamID)
+			return err
+		}},
+		{name: "user achievements steamid", call: func(c *Client) error {
+			_, err := c.GetUserAchievements(context.Background(), realSteamID, 440)
+			return err
+		}},
+		{name: "vanity lookup", call: func(c *Client) error {
+			_, err := c.ResolveVanityURL(context.Background(), "gabelogan")
+			return err
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, context.DeadlineExceeded
+			})}
+			client := &Client{APIKey: "test-key", BaseURL: "http://steam.invalid", HTTPClient: httpClient}
+			client.retryBackoff = func(int) time.Duration { return 0 }
+
+			err := tc.call(client)
+			if err == nil {
+				t.Fatal("err = nil, want transport error")
+			}
+			for e := err; e != nil; e = errors.Unwrap(e) {
+				for _, secret := range []string{"test-key", realSteamID, "gabelogan"} {
+					if strings.Contains(e.Error(), secret) {
+						t.Fatalf("%T in chain leaks %q: %q", e, secret, e.Error())
+					}
+				}
+			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("errors.Is(err, DeadlineExceeded) = false for %v", err)
+			}
+			var ue *url.Error
+			if !errors.As(err, &ue) || !ue.Timeout() {
+				t.Fatalf("err = %#v, want *url.Error with Timeout() true", err)
+			}
+			if !strings.Contains(err.Error(), "REDACTED") {
+				t.Fatalf("error = %q, want redacted query values", err.Error())
+			}
+		})
+	}
+}
+
+// The no-match fallback (Steam sends no message) must not echo the typed name, whatever it is: a SteamID64 typed as
+// a /id/ value, or an ordinary name. The error is the same constant for every input.
+func TestVanityFallbackDoesNotEchoTypedInput(t *testing.T) {
+	const typo = "gabelogan-typo"
+	inputs := map[string]string{
+		"steamid64 in /id/ URL": "https://steamcommunity.com/id/" + realSteamID,
+		"name in /id/ URL":      "https://steamcommunity.com/id/" + typo,
+		"bare name":             typo,
+	}
+	for name, input := range inputs {
+		t.Run(name, func(t *testing.T) {
+			client, closeServer := testClient(t, map[string]string{"/ISteamUser/ResolveVanityURL/v1/": `{"response":{"success":42}}`})
+			defer closeServer()
+			client.APIKey = "test-key"
+			_, err := client.ResolveProfileInput(context.Background(), input)
+			if err == nil {
+				t.Fatal("err = nil, want no-match error")
+			}
+			if err.Error() != errNoVanityMatch.Error() {
+				t.Fatalf("err = %q, want constant %q", err.Error(), errNoVanityMatch.Error())
+			}
+			for _, echoed := range []string{realSteamID, typo} {
+				if strings.Contains(err.Error(), echoed) {
+					t.Fatalf("err = %q, echoes typed input %q", err.Error(), echoed)
+				}
+			}
+		})
+	}
+}
+
 func TestRedactTextRemovesKeyValueEverywhere(t *testing.T) {
 	const key = "AB12+/=cd"
 	c := &Client{APIKey: key}
@@ -1219,7 +1407,7 @@ func TestRedactTextRemovesKeyValueEverywhere(t *testing.T) {
 		{name: "key param and vanity", in: "?key=" + url.QueryEscape(key) + "&vanityurl=" + url.QueryEscape(key), want: "?key=REDACTED&vanityurl=REDACTED"},
 		{name: "other case", in: "typed " + strings.ToLower(key) + " here", want: "typed REDACTED here"},
 		{name: "lower-case percent hex", in: "/id/" + strings.ToLower(url.PathEscape(key)), want: "/id/REDACTED"},
-		{name: "unrelated text kept", in: "https://h/x?steamid=1", want: "https://h/x?steamid=1"},
+		{name: "unrelated text kept", in: "https://h/x?appid=1", want: "https://h/x?appid=1"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1298,13 +1486,13 @@ func TestResolveVanityURLTransportErrorDoesNotLeakAPIKey(t *testing.T) {
 	}
 }
 
-// The fallback error echoes the typed name, and Steam's own message may echo anything.
+// The fallback error is a constant that carries no input. Steam's own message may echo the key, so it must be redacted.
 func TestResolveVanityURLNoMatchErrorsDoNotLeakAPIKey(t *testing.T) {
 	tests := []struct {
-		name, key, vanity, body string
+		name, key, vanity, body, wantText string
 	}{
-		{name: "fallback echoes typed name", key: shortTestKey, vanity: shortTestKey, body: `{"response":{"success":42}}`},
-		{name: "steam message echoes key", key: testLongKey, vanity: "someone", body: `{"response":{"success":42,"message":"No match for ` + testLongKey + `"}}`},
+		{name: "fallback typed name equals key", key: shortTestKey, vanity: shortTestKey, body: `{"response":{"success":42}}`, wantText: "no Steam profile matches that custom name"},
+		{name: "steam message echoes key", key: testLongKey, vanity: "someone", body: `{"response":{"success":42,"message":"No match for ` + testLongKey + `"}}`, wantText: "REDACTED"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1312,8 +1500,8 @@ func TestResolveVanityURLNoMatchErrorsDoNotLeakAPIKey(t *testing.T) {
 			defer closeServer()
 			client.APIKey = tc.key
 			_, err := client.ResolveVanityURL(context.Background(), tc.vanity)
-			if err == nil || strings.Contains(err.Error(), tc.key) || !strings.Contains(err.Error(), "REDACTED") {
-				t.Fatalf("err = %v, want a redacted error without the API key", err)
+			if err == nil || strings.Contains(err.Error(), tc.key) || !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("err = %v, want text %q without the API key", err, tc.wantText)
 			}
 		})
 	}
@@ -1889,8 +2077,8 @@ func TestResolveVanityURL(t *testing.T) {
 	}{
 		{name: "success", body: `{"response":{"success":1,"steamid":"76561197960287930"}}`, want: "76561197960287930"},
 		{name: "no match with message", body: `{"response":{"success":42,"message":"No match"}}`, wantErr: "No match"},
-		{name: "no match without message", body: `{"response":{"success":42}}`, wantErr: `could not resolve Steam vanity name "nobody"`},
-		{name: "success without steamid", body: `{"response":{"success":1}}`, wantErr: `could not resolve Steam vanity name "nobody"`},
+		{name: "no match without message", body: `{"response":{"success":42}}`, wantErr: "no Steam profile matches that custom name"},
+		{name: "success without steamid", body: `{"response":{"success":1}}`, wantErr: "no Steam profile matches that custom name"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
