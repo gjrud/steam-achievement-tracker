@@ -566,7 +566,7 @@ func (c *Client) getJSONWithEResult(ctx context.Context, path string, q url.Valu
 func (c *Client) fetchJSON(ctx context.Context, path string, q url.Values, target any, checkEResult bool) (int, error) {
 	endpoint := c.endpoint(path, q)
 	var lastErr error
-	for attempt := 0; attempt < 4; attempt++ {
+	for attempt := range 4 {
 		if err := c.waitRetry(ctx, attempt); err != nil {
 			return 0, err
 		}

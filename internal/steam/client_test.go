@@ -1689,8 +1689,7 @@ func TestTransportErrorsAreRetried(t *testing.T) {
 		defer closeServer()
 
 		_, err := client.GetOwnedGames(context.Background(), testSteamID)
-		var ue *url.Error
-		if !errors.As(err, &ue) {
+		if _, ok := errors.AsType[*url.Error](err); !ok {
 			t.Fatalf("err = %#v, want *url.Error from transport", err)
 		}
 		if hits.Load() != 4 {
@@ -1731,7 +1730,7 @@ func TestDefaultRetryDelayBoundsPerAttempt(t *testing.T) {
 	for attempt := 1; attempt <= 4; attempt++ {
 		base := want[attempt]
 		seen := map[time.Duration]bool{}
-		for i := 0; i < 5000; i++ {
+		for range 5000 {
 			d := c.retryDelay(attempt)
 			if d < base || d >= base+250*time.Millisecond {
 				t.Fatalf("attempt %d delay = %v, want in [%v, %v)", attempt, d, base, base+250*time.Millisecond)

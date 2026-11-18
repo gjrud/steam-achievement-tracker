@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -482,12 +483,7 @@ func TestFullSyncDLCNotOwnedFlipsWhenDLCIsBought(t *testing.T) {
 }
 
 func hasTag(tags []string, want string) bool {
-	for _, tag := range tags {
-		if tag == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(tags, want)
 }
 
 func TestFullSyncStoresNoAchievementsForGameWithoutSchema(t *testing.T) {
@@ -1310,10 +1306,10 @@ func TestBuildSetEntriesMissingAverageUsesCountableLockedOnly(t *testing.T) {
 	game := steam.GameAchievements{
 		Sets: []steam.AchievementSet{{GroupID: 0, Public: true}},
 		Achievements: []steam.SetAchievement{
-			{InternalName: "A", Key: 1, GlobalPercent: pct(50)},
-			{InternalName: "B", Key: 2, GlobalPercent: pct(10)},
+			{InternalName: "A", Key: 1, GlobalPercent: new(float64(50))},
+			{InternalName: "B", Key: 2, GlobalPercent: new(float64(10))},
 			{InternalName: "C", Key: 3},
-			{InternalName: "D", Key: 4, GlobalPercent: pct(90), Archived: true},
+			{InternalName: "D", Key: 4, GlobalPercent: new(float64(90)), Archived: true},
 		},
 	}
 	entries := buildSetEntries(42, game, steam.UserAchievements{Unlocked: unlockedKeys(1), Groups: groupSet(0)})
@@ -1765,7 +1761,7 @@ func (h *handshake) open() {
 // awaitStarted waits until n requests have reached the server. It fails the test instead of hanging.
 func (h *handshake) awaitStarted(t *testing.T, n int) {
 	t.Helper()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		select {
 		case <-h.started:
 		case <-time.After(10 * time.Second):
@@ -2289,7 +2285,7 @@ func pws2Game() steam.GameAchievements {
 // achievementsOf builds count achievements of one group with consecutive keys starting at firstKey.
 func achievementsOf(group, firstKey int64, count int) []steam.SetAchievement {
 	out := make([]steam.SetAchievement, 0, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		out = append(out, steam.SetAchievement{
 			InternalName: fmt.Sprintf("G%d_A%d", group, i),
 			Key:          firstKey + int64(i),
@@ -2331,5 +2327,3 @@ func groupSet(ids ...int64) map[int64]bool {
 	}
 	return out
 }
-
-func pct(v float64) *float64 { return &v }

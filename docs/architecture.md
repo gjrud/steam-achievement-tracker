@@ -9,7 +9,7 @@ The app is a Wails v3 desktop application for Linux and Windows 10+ (amd64). The
 | Concern | Technology |
 | --- | --- |
 | Desktop shell | [Wails v3](https://v3.wails.io) (`v3.1.0`). Linux: GTK 4 + WebKitGTK 6.0 through CGO. Windows 10+ amd64: WebView2. |
-| Backend | Go 1.26 (`go.mod`: 1.26.2). Exported `App` methods are bound to the frontend as a Wails service. |
+| Backend | Go 1.27 (`go.mod`: 1.27.4). Exported `App` methods are bound to the frontend as a Wails service. |
 | Local storage | SQLite through `github.com/mattn/go-sqlite3` (CGO; SQLite is compiled in, no system library needed), WAL mode. |
 | Secrets | `github.com/zalando/go-keyring`: Secret Service (D-Bus) on Linux, Windows Credential Manager on Windows. |
 | Logging | Standard `log` with `gopkg.in/natefinch/lumberjack.v2` rotation. The Wails `slog` logger is bridged into it (`wailslog.go`). |

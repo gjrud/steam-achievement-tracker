@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -282,7 +283,7 @@ func TestDashboardLatestSyncRunScopedToProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.FinishSyncRun(run2, "failed", 1, 0, 1, StringPtr("broken")); err != nil {
+	if err := repo.FinishSyncRun(run2, "failed", 1, 0, 1, new("broken")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -511,12 +512,7 @@ func TestDLCNotOwnedSetsStayOutOfTotalsAndRankLast(t *testing.T) {
 }
 
 func hasTagValue(tags []string, want string) bool {
-	for _, tag := range tags {
-		if tag == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(tags, want)
 }
 
 func TestSortGameCardsTieBreaksByEntryKey(t *testing.T) {
@@ -2005,7 +2001,7 @@ func saveSeedGame(t *testing.T, repo *Repository, profileID, appID int64, gameNa
 		}
 		var lastError *string
 		if seed.SyncWarning {
-			lastError = StringPtr("temporary Steam failure")
+			lastError = new("temporary Steam failure")
 		}
 		sets = append(sets, SetSyncUpdate{
 			GroupID:              seed.GroupID,

@@ -268,7 +268,7 @@ func seedSyntheticDashboard(tb testing.TB, repo *Repository, profileID int64, ap
 	tb.Helper()
 	rng := rand.New(rand.NewSource(42))
 	now := time.Now().UTC().Format(time.RFC3339)
-	for i := 0; i < apps; i++ {
+	for i := range apps {
 		appID := int64(1000 + i)
 		playtime := 0
 		if rng.Intn(4) != 0 {
@@ -335,11 +335,11 @@ func syntheticSet(rng *rand.Rand, appID, groupID int64, name string, dlcAppID in
 	var lastError *string
 	warning := rng.Intn(20) == 0
 	if warning {
-		lastError = StringPtr("temporary Steam failure")
+		lastError = new("temporary Steam failure")
 	}
 	dlcNotOwned := dlcAppID != 0 && rng.Intn(10) == 0
 	achievements := make([]AchievementRecord, 0, total)
-	for j := 0; j < total; j++ {
+	for j := range total {
 		gp := missing
 		achievements = append(achievements, AchievementRecord{APIName: fmt.Sprintf("ACH_%d_%d_%d", appID, groupID, j), GlobalPercent: &gp, Unlocked: j < unlocked})
 	}

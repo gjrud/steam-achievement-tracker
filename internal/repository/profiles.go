@@ -3,7 +3,7 @@ package repository
 import (
 	"database/sql"
 	"fmt"
-	"sort"
+	"slices"
 	"time"
 )
 
@@ -150,7 +150,7 @@ func mergeAppIDs(a, b []int64) []int64 {
 			merged = append(merged, id)
 		}
 	}
-	sort.Slice(merged, func(i, j int) bool { return merged[i] < merged[j] })
+	slices.Sort(merged)
 	return merged
 }
 

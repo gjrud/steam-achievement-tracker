@@ -78,16 +78,14 @@ func TestWriteRacingInitAndFallback(t *testing.T) {
 
 	var writers sync.WaitGroup
 	for range 4 {
-		writers.Add(1)
-		go func() {
-			defer writers.Done()
+		writers.Go(func() {
 			for range 5000 {
 				if _, err := Writer().Write([]byte("race line\n")); err != nil {
 					t.Errorf("write: %v", err)
 					return
 				}
 			}
-		}()
+		})
 	}
 	for i := range 50 {
 		Init(paths[i%2])

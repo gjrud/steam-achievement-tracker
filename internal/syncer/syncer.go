@@ -7,7 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -112,7 +112,7 @@ func gameRecord(g steam.OwnedGame) repository.GameRecord {
 func (r *fullSyncRun) syncGames(ctx context.Context, games []steam.OwnedGame) error {
 	jobs := make(chan steam.OwnedGame)
 	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		wg.Add(1)
 		go r.syncWorker(ctx, jobs, &wg)
 	}
@@ -368,7 +368,7 @@ func withDefaultSets(sets []steam.AchievementSet, byGroup map[int64][]steam.SetA
 	if len(missing) == 0 {
 		return sets
 	}
-	sort.Slice(missing, func(i, j int) bool { return missing[i] < missing[j] })
+	slices.Sort(missing)
 	out := make([]steam.AchievementSet, 0, len(sets)+len(missing))
 	out = append(out, sets...)
 	for _, groupID := range missing {
@@ -564,12 +564,10 @@ func shouldFallbackToLegacy(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
+	if _, ok := errors.AsType[*url.Error](err); ok {
 		return false
 	}
-	var statusErr *steam.HTTPStatusError
-	if errors.As(err, &statusErr) {
+	if statusErr, ok := errors.AsType[*steam.HTTPStatusError](err); ok {
 		return !transientSteamStatus(statusErr.Code)
 	}
 	var eresultErr *steam.EResultError
@@ -598,12 +596,7 @@ func coverImageAppIDs(appID int64, entries []setEntry) []int64 {
 }
 
 func containsAppID(ids []int64, id int64) bool {
-	for _, existing := range ids {
-		if existing == id {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(ids, id)
 }
 
 // refreshCovers refreshes the cover of every image app id of a game. Failures are logged and never fail the game sync.

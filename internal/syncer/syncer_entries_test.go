@@ -37,10 +37,10 @@ func TestBuildSetEntriesMissingAverageIsMeanOfLockedPercents(t *testing.T) {
 	game := steam.GameAchievements{
 		Sets: []steam.AchievementSet{{GroupID: 0, Public: true}},
 		Achievements: []steam.SetAchievement{
-			{InternalName: "DONE", Key: 1, GlobalPercent: pct(90)},
-			{InternalName: "LOCK_A", Key: 2, GlobalPercent: pct(10)},
-			{InternalName: "LOCK_B", Key: 3, GlobalPercent: pct(30)},
-			{InternalName: "LOCK_C", Key: 4, GlobalPercent: pct(51), Archived: true},
+			{InternalName: "DONE", Key: 1, GlobalPercent: new(float64(90))},
+			{InternalName: "LOCK_A", Key: 2, GlobalPercent: new(float64(10))},
+			{InternalName: "LOCK_B", Key: 3, GlobalPercent: new(float64(30))},
+			{InternalName: "LOCK_C", Key: 4, GlobalPercent: new(float64(51)), Archived: true},
 		},
 	}
 	entries := buildSetEntries(42, game, steam.UserAchievements{Unlocked: unlockedKeys(1), Groups: groupSet(0)})
@@ -68,7 +68,7 @@ func TestBuildSetEntriesSynthesizedSetsFollowGroupIDOrder(t *testing.T) {
 		Achievements: achs,
 	}
 	want := []int64{0, 3, 5, 7, 9, 11}
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		entries := buildSetEntries(88, game, steam.UserAchievements{Groups: groupSet(0)})
 		got := make([]int64, 0, len(entries))
 		for _, entry := range entries {

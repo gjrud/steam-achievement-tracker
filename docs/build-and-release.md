@@ -6,7 +6,7 @@ This document covers how the app is built, packaged and released: prerequisites,
 
 Development requirements. CI and the release workflow pin matching versions where possible (see [Upgrading Wails](#upgrading-wails)).
 
-- Go 1.26.2 or newer (`go.mod`). The Go image in `build/docker/Dockerfile.cross` uses `golang:1.26-trixie`.
+- Go 1.27.4 or newer (`go.mod`). The Go image in `build/docker/Dockerfile.cross` uses `golang:1.27-trixie`.
 - Node.js 22.22.2 or newer on the 22.x line, 24.15 or newer on 24.x, or 26 or newer, with npm. Vite 8 alone needs 20.19+ or 22.12+; the test tooling (Vitest 5, jsdom 31) sets the stricter floor. CI uses Node 22.
 - The Wails v3 CLI, `wails3`, at the version in `go.mod` (`v3.1.0`):
 
@@ -85,7 +85,7 @@ Root tasks: `build`, `package`, `run`, `dev` (`wails3 dev -config ./build/config
 
 - `APP_ID` is `io.github.gjrud.steam-achievement-tracker`. It must equal `ApplicationID` in `main.go`. GTK sends it as the Wayland app id, and the desktop shell matches the window to the `.desktop` file and the icon with the same name.
 - `build` selects `build:native` or `build:docker`. Native is used when `CGO_ENABLED` is not `1` (the `purego` tag), or when the host is Linux with a C compiler (`wails3 tool has "gcc|clang"`) and the target arch equals the host. Otherwise it uses `build:docker`.
-- `build:native` runs `go build` with `GOOS=linux`. Production uses `-tags production -trimpath -buildvcs=false -ldflags="-w -s"`. Dev uses `-gcflags=all="-l"` and no stripping. Obfuscated builds use `garble` (v0.16.0 in the error message) and add the `wails_obfuscated` tag.
+- `build:native` runs `go build` with `GOOS=linux`. Production uses `-tags production -trimpath -buildvcs=false -ldflags="-w -s"`. Dev uses `-gcflags=all="-l"` and no stripping. Obfuscated builds use `garble` (v0.18.0 in the error message) and add the `wails_obfuscated` tag.
 - `build:docker` runs the `wails-cross` image with the repository mounted. The image must already exist (`setup:docker`).
 - `package` runs `create:appimage`, `create:deb`, `create:rpm` and `create:aur`.
   - `create:appimage` runs `wails3 generate appimage` in `build/linux/appimage`, using a 512x512 PNG (`build/appicon-512.png`) named after the app id, and the generated desktop file. It runs with `VERSION` unset, so the menu entry has no version suffix.
@@ -144,7 +144,7 @@ An AppImage cannot install the desktop entry and icons that the window uses. App
 
 Used by `setup:docker` and `build:docker` (Linux builds on non-Linux hosts, without a C compiler, or for another architecture). It is built once with `wails3 task setup:docker` (about 800 MB).
 
-- Base `golang:1.26-trixie`. Installs GTK 4 and WebKitGTK 6.0 development packages, GTK 3 and webkit2gtk-4.1 development packages (both checked with pkg-config), Node.js and npm (`build.sh` runs `npm` when `frontend/dist` is missing), and garble (`GARBLE_VERSION=v0.16.0`). Zig 0.14.0 is downloaded and its SHA-256 checked against Zig's index. A macOS SDK is downloaded for Darwin targets.
+- Base `golang:1.27-trixie`. Installs GTK 4 and WebKitGTK 6.0 development packages, GTK 3 and webkit2gtk-4.1 development packages (both checked with pkg-config), Node.js and npm (`build.sh` runs `npm` when `frontend/dist` is missing), and garble (`GARBLE_VERSION=v0.18.0`). Zig 0.14.0 is downloaded and its SHA-256 checked against Zig's index. A macOS SDK is downloaded for Darwin targets.
 - `ENTRYPOINT /usr/local/bin/build.sh <os> <arch>` builds `bin/<app>-<os>-<arch>`, with `-tags production` (plus `EXTRA_TAGS`, and `wails_obfuscated` when `OBFUSCATED=true`).
 - Only the Linux targets are reachable from the Taskfiles. The Darwin and Windows wrappers are present in the image but no task calls them. The Windows task states that it does not cross-compile.
 
@@ -258,7 +258,7 @@ The Wails version is specified in these places. Update them together:
 5. Locally, install the same CLI: `go install github.com/wailsapp/wails/v3/cmd/wails3@<version>`.
 6. Regenerate bindings with `wails3 generate bindings`. Update `frontend/src/test/wails-app-mock.js` if the exported methods changed. The drift test enforces it.
 7. If the NSIS helper or its templates changed, regenerate `wails_tools.nsh` as described in the NSIS section, and do not run `update:build-assets` on `build/`.
-8. Dockerfile.cross does not pin the Wails version (it builds the module from the repo). Only the Go image tag is pinned there (`golang:1.26-trixie`). Check that it still matches `go.mod`'s Go version (`go 1.26.2`).
+8. Dockerfile.cross does not pin the Wails version (it builds the module from the repo). Only the Go image tag is pinned there (`golang:1.27-trixie`). Check that it still matches `go.mod`'s Go version (`go 1.27.4`).
 
 Workflow or `changelog.sh` changes affect releases. For hosted validation, follow the authorization and `-rc` guidance in [Cutting a release](#cutting-a-release).
 

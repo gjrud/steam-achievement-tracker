@@ -275,15 +275,14 @@ func stringPtr(v sql.NullString) *string {
 	x := v.String
 	return &x
 }
-func ptrString(v string) *string { return &v }
 
 func ErrorPtr(err error) *string {
 	if err == nil {
 		return nil
 	}
-	return ptrString(err.Error())
+	return new(err.Error())
 }
-func StringPtr(v string) *string                    { return &v }
+
 func FormatGameError(appID int64, err error) string { return fmt.Sprintf("appid %d: %v", appID, err) }
 
 // EntryKey is the stable frontend key of an entry: "<appid>:<groupid>".

@@ -31,8 +31,7 @@ func Paths(err error) error {
 	if errors.As(err, &pathErr) && pathErr.Path != "" {
 		paths = append(paths, pathErr.Path)
 	}
-	var linkErr *os.LinkError
-	if errors.As(err, &linkErr) {
+	if linkErr, ok := errors.AsType[*os.LinkError](err); ok {
 		paths = append(paths, linkErr.Old, linkErr.New)
 	}
 	msg := err.Error()
