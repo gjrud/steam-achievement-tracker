@@ -695,9 +695,13 @@
     font-weight: 800;
   }
 
-  .link-button:hover {
+  /* Same as the tag chips: no global hover lift or brightness filter (the lift's compositor layer makes blurred covers in the grid below flash on WebKitGTK).
+     The :not() parts raise this to (0,5,1), above the global hover selector (0,4,1). */
+  button.link-button:hover:not(:disabled):not(.primary):not(.danger) {
     color: #c7e8fb;
     text-decoration: underline;
+    filter: none;
+    transform: none;
   }
 
   .key-link {
@@ -735,12 +739,15 @@
     opacity: 0.62;
   }
 
+  /* transform: none cancels the global hover lift. On WebKitGTK the lift's compositor layer being created and dropped
+     as the transition starts and ends made blurred landscape covers (.cover-landscape::before) in the grid below flash. */
   .tag-filter-list button.tag-filter:hover:not(.active):not(:disabled) {
     background: var(--tone-active-bg, rgba(148, 163, 184, 0.3));
     border-color: var(--tone-border, rgba(142, 167, 190, 0.42));
     color: #f4fbff;
     filter: none;
     opacity: 1;
+    transform: none;
   }
 
   .tag-filter-list button.active {
@@ -1351,7 +1358,8 @@
     background: rgba(27, 47, 69, 0.8);
   }
 
-  .confirm-token-copy:hover:not(:disabled) {
+  /* Selector reaches (0,5,1) so it beats the global hover lift; before, its transform and filter lines never applied. */
+  button.confirm-token-copy:hover:not(:disabled):not(.primary):not(.danger) {
     background: #1b2f45;
     transform: none;
     filter: brightness(1.1);
@@ -1406,8 +1414,11 @@
     color: #dbe9f6;
   }
 
-  .context-menu button:hover:not(:disabled) {
+  /* The extra :not(.primary) lifts this to (0,4,1), tying the global hover lift so source order cancels it.
+     It does not exclude .danger: danger items keep this hover background, as before. */
+  .context-menu button:hover:not(:disabled):not(.primary) {
     background: #1b2f45;
+    filter: none;
     transform: none;
   }
 
