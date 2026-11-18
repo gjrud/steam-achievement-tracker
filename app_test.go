@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -986,6 +988,34 @@ func TestInitFailureIsReportedAndBlocksActions(t *testing.T) {
 	}
 }
 
+// Bound methods return the init failure to Wails, which logs it. The text must not carry the data directory, while
+// AppState.InitError keeps the full text on purpose. A failed init is retried, not cached: each later call re-runs
+// init and fails the same way, so every call is checked.
+func TestInitFailureBoundErrorsOmitPathsButStateKeepsThem(t *testing.T) {
+	blocker := appdatatest.Block(t)
+	t.Cleanup(logging.Fallback)
+	zk.MockInit()
+	app := &App{}
+
+	for _, call := range []string{"first call", "retry call"} {
+		_, err := app.SaveProfile(ProfilePreview{SteamID64: testSteamID})
+		if err == nil {
+			t.Fatalf("%s: SaveProfile err = nil after failed init, want error", call)
+		}
+		if strings.Contains(err.Error(), blocker) {
+			t.Fatalf("%s: SaveProfile error carries the data directory: %q", call, err.Error())
+		}
+	}
+
+	state, err := app.GetAppState()
+	if err != nil {
+		t.Fatalf("GetAppState err = %v, want nil with InitError set", err)
+	}
+	if !strings.Contains(state.InitError, blocker) {
+		t.Fatalf("InitError = %q, want the full path kept for the UI", state.InitError)
+	}
+}
+
 // seedCachedCover saves the library cover of app 10 in the repository and writes its file under the image cache,
 // as a sync would. It returns the cache directory of app 10.
 func seedCachedCover(t *testing.T, app *App) string {
@@ -994,7 +1024,7 @@ func seedCachedCover(t *testing.T, app *App) string {
 		ImageAppID: 10,
 		Kind:       "library",
 		FileName:   "library_600x900.jpg",
-		Path:       "/cache/images/games/10/library_600x900.jpg",
+		Cached:     true,
 		SourceURL:  "https://example.test/library.jpg",
 		Downloaded: true,
 	}); err != nil {
@@ -1486,6 +1516,40 @@ func TestRemoveCachedGameImagesOnlyRequestedDirs(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "30", "library_600x900.jpg")); err != nil {
 		t.Fatalf("unrequested cache dir removed: %v", err)
+	}
+}
+
+// A failed cache removal reaches the UI and the log, so its error must not carry the cache root (it holds the OS user
+// name). The removal fails because the app id directory is read-only, which needs POSIX permission bits.
+func TestRemoveCachedGameImagesErrorHasNoRootPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits do not block removal on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permission bits")
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "10")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "library_600x900.jpg"), []byte("image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	err := removeCachedGameImages(root, []int64{10})
+	if err == nil {
+		t.Fatal("removeCachedGameImages() error = nil, want a permission error")
+	}
+	if strings.Contains(err.Error(), root) {
+		t.Fatalf("removeCachedGameImages() error = %q, carries the cache root %q", err, root)
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("removeCachedGameImages() error = %v, want it to wrap fs.ErrPermission", err)
 	}
 }
 

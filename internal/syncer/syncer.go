@@ -7,11 +7,12 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/gjrud/steam-achievement-tracker/internal/images"
+	"github.com/gjrud/steam-achievement-tracker/internal/redact"
 	"github.com/gjrud/steam-achievement-tracker/internal/repository"
 	"github.com/gjrud/steam-achievement-tracker/internal/steam"
 )
@@ -111,7 +112,7 @@ func gameRecord(g steam.OwnedGame) repository.GameRecord {
 func (r *fullSyncRun) syncGames(ctx context.Context, games []steam.OwnedGame) error {
 	jobs := make(chan steam.OwnedGame)
 	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		wg.Add(1)
 		go r.syncWorker(ctx, jobs, &wg)
 	}
@@ -367,7 +368,7 @@ func withDefaultSets(sets []steam.AchievementSet, byGroup map[int64][]steam.SetA
 	if len(missing) == 0 {
 		return sets
 	}
-	sort.Slice(missing, func(i, j int) bool { return missing[i] < missing[j] })
+	slices.Sort(missing)
 	out := make([]steam.AchievementSet, 0, len(sets)+len(missing))
 	out = append(out, sets...)
 	for _, groupID := range missing {
@@ -563,12 +564,10 @@ func shouldFallbackToLegacy(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
+	if _, ok := errors.AsType[*url.Error](err); ok {
 		return false
 	}
-	var statusErr *steam.HTTPStatusError
-	if errors.As(err, &statusErr) {
+	if statusErr, ok := errors.AsType[*steam.HTTPStatusError](err); ok {
 		return !transientSteamStatus(statusErr.Code)
 	}
 	var eresultErr *steam.EResultError
@@ -597,12 +596,7 @@ func coverImageAppIDs(appID int64, entries []setEntry) []int64 {
 }
 
 func containsAppID(ids []int64, id int64) bool {
-	for _, existing := range ids {
-		if existing == id {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(ids, id)
 }
 
 // refreshCovers refreshes the cover of every image app id of a game. Failures are logged and never fail the game sync.
@@ -612,7 +606,7 @@ func (s *Service) refreshCovers(ctx context.Context, game steam.OwnedGame, image
 	}
 	for _, imageAppID := range imageAppIDs {
 		if err := s.refreshCover(ctx, game, imageAppID); err != nil {
-			log.Printf("refresh cover %d: %v", imageAppID, err)
+			log.Printf("refresh cover %d: %v", imageAppID, redact.Paths(err))
 		}
 	}
 }
@@ -653,10 +647,11 @@ func (s *Service) refreshCover(ctx context.Context, game steam.OwnedGame, imageA
 
 // saveCover stores the cover state of one image app id.
 func (s *Service) saveCover(imageAppID int64, res images.Result) error {
-	// SaveCover overwrites kind, file, path and source; RefreshCover returns the kept file's values when
-	// it could not download, so the stored cover stays consistent with what is on disk.
+	// SaveCover overwrites kind, file, cached and source; RefreshCover returns the kept file's values when
+	// it could not download, so the stored cover stays consistent with what is on disk. The file path itself
+	// is not stored: Cached only records that a file exists under the game images directory.
 	return s.Repo.SaveCover(repository.CoverUpdate{
-		ImageAppID: imageAppID, Kind: res.Kind, FileName: res.FileName, Path: res.Path,
+		ImageAppID: imageAppID, Kind: res.Kind, FileName: res.FileName, Cached: res.Path != "",
 		SourceURL: res.SourceURL, Downloaded: res.Downloaded,
 	})
 }

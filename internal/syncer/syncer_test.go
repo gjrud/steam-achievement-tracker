@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -238,6 +239,70 @@ func TestFullSyncOwnedGamesTransportErrorRedactsAPIKeyInSyncRun(t *testing.T) {
 	requireRedactedAPIKeyText(t, *run.Error)
 }
 
+// syncTestSteamID has the 76561 prefix the redaction matches, so a leaked copy would be caught.
+const syncTestSteamID = "76561198000000001"
+
+// Transport errors are stored in sync_runs.error and profile_games.last_error. They come from the real steam.Client
+// against a server that hangs up, so the request address (with the key and the SteamID64) goes through redaction on
+// the way. Neither stored text may keep the SteamID64 or the key.
+func TestTransportFailureStoresNoSteamID64OrKeyInSyncText(t *testing.T) {
+	t.Run("run error from owned games", func(t *testing.T) {
+		repo := testRepository(t)
+		profile, err := repo.SaveProfile(syncTestSteamID, "User One", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		fake := newFakeSteamServer(t, nil)
+		fake.hangupPath["/IPlayerService/GetOwnedGames/v0001/"] = true
+
+		_, err = (&Service{Repo: repo, Steam: fake.client}).FullSync(context.Background(), *profile)
+		if err == nil {
+			t.Fatal("err = nil, want transport error")
+		}
+		requireNoSyncSecrets(t, err.Error())
+		run := requireLatestRun(t, repo, profile.ID)
+		if run.Error == nil {
+			t.Fatalf("sync run = %#v, want error text", run)
+		}
+		requireNoSyncSecrets(t, *run.Error)
+		if !strings.Contains(*run.Error, "REDACTED") {
+			t.Fatalf("sync run error = %q, want the redacted request address", *run.Error)
+		}
+	})
+
+	t.Run("game error in profile_games", func(t *testing.T) {
+		repo := testRepository(t)
+		profile, err := repo.SaveProfile(syncTestSteamID, "User One", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		fake := newFakeSteamServer(t, []steam.OwnedGame{{AppID: 20, Name: "Dropped Game", PlaytimeForever: 5}})
+		fake.schema[20] = []string{"ACH_ONE"}
+		// GetUserAchievements is the per-player request, so its address carries the SteamID64 and the key.
+		fake.hangupPath["/IPlayerService/GetUserAchievements/v1/"] = true
+
+		result := runFullSyncOK(t, repo, fake, profile)
+		requireSyncResult(t, result, expectedSyncResult{status: "partial", total: 1, synced: 0, failed: 1, hasError: true})
+		warnings := requireGameCards(t, repo, profile.ID, "warnings")
+		if len(warnings) != 1 || warnings[0].LastError == nil {
+			t.Fatalf("warnings = %#v, want one warning with text", warnings)
+		}
+		requireNoSyncSecrets(t, *warnings[0].LastError)
+		if !strings.Contains(*warnings[0].LastError, "REDACTED") {
+			t.Fatalf("profile_games.last_error = %q, want the redacted request address", *warnings[0].LastError)
+		}
+	})
+}
+
+// requireNoSyncSecrets fails when stored sync text carries the test SteamID64 or the test API key.
+func requireNoSyncSecrets(t *testing.T, text string) {
+	t.Helper()
+	requireNoAPIKeyText(t, text)
+	if strings.Contains(text, syncTestSteamID) {
+		t.Fatalf("text leaks SteamID64: %q", text)
+	}
+}
+
 // requireNoAPIKeyText fails when text carries the test API key.
 func requireNoAPIKeyText(t *testing.T, text string) {
 	t.Helper()
@@ -418,12 +483,7 @@ func TestFullSyncDLCNotOwnedFlipsWhenDLCIsBought(t *testing.T) {
 }
 
 func hasTag(tags []string, want string) bool {
-	for _, tag := range tags {
-		if tag == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(tags, want)
 }
 
 func TestFullSyncStoresNoAchievementsForGameWithoutSchema(t *testing.T) {
@@ -676,8 +736,12 @@ func TestFullSyncKeepsCachedBaseCoverWhenCapsuleGoneAndStoreEmpty(t *testing.T) 
 	if after.Kind != images.KindLibrary || after.FileName != images.LibraryFileName {
 		t.Fatalf("cover after stale sync = %#v, want cached library cover kept", after)
 	}
-	if _, err := os.Stat(after.Path); err != nil {
-		t.Fatalf("cached cover file %q: %v, want file kept on disk", after.Path, err)
+	if !after.Cached {
+		t.Fatalf("cover after stale sync = %#v, want cached flag kept", after)
+	}
+	coverFile := filepath.Join(paths.GameImages, fmt.Sprintf("%d", appID), after.FileName)
+	if _, err := os.Stat(coverFile); err != nil {
+		t.Fatalf("cached cover file %q: %v, want file kept on disk", coverFile, err)
 	}
 }
 
@@ -845,6 +909,101 @@ func TestFullSyncSavesMissingCoverWhenStoreLookupSucceedsWithoutApp(t *testing.T
 	}
 	if got := fake.count("asset", 721); got != 0 {
 		t.Fatalf("cover asset requests = %d, want 0 for unlisted app", got)
+	}
+}
+
+// A synced cover is recorded as a cached flag, a file name and a Steam URL. After a real sync writes its file under
+// the game images directory, no text column of any user table may hold a filesystem path, so the database never
+// carries the OS user name from the cache.
+func TestFullSyncCoverWritesNoFilesystemPath(t *testing.T) {
+	const appID = 732
+	paths := testPaths(t)
+	repo := openTestRepository(t, paths)
+	profile := testProfile(t, repo)
+	fake := newFakeSteamServer(t, []steam.OwnedGame{{AppID: appID, Name: "Cover Path Game", PlaytimeForever: 10, CapsuleFilename: "library_600x900.jpg"}})
+	svc := serviceWithImages(t, repo, fake, paths)
+	fake.images[fmt.Sprintf("%d/library_600x900.jpg", appID)] = true
+
+	requireSyncResult(t, runServiceOK(t, svc, profile), expectedSyncResult{status: "success", total: 1, synced: 1, failed: 0})
+	coverFile := filepath.Join(paths.GameImages, strconv.FormatInt(appID, 10), images.LibraryFileName)
+	if _, err := os.Stat(coverFile); err != nil {
+		t.Fatalf("sync did not write the cover file under the game images directory: %v", err)
+	}
+
+	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?_busy_timeout=5000", paths.DB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var cached int
+	if err := db.QueryRow(`select cached from cover_images where image_appid=?`, appID).Scan(&cached); err != nil || cached != 1 {
+		t.Fatalf("cover_images.cached = %d, err=%v, want 1 for the file on disk", cached, err)
+	}
+	// The temp root is paths.DataDir in testPaths; the cache root and the game images directory sit under it. A
+	// path in any of them, if stored, would also match DataDir.
+	for _, forbidden := range []string{paths.DataDir, paths.CacheDir, paths.GameImages} {
+		requireNoTextContains(t, db, forbidden)
+	}
+}
+
+// requireNoTextContains fails when a text value of any user table in db contains text.
+func requireNoTextContains(t *testing.T, db *sql.DB, text string) {
+	t.Helper()
+	tables, err := db.Query(`select name from sqlite_master where type='table' and name not like 'sqlite_%'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for tables.Next() {
+		var name string
+		if err := tables.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	if err := tables.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tables.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		rows, err := db.Query(`select * from "` + name + `"`)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		cols, err := rows.Columns()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			vals := make([]any, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range vals {
+				ptrs[i] = &vals[i]
+			}
+			if err := rows.Scan(ptrs...); err != nil {
+				t.Fatal(err)
+			}
+			for i, v := range vals {
+				var value string
+				switch x := v.(type) {
+				case string:
+					value = x
+				case []byte:
+					value = string(x)
+				}
+				if strings.Contains(value, text) {
+					t.Fatalf("%s.%s holds %q", name, cols[i], value)
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -1147,10 +1306,10 @@ func TestBuildSetEntriesMissingAverageUsesCountableLockedOnly(t *testing.T) {
 	game := steam.GameAchievements{
 		Sets: []steam.AchievementSet{{GroupID: 0, Public: true}},
 		Achievements: []steam.SetAchievement{
-			{InternalName: "A", Key: 1, GlobalPercent: pct(50)},
-			{InternalName: "B", Key: 2, GlobalPercent: pct(10)},
+			{InternalName: "A", Key: 1, GlobalPercent: new(float64(50))},
+			{InternalName: "B", Key: 2, GlobalPercent: new(float64(10))},
 			{InternalName: "C", Key: 3},
-			{InternalName: "D", Key: 4, GlobalPercent: pct(90), Archived: true},
+			{InternalName: "D", Key: 4, GlobalPercent: new(float64(90)), Archived: true},
 		},
 	}
 	entries := buildSetEntries(42, game, steam.UserAchievements{Unlocked: unlockedKeys(1), Groups: groupSet(0)})
@@ -1602,7 +1761,7 @@ func (h *handshake) open() {
 // awaitStarted waits until n requests have reached the server. It fails the test instead of hanging.
 func (h *handshake) awaitStarted(t *testing.T, n int) {
 	t.Helper()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		select {
 		case <-h.started:
 		case <-time.After(10 * time.Second):
@@ -2126,7 +2285,7 @@ func pws2Game() steam.GameAchievements {
 // achievementsOf builds count achievements of one group with consecutive keys starting at firstKey.
 func achievementsOf(group, firstKey int64, count int) []steam.SetAchievement {
 	out := make([]steam.SetAchievement, 0, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		out = append(out, steam.SetAchievement{
 			InternalName: fmt.Sprintf("G%d_A%d", group, i),
 			Key:          firstKey + int64(i),
@@ -2168,5 +2327,3 @@ func groupSet(ids ...int64) map[int64]bool {
 	}
 	return out
 }
-
-func pct(v float64) *float64 { return &v }

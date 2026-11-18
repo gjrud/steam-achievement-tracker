@@ -73,7 +73,7 @@ func TestCoverServiceReadsPathsSafelyWhileInitializing(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		<-start
-		for i := 0; i < 200; i++ {
+		for range 200 {
 			rec := httptest.NewRecorder()
 			svc.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/10/library_600x900.jpg", nil))
 		}

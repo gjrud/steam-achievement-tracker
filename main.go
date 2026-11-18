@@ -35,7 +35,7 @@ func main() {
 
 	app := application.New(application.Options{
 		Name:        "steam-achievement-tracker",
-		Description: "Track Steam achievement progress for your public library",
+		Description: "Track Steam achievement progress for your library",
 		// On GTK4 this does not set the window or taskbar icon (GTK4 removed that API). The shell takes the icon from
 		// the installed .desktop file's Icon= entry (see build/linux/Taskfile.yml and nfpm.yaml). It is kept for
 		// dialogs and for the app-level default.

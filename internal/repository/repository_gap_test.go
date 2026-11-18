@@ -22,7 +22,7 @@ func timestampNow() string {
 	return time.Now().UTC().Format(time.RFC3339)
 }
 
-func ptrFloat(v float64) *float64 { return &v }
+func ptrFloat(v float64) *float64 { return new(v) }
 
 func assertStrings(t *testing.T, label string, got, want []string) {
 	t.Helper()
@@ -199,14 +199,14 @@ func TestNullSuggestionScoreFallbackTable(t *testing.T) {
 		want    float64
 	}{
 		// 60*0.5 + 25*0.5 = 42.5. Other splits give different sums: 0.4/0.6 gives 39.0.
-		{name: "50/50 split clears 40", appID: 610, done: 60, missing: ptrFloat(25), tag: "almost_there", other: "in_progress", want: 42.5},
+		{name: "50/50 split clears 40", appID: 610, done: 60, missing: new(float64(25)), tag: "almost_there", other: "in_progress", want: 42.5},
 		// 60*0.5 + 15*0.5 = 37.5. A 0.6/0.4 split would give 42.0 and clear 40.
-		{name: "50/50 split stays below 40", appID: 611, done: 60, missing: ptrFloat(15), tag: "in_progress", other: "almost_there", want: 37.5},
+		{name: "50/50 split stays below 40", appID: 611, done: 60, missing: new(float64(15)), tag: "in_progress", other: "almost_there", want: 37.5},
 		// Completion only: 80*0.5 = 40 exactly, which is inclusive.
 		{name: "completion only reaches 40", appID: 612, done: 80, tag: "almost_there", other: "in_progress", want: 40},
 		{name: "completion only stays below 40", appID: 613, done: 79, tag: "in_progress", other: "almost_there", want: 39.5},
 		// A stored score always wins over the fallback, even when the fallback would clear 40.
-		{name: "stored score wins over fallback", appID: 614, done: 60, missing: ptrFloat(25), score: ptrFloat(10), tag: "in_progress", other: "almost_there", want: 10},
+		{name: "stored score wins over fallback", appID: 614, done: 60, missing: new(float64(25)), score: new(float64(10)), tag: "in_progress", other: "almost_there", want: 10},
 	}
 	repo := testRepository(t)
 	profile := saveTestProfile(t, repo, "11111111111111111", "User One")
@@ -473,7 +473,7 @@ func TestGameCardFlagsFlipIndependently(t *testing.T) {
 	}
 }
 
-func TestActiveProfileFallbacks(t *testing.T) {
+func TestActiveProfileWithoutSettingRowIsNil(t *testing.T) {
 	repo := testRepository(t)
 	if active, err := repo.ActiveProfile(); err != nil || active != nil {
 		t.Fatalf("empty db active = %#v err=%v, want nil", active, err)
@@ -492,14 +492,14 @@ func TestActiveProfileFallbacks(t *testing.T) {
 	if active, err := repo.ActiveProfile(); err != nil || active != nil {
 		t.Fatalf("stale setting active = %#v err=%v, want nil", active, err)
 	}
-	// No setting row at all (sql.ErrNoRows) falls back to the lowest id.
+	// No setting row at all (sql.ErrNoRows) means no active profile, even with profiles present: no fallback.
 	if _, err := repo.db.Exec(`delete from settings where key='active_profile_id'`); err != nil {
 		t.Fatal(err)
 	}
-	if active, err := repo.ActiveProfile(); err != nil || active == nil || active.ID != p1.ID {
-		t.Fatalf("missing setting active = %#v err=%v, want lowest id %d", active, err, p1.ID)
+	if active, err := repo.ActiveProfile(); err != nil || active != nil {
+		t.Fatalf("missing setting active = %#v err=%v, want nil (profile %d not a fallback)", active, err, p1.ID)
 	}
-	// An explicit setting wins over the lowest id.
+	// An explicit setting is the only way to activate a profile.
 	if _, err := repo.db.Exec(`insert into settings(key, value) values('active_profile_id', ?)`, strconv.FormatInt(p2.ID, 10)); err != nil {
 		t.Fatal(err)
 	}
@@ -624,7 +624,7 @@ func TestSaveGameSyncKeepListLastErrorAndUnlockTime(t *testing.T) {
 	assertCount(t, repo, `select count(*) from profile_games where profile_id=? and appid=50`, 4, profile.ID)
 
 	firstUnlock := int64(1700000000)
-	warning := StringPtr("Steam 503")
+	warning := new("Steam 503")
 	// Groups 0 and 2 stay eligible; groups 1 and 3 must be pruned. Group 0 gets a sync error and an unlock time.
 	syncGame(t, repo, profile.ID, 50,
 		SetSyncUpdate{GroupID: 0, TotalAchievements: 1, UnlockedAchievements: 1, CompletionPercent: 100, IsCompleted: true, WasCompleted: true, LastError: warning,
@@ -722,7 +722,7 @@ func TestSaveCoverRejectsNonPositiveImageAppID(t *testing.T) {
 
 func TestCoverURLWithoutImageAppIDIsEmpty(t *testing.T) {
 	downloaded := sql.NullString{String: "2026-11-14T10:00:00Z", Valid: true}
-	if got := coverURL(0, "library_600x900.jpg", "/cache/0/library_600x900.jpg", downloaded); got != "" {
+	if got := coverURL(0, "library_600x900.jpg", true, downloaded); got != "" {
 		t.Fatalf("cover url for image appid 0 = %q, want empty", got)
 	}
 }

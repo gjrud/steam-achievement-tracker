@@ -101,7 +101,7 @@ func (r *Repository) loadGameCards(profileID int64) ([]GameCard, error) {
 		return nil, err
 	}
 	rows, err := r.db.Query(`select pg.appid, pg.groupid, g.name, coalesce(gs.name,''), coalesce(gs.dlcappid,0), coalesce(po.playtime_forever,0),
-		coalesce(ci.image_appid,0), coalesce(ci.kind,''), coalesce(ci.file_name,''), coalesce(ci.path,''), ci.downloaded_at,
+		coalesce(ci.image_appid,0), coalesce(ci.kind,''), coalesce(ci.file_name,''), coalesce(ci.cached,0), ci.downloaded_at,
 		g.has_achievements, g.achievement_status,
 		pg.total_achievements, pg.unlocked_achievements, pg.completion_percent, pg.missing_avg_unlock, pg.suggestion_score, pg.is_completed, pg.was_completed, pg.newly_incomplete, pg.sync_warning, pg.last_error, pg.last_error_at, pg.last_synced_at,
 		coalesce(f.manual_was_completed,0), coalesce(f.missing_achievements_in_dlc,0), coalesce(f.disabled,0), f.disabled_reason, pg.dlc_not_owned, coalesce(po.vetted,1)
@@ -146,13 +146,14 @@ type gameCardScanner interface {
 func scanGameCard(scanner gameCardScanner, tagMap map[entryRef][]string) (GameCard, error) {
 	var c GameCard
 	var coverImageAppID int64
-	var coverKind, coverFileName, coverPath string
+	var coverKind, coverFileName string
+	var coverCached bool
 	var coverDownloadedAt, lastErr, lastErrAt, lastSynced, flagDisabledReason sql.NullString
 	var setName string
 	var missing, score sql.NullFloat64
 	var has, completed, was, newly, warning, manual, dlc, flagDisabled, dlcNotOwned, vetted int
 	if err := scanner.Scan(&c.AppID, &c.GroupID, &c.Name, &setName, &c.DLCAppID, &c.PlaytimeForever,
-		&coverImageAppID, &coverKind, &coverFileName, &coverPath, &coverDownloadedAt,
+		&coverImageAppID, &coverKind, &coverFileName, &coverCached, &coverDownloadedAt,
 		&has, &c.AchievementStatus, &c.TotalAchievements, &c.UnlockedAchievements, &c.CompletionPercent, &missing, &score, &completed, &was, &newly, &warning, &lastErr, &lastErrAt, &lastSynced,
 		&manual, &dlc, &flagDisabled, &flagDisabledReason, &dlcNotOwned, &vetted); err != nil {
 		return GameCard{}, err
@@ -167,7 +168,7 @@ func scanGameCard(scanner gameCardScanner, tagMap map[entryRef][]string) (GameCa
 	}
 	c.Name = DisplayName(c.Name, setName, c.GroupID)
 	c.CoverKind = coverKind
-	c.CoverURL = coverURL(coverImageAppID, coverFileName, coverPath, coverDownloadedAt)
+	c.CoverURL = coverURL(coverImageAppID, coverFileName, coverCached, coverDownloadedAt)
 	c.MissingAvgUnlock = floatPtr(missing)
 	c.SuggestionScore = floatPtr(score)
 	c.LastError = stringPtr(lastErr)

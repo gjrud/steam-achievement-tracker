@@ -161,7 +161,7 @@ func TestOpenAndMigrateSpecialCharacterPath(t *testing.T) {
 		t.Fatalf("OpenAndMigrate(%q) error = %v", paths.DB, err)
 	}
 	defer conn.Close()
-	assertUserVersion(t, conn, 14)
+	assertUserVersion(t, conn, 2)
 
 	if _, err := os.Stat(paths.DB); err != nil {
 		t.Fatalf("database not created at the exact path: %v", err)
@@ -183,5 +183,5 @@ func TestOpenAndMigrateSpecialCharacterPath(t *testing.T) {
 		t.Fatalf("open backup: %v", err)
 	}
 	defer backup.Close()
-	assertUserVersion(t, backup, 14)
+	assertUserVersion(t, backup, 2)
 }

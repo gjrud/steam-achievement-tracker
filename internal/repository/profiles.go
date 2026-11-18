@@ -3,32 +3,32 @@ package repository
 import (
 	"database/sql"
 	"fmt"
-	"sort"
+	"slices"
 	"time"
 )
 
 // ActiveProfile returns the active profile. A settings row with an empty value means no profile is active (set by
 // DeactivateProfile and ClearProfileData) and returns nil even when profiles exist. A row holding a profile id returns
-// that profile, or nil when the profile no longer exists; it never falls back to another profile. Only when the row is
-// absent does it fall back to the lowest profile id.
+// that profile, or nil when the profile no longer exists; it never falls back to another profile. A missing row also
+// means no active profile: SaveProfile always writes the row and nothing deletes it, so there is no other way to reach
+// that state.
 func (r *Repository) ActiveProfile() (*Profile, error) {
 	var activeID string
 	err := r.db.QueryRow(`select value from settings where key='active_profile_id'`).Scan(&activeID)
 	switch {
-	case err == nil:
-		if activeID == "" {
-			return nil, nil
-		}
-		return scanProfile(r.db.QueryRow(`select id, steam_id64, display_name, avatar_url, created_at, updated_at, last_synced_at from profiles where id=?`, activeID))
-	case err != sql.ErrNoRows:
+	case err == sql.ErrNoRows:
+		return nil, nil
+	case err != nil:
 		return nil, err
 	}
-	row := r.db.QueryRow(`select id, steam_id64, display_name, avatar_url, created_at, updated_at, last_synced_at from profiles order by id limit 1`)
-	return scanProfile(row)
+	if activeID == "" {
+		return nil, nil
+	}
+	return scanProfile(r.db.QueryRow(`select id, steam_id64, display_name, avatar_url, created_at, updated_at, last_synced_at from profiles where id=?`, activeID))
 }
 
 // DeactivateProfile sets no profile as active without touching any profile data. The setting row is kept with an
-// empty value so ActiveProfile does not fall back to a kept profile. Saving the same SteamID64 again re-activates it.
+// empty value, meaning no active profile. Saving the same SteamID64 again re-activates it.
 func (r *Repository) DeactivateProfile() error {
 	_, err := r.db.Exec(`insert into settings(key, value) values('active_profile_id', '') on conflict(key) do update set value=excluded.value`)
 	return err
@@ -65,8 +65,8 @@ func (r *Repository) SaveProfile(steamID64, displayName, avatarURL string) (*Pro
 // Image app ids still used by other profiles are not returned, so their covers stay on disk.
 // The profile's library settings row is deleted with the profile (it references profiles(id)); a profile
 // that is re-added starts from DefaultLibrarySettings.
-// If this profile is the active one, the active setting is set to an empty value instead of being deleted, so
-// ActiveProfile cannot fall back to a kept profile afterwards.
+// If this profile is the active one, the active setting is set to an empty value (no active profile) instead of
+// being deleted.
 func (r *Repository) ClearProfileData(profileID int64) ([]int64, error) {
 	active, err := r.ActiveProfile()
 	if err != nil {
@@ -101,8 +101,8 @@ func (r *Repository) ClearProfileData(profileID int64) ([]int64, error) {
 		}
 	}
 	if wasActive {
-		// Upsert, not update: the row may be absent (fallback to the lowest id) and must end as ''.
-		if _, err := tx.Exec(`insert into settings(key, value) values('active_profile_id', '') on conflict(key) do update set value=''`); err != nil {
+		// wasActive implies the row exists (ActiveProfile returned a profile from it), so a plain update is enough.
+		if _, err := tx.Exec(`update settings set value='' where key='active_profile_id'`); err != nil {
 			return nil, err
 		}
 	}
@@ -150,7 +150,7 @@ func mergeAppIDs(a, b []int64) []int64 {
 			merged = append(merged, id)
 		}
 	}
-	sort.Slice(merged, func(i, j int) bool { return merged[i] < merged[j] })
+	slices.Sort(merged)
 	return merged
 }
 

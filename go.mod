@@ -1,6 +1,6 @@
 module github.com/gjrud/steam-achievement-tracker
 
-go 1.26.2
+go 1.27.4
 
 require (
 	github.com/adrg/xdg v0.5.3

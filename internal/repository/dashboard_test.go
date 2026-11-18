@@ -268,7 +268,7 @@ func seedSyntheticDashboard(tb testing.TB, repo *Repository, profileID int64, ap
 	tb.Helper()
 	rng := rand.New(rand.NewSource(42))
 	now := time.Now().UTC().Format(time.RFC3339)
-	for i := 0; i < apps; i++ {
+	for i := range apps {
 		appID := int64(1000 + i)
 		playtime := 0
 		if rng.Intn(4) != 0 {
@@ -311,13 +311,13 @@ func seedSyntheticDashboard(tb testing.TB, repo *Repository, profileID int64, ap
 			}
 		}
 		if rng.Intn(5) != 0 {
-			if err := repo.SaveCover(CoverUpdate{ImageAppID: appID, Kind: "library", FileName: "library_600x900.jpg", Path: fmt.Sprintf("/cache/images/games/%d/library_600x900.jpg", appID), SourceURL: "https://example.com/library.jpg", Downloaded: true}); err != nil {
+			if err := repo.SaveCover(CoverUpdate{ImageAppID: appID, Kind: "library", FileName: "library_600x900.jpg", Cached: true, SourceURL: "https://example.com/library.jpg", Downloaded: true}); err != nil {
 				tb.Fatal(err)
 			}
 		}
 		for _, set := range sets {
 			if set.DLCAppID != 0 && rng.Intn(2) == 0 {
-				if err := repo.SaveCover(CoverUpdate{ImageAppID: set.DLCAppID, Kind: "hero", FileName: "hero_capsule.jpg", Path: fmt.Sprintf("/cache/images/games/%d/hero_capsule.jpg", set.DLCAppID), SourceURL: "https://example.com/hero.jpg", Downloaded: true}); err != nil {
+				if err := repo.SaveCover(CoverUpdate{ImageAppID: set.DLCAppID, Kind: "hero", FileName: "hero_capsule.jpg", Cached: true, SourceURL: "https://example.com/hero.jpg", Downloaded: true}); err != nil {
 					tb.Fatal(err)
 				}
 			}
@@ -335,11 +335,11 @@ func syntheticSet(rng *rand.Rand, appID, groupID int64, name string, dlcAppID in
 	var lastError *string
 	warning := rng.Intn(20) == 0
 	if warning {
-		lastError = StringPtr("temporary Steam failure")
+		lastError = new("temporary Steam failure")
 	}
 	dlcNotOwned := dlcAppID != 0 && rng.Intn(10) == 0
 	achievements := make([]AchievementRecord, 0, total)
-	for j := 0; j < total; j++ {
+	for j := range total {
 		gp := missing
 		achievements = append(achievements, AchievementRecord{APIName: fmt.Sprintf("ACH_%d_%d_%d", appID, groupID, j), GlobalPercent: &gp, Unlocked: j < unlocked})
 	}

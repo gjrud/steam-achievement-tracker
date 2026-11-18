@@ -106,27 +106,6 @@ func TestClearProfileDataOfActiveProfileLeavesNoFallback(t *testing.T) {
 	assertCount(t, repo, `select count(*) from profile_games where profile_id=?`, 1, p2.ID)
 }
 
-// A legacy database has a profile but no active_profile_id row, so the lowest id is the active profile.
-func TestClearProfileDataOfFallbackActiveProfileLeavesNoFallback(t *testing.T) {
-	repo := testRepository(t)
-	p1 := saveTestProfile(t, repo, "11111111111111111", "User One")
-	p2 := saveTestProfile(t, repo, "22222222222222222", "User Two")
-	if _, err := repo.db.Exec(`delete from settings where key='active_profile_id'`); err != nil {
-		t.Fatal(err)
-	}
-	if active, err := repo.ActiveProfile(); err != nil || active == nil || active.ID != p1.ID {
-		t.Fatalf("legacy active = %#v, %v; want fallback profile %d", active, err, p1.ID)
-	}
-
-	if _, err := repo.ClearProfileData(p1.ID); err != nil {
-		t.Fatal(err)
-	}
-	if active, err := repo.ActiveProfile(); err != nil || active != nil {
-		t.Fatalf("active after clearing fallback profile = %#v, %v; want nil, not kept profile %d", active, err, p2.ID)
-	}
-	assertCount(t, repo, `select count(*) from settings where key='active_profile_id' and value=''`, 1)
-}
-
 // A row that holds the id of a profile that no longer exists means no active profile. It must not fall back to the
 // lowest id, even though another profile exists and the row is present.
 func TestActiveProfileStaleIDReturnsNilWithoutFallback(t *testing.T) {
@@ -145,12 +124,12 @@ func TestActiveProfileStaleIDReturnsNilWithoutFallback(t *testing.T) {
 	assertCount(t, repo, `select count(*) from profiles`, 2)
 }
 
-// Clearing a kept, non-active profile of a legacy database leaves the fallback profile active.
-func TestClearProfileDataOfNonActiveProfileKeepsFallback(t *testing.T) {
+// Clearing a kept, non-active profile leaves the explicitly active profile active.
+func TestClearProfileDataOfNonActiveProfileKeepsActiveProfile(t *testing.T) {
 	repo := testRepository(t)
 	p1 := saveTestProfile(t, repo, "11111111111111111", "User One")
 	p2 := saveTestProfile(t, repo, "22222222222222222", "User Two")
-	if _, err := repo.db.Exec(`delete from settings where key='active_profile_id'`); err != nil {
+	if _, err := repo.db.Exec(`update settings set value=? where key='active_profile_id'`, fmt.Sprintf("%d", p1.ID)); err != nil {
 		t.Fatal(err)
 	}
 

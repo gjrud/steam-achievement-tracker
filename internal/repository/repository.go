@@ -167,12 +167,13 @@ type SetSyncUpdate struct {
 }
 
 // CoverUpdate describes the cover cached for an image app id (appid, or DLC id for DLC-bound sets).
-// Kind is "library", "hero", "header" or "main"; empty Path means no cover is available.
+// Kind is "library", "hero", "header" or "main". Cached false means no cover file is available; the file itself
+// lives under paths.GameImages and is never recorded in the database.
 type CoverUpdate struct {
 	ImageAppID int64
 	Kind       string
 	FileName   string
-	Path       string
+	Cached     bool
 	SourceURL  string
 	Downloaded bool // true sets downloaded_at to now; false keeps the previous value
 }
@@ -181,7 +182,7 @@ type CoverRecord struct {
 	ImageAppID   int64
 	Kind         string
 	FileName     string
-	Path         string
+	Cached       bool
 	SourceURL    string
 	CheckedAt    *string
 	DownloadedAt *string
@@ -199,10 +200,10 @@ type entryRef struct {
 const imageAppIDSQL = `(case when coalesce(gs.dlcappid,0)<>0 then gs.dlcappid else pg.appid end)`
 
 // effectiveCoverAppIDSQL selects the app id whose cached cover is displayed for an entry. A DLC-bound entry
-// shows its DLC's cover when that cover has a path, otherwise it falls back to the parent game's cover.
+// shows its DLC's cover when that cover is cached, otherwise it falls back to the parent game's cover.
 // Non-DLC entries always use the game id. Requires aliases pg (profile_games) and gs (game_sets).
 const effectiveCoverAppIDSQL = `(case when coalesce(gs.dlcappid,0)<>0 and exists (
-		select 1 from cover_images own where own.image_appid=gs.dlcappid and trim(coalesce(own.path,''))<>''
+		select 1 from cover_images own where own.image_appid=gs.dlcappid and own.cached=1
 	) then gs.dlcappid else pg.appid end)`
 
 func (r *Repository) Close() error { return r.db.Close() }
@@ -274,15 +275,14 @@ func stringPtr(v sql.NullString) *string {
 	x := v.String
 	return &x
 }
-func ptrString(v string) *string { return &v }
 
 func ErrorPtr(err error) *string {
 	if err == nil {
 		return nil
 	}
-	return ptrString(err.Error())
+	return new(err.Error())
 }
-func StringPtr(v string) *string                    { return &v }
+
 func FormatGameError(appID int64, err error) string { return fmt.Sprintf("appid %d: %v", appID, err) }
 
 // EntryKey is the stable frontend key of an entry: "<appid>:<groupid>".
@@ -310,8 +310,8 @@ func DisplayName(gameName, setName string, groupID int64) string {
 }
 
 // coverURL builds the served cover URL for an image app. Empty when no cached file exists.
-func coverURL(imageAppID int64, fileName, path string, downloadedAt sql.NullString) string {
-	if strings.TrimSpace(path) == "" || fileName == "" || imageAppID <= 0 {
+func coverURL(imageAppID int64, fileName string, cached bool, downloadedAt sql.NullString) string {
+	if !cached || fileName == "" || imageAppID <= 0 {
 		return ""
 	}
 	url := fmt.Sprintf("/game-covers/%d/%s", imageAppID, fileName)
