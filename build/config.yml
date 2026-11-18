@@ -11,7 +11,7 @@ info:
   companyName: "gjrud" # The name of the company
   productName: "Steam Achievement Tracker" # The name of the application
   productIdentifier: "io.github.gjrud.steam-achievement-tracker" # The unique product identifier
-  description: "Track Steam achievement progress for your public library" # The application description
+  description: "Track Steam achievement progress for your library" # The application description
   copyright: "(c) 2026, gjrud" # Copyright text
   comments: "Steam achievement tracker" # Comments
 

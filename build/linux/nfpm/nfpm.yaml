@@ -10,7 +10,7 @@ version: ${VERSION}
 section: "games"
 priority: "extra"
 maintainer: ${GIT_COMMITTER_NAME} <${GIT_COMMITTER_EMAIL}>
-description: "Track Steam achievement progress for your public library"
+description: "Track Steam achievement progress for your library"
 vendor: "gjrud"
 homepage: "https://github.com/gjrud/steam-achievement-tracker"
 license: "MIT"

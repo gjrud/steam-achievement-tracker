@@ -185,7 +185,7 @@ tasks:
       # Human-readable menu name. The file name and Icon= are the application id (see APP_ID above); Exec stays the
       # executable name.
       DISPLAY_NAME: 'Steam Achievement Tracker'
-      COMMENT: 'Track Steam achievement progress for your public library'
+      COMMENT: 'Track Steam achievement progress for your library'
       KEYWORDS: 'steam;achievements;games;'
       EXEC: '{{.APP_NAME}}'
       ICON: '{{.APP_ID}}'
