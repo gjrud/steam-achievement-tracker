@@ -189,6 +189,11 @@ Section "uninstall"
     Delete "$INSTDIR\${PRODUCT_EXECUTABLE}"
     !insertmacro wails.deleteUninstaller
 
+    # In-app updates leave the replaced exe as <exe>.old.<n> (and sometimes <exe>.bak) next to the app exe. Delete
+    # them by name pattern, not recursively, so an unrelated file in $INSTDIR is never touched.
+    Delete "$INSTDIR\${PRODUCT_EXECUTABLE}.old.*"
+    Delete "$INSTDIR\${PRODUCT_EXECUTABLE}.bak"
+
     # Non-recursive: removes $INSTDIR only if it is now empty. Runs after uninstall.exe is deleted.
     RMDir "$INSTDIR"
 

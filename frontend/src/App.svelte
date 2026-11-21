@@ -2,15 +2,21 @@
   import {onMount, tick} from 'svelte'
   import {Events} from '@wailsio/runtime'
   import {
+    CancelUpdate,
+    CheckForUpdates,
     ClearActiveUserData,
     DisableGame,
     EnableGame,
     GetAppState,
+    GetUpdateState,
+    InstallUpdate,
     MarkGamePreviouslyCompleted,
+    RestartToUpdate,
     RetryAPIKey,
     SaveAPIKey,
     SaveProfile,
     SetLibrarySettings,
+    SetUpdateChecksEnabled,
     SyncNow,
     ToggleGameMissingAchievementsInDLC,
     ValidateProfile
@@ -19,6 +25,7 @@
   import DashboardShell from './lib/components/DashboardShell.svelte'
   import ClearDataConfirmModal from './lib/components/ClearDataConfirmModal.svelte'
   import {AppMessage, formatMessage, formatPlaytime, integer, pct} from './lib/format.js'
+  import {createUpdateStore} from './lib/update.js'
   import {
     cardProgress,
     completionLabel,
@@ -71,13 +78,25 @@
   // status write, and once more after the sync flag clears.
   const syncChangedEvent = 'sync:changed'
   const refreshRetryDelayMs = 2000
+  // The update state is separate from the app state: it follows update:changed and has its own reads. The banner shows
+  // only on the dashboard (never on the setup or init-error screens); the Settings view shows its section.
+  const updates = createUpdateStore({
+    getState: () => GetUpdateState(),
+    check: () => CheckForUpdates(),
+    install: (version) => InstallUpdate(version),
+    cancel: () => CancelUpdate(),
+    restart: () => RestartToUpdate(),
+    setChecksEnabled: (enabled) => SetUpdateChecksEnabled(enabled)
+  })
 
   onMount(() => {
     mounted = true
     // Subscribe before the first read so a sync:changed emitted during that read is not missed.
     unsubscribeSyncEvents = Events.On(syncChangedEvent, requestRefresh)
     requestRefresh()
+    const stopUpdates = updates.start()
     return () => {
+      stopUpdates()
       mounted = false
       unsubscribeSyncEvents?.()
       unsubscribeSyncEvents = null
@@ -434,6 +453,7 @@
 {:else}
   <DashboardShell
     {state}
+    {updates}
     {error}
     {summary}
     {latestSyncRun}

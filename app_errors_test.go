@@ -180,6 +180,7 @@ func TestGenericSentenceMatchesSteam(t *testing.T) {
 var boundErrorMethods = []string{
 	"GetAppState", "SetLibrarySettings", "RetryAPIKey", "SaveAPIKey", "ValidateProfile", "SaveProfile", "SyncNow",
 	"ClearActiveUserData", "MarkGamePreviouslyCompleted", "ToggleGameMissingAchievementsInDLC", "DisableGame", "EnableGame",
+	"GetUpdateState", "CheckForUpdates", "InstallUpdate", "CancelUpdate", "RestartToUpdate", "SetUpdateChecksEnabled",
 }
 
 // lifecycleErrorMethods are Wails service hooks. They return an error but are not bound to the frontend.
@@ -266,6 +267,14 @@ func TestBoundMethodsUserFacingErrors(t *testing.T) {
 		"ToggleGameMissingAchievementsInDLC": {func() error { _, err := app.ToggleGameMissingAchievementsInDLC(10, 0); return err }, msgGeneric},
 		"DisableGame":                        {func() error { _, err := app.DisableGame(10, 0); return err }, msgGeneric},
 		"EnableGame":                         {func() error { _, err := app.EnableGame(10, 0); return err }, msgGeneric},
+		// The test App has no updater, so every update binding but GetUpdateState gives the fixed sentence without
+		// touching the closed database.
+		"GetUpdateState":         {func() error { _, err := app.GetUpdateState(); return err }, ""},
+		"CheckForUpdates":        {func() error { return app.CheckForUpdates() }, msgUpdateUnavailable},
+		"InstallUpdate":          {func() error { return app.InstallUpdate("9.9.9") }, msgUpdateUnavailable},
+		"CancelUpdate":           {func() error { return app.CancelUpdate() }, msgUpdateUnavailable},
+		"RestartToUpdate":        {func() error { return app.RestartToUpdate() }, msgUpdateUnavailable},
+		"SetUpdateChecksEnabled": {func() error { _, err := app.SetUpdateChecksEnabled(false); return err }, msgUpdateUnavailable},
 	}
 	if len(calls) != len(boundErrorMethods) {
 		t.Fatalf("calls table has %d rows, boundErrorMethods has %d", len(calls), len(boundErrorMethods))

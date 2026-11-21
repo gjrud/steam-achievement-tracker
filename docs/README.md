@@ -5,7 +5,8 @@ These docs are for readers who want to understand the app's internals, change th
 ## Index
 
 - [architecture.md](architecture.md): application layers; startup and shutdown order; `sync:changed` event flow; binding flow; error and secret handling; concurrency; and package map.
-- [app-service.md](app-service.md): root package files (`main.go`, `app.go`, `covers.go`, `wailslog.go`); every bound method; lifecycle hooks; profile validation; state assembly; remove-profile behavior; cover handler; and frontend binding contract.
+- [app-service.md](app-service.md): root package files (`main.go`, `app.go`, `app_update.go`, `covers.go`, `wailslog.go`); every bound method; lifecycle hooks; profile validation; state assembly; remove-profile behavior; cover handler; and frontend binding contract.
+- [updater.md](updater.md): the in-app updater: install targets, version stamp, GitHub provider and network use, phases, consent and the install gate, errors and log categories, trust model, restart and shutdown safety, leftover files, known limitations, and manual checks.
 - [syncer.md](syncer.md): the full sync run: owned games, the per-game worker pool, achievement sets, progress, and final status.
 - [steam-client.md](steam-client.md): the Steam Web API client: endpoints, retries, error redaction, and profile resolution.
 - [database.md](database.md): SQLite opening, WAL mode, migrations, pre-migration backups, and the schema.
@@ -23,7 +24,7 @@ These docs are for readers who want to understand the app's internals, change th
 3. [app-service.md](app-service.md): the Go entry points the frontend calls.
 4. [database.md](database.md) and [repository.md](repository.md): where state lives and how it is read and written.
 5. [syncer.md](syncer.md) and [steam-client.md](steam-client.md): how data gets in.
-6. [covers.md](covers.md) and [platform.md](platform.md): images, paths, keyring, and logging.
+6. [covers.md](covers.md), [platform.md](platform.md) and [updater.md](updater.md): images, paths, keyring, logging, and the in-app updater.
 7. [frontend.md](frontend.md): how the UI consumes the state.
 8. [testing.md](testing.md) and [build-and-release.md](build-and-release.md): how to verify and ship a change.
 

@@ -1,6 +1,6 @@
 # App service (root package)
 
-This document describes the Go root package `main`: `main.go`, `app.go`, `covers.go`, `wailslog.go`, and the frontend binding contract built on them. For the surrounding layers, see [architecture.md](architecture.md).
+This document describes the Go root package `main`: `main.go`, `app.go`, `app_update.go`, `covers.go`, `wailslog.go`, and the frontend binding contract built on them. For the surrounding layers, see [architecture.md](architecture.md).
 
 Files and Go identifiers cited here are in the repository, except names from the Wails v3.1.0 module (for example `AssetFileServerFS`, `WebviewUserDataPath` and `ServiceOptions`). Line numbers are omitted on purpose.
 
@@ -9,10 +9,11 @@ Files and Go identifiers cited here are in the repository, except names from the
 | File | Contents |
 | --- | --- |
 | `main.go` | Embeds `frontend/dist` and the app icon, builds the Wails application, registers the two services, creates the window, runs the app. |
-| `app.go` | `App` type, `AppState` and `ProfilePreview` types, lifecycle hooks, all bound methods, init, sync orchestration, state assembly, API key cache. |
+| `app.go` | `App` type, `AppState` and `ProfilePreview` types, lifecycle hooks, the bound methods for the app's own actions, init, sync orchestration, state assembly, API key cache. |
+| `app_update.go` | Glue to the in-app updater (`internal/update`): the six update bindings, the update-check toggle, and the startup and shutdown hooks it calls. See [updater.md](updater.md). |
 | `covers.go` | `CoverService`, the `/game-covers` HTTP handler. |
 | `wailslog.go` | `logWriter` and `newWailsLogger`, which send Wails's own logging to `app.log`. |
-| `*_test.go` | `app_test.go`, `app_events_test.go`, `service_lifecycle_test.go`, `covers_test.go`, `wailslog_test.go`. |
+| `*_test.go` | `app_test.go`, `app_events_test.go`, `app_update_test.go`, `service_lifecycle_test.go`, `covers_test.go`, `wailslog_test.go`. |
 
 ## main.go
 
@@ -24,6 +25,7 @@ Files and Go identifiers cited here are in the repository, except names from the
   - `application.NewService(backend)`: the `App`, no route.
   - `application.NewServiceWithOptions(NewCoverService(backend), ServiceOptions{Name: "covers", Route: "/game-covers"})`.
 - `backend.setEventEmitter(func(name string) { app.Event.Emit(name) })` connects the sync event to the event bus.
+- After `application.New`, before the window is created, `update.New(update.Deps{...})` builds the in-app updater around `app.Updater`. `backend.setUpdater` gives it to `App`, and `updates.Init()` reads the version stamp and configures the framework updater. Its `OnEvent` wires `app.Event.On` for the three framework events Go reads, and its `OnChanged` emits `update:changed`. See [updater.md](updater.md#wiring).
 - The window is `Steam Achievement Tracker`, 1280x980, minimum 900x650, background `RGB(27, 38, 54)`.
 - `app.Run()` blocks. A `Run` error is fatal (`log.Fatal`).
 
@@ -74,6 +76,7 @@ These hooks are not bound. The binding generator excludes `ServiceStartup` and `
 ### ServiceStartup(ctx, options) error
 
 - Calls `ensureInitialized`. On failure it logs `startup init: ...` (the raw cause, reduced by `redact.Paths` and scrubbed by `steam.RedactSecrets`, through `logText`) and returns `nil`. The app starts with `AppState.InitError` set.
+- On success, starts the update service's startup check (`startUpdateCheck`), which does nothing when the update checks setting is off or the updater is unavailable. It does not run when init failed.
 - On success, reads the state. If `apiKeyPresent` and `profileExists` are both true, it calls `startSync(false)`. A sync that is already running is not restarted.
 - The Wails context argument is ignored. The `App` uses its own lifetime context.
 - Runs inside `app.Run`, before the window opens.
@@ -81,9 +84,10 @@ These hooks are not bound. The binding generator excludes `ServiceStartup` and `
 ### ServiceShutdown() error
 
 1. Cancels `lifeCtx`.
-2. Reads `syncCancel` under `mu` and cancels it.
-3. Waits on `syncWG`.
-4. Sets `repo` to nil under `mu` and closes the database. Errors from `Close` are ignored.
+2. Calls `stopUpdates`, which calls `update.Service.Shutdown`. It never waits on an update operation. It drops the update listeners, cancels a running install, and removes a staged update that was not applied (see [updater.md](updater.md#shutdown-and-restart-safety)).
+3. Reads `syncCancel` under `mu` and cancels it.
+4. Waits on `syncWG` for at most `syncShutdownWait` (10 s), through `waitForSyncs`. After the bound it logs `warning: shutdown: sync still running after 10s; closing the database` and goes on. The bound keeps a restart inside the framework's 30 s helper wait.
+5. Sets `repo` to nil under `mu` and closes the database. Errors from `Close` are ignored.
 
 Calling it twice is safe. A nil `lifeCancel` (an `App` built as a literal in tests) is skipped.
 
@@ -112,7 +116,7 @@ The frontend shows the message of a `RuntimeError`, which Wails uses for a bound
 
 ## Initialization: ensureInitialized
 
-`ensureInitialized` runs at the start of every bound method except `RetryAPIKey`. `RetryAPIKey` re-reads the keyring (`refreshAPIKey` does not call `ensureInitialized`), then reaches that check only through `GetAppState`. If init succeeds, its key read replaces the cached result of any pre-init key read. `ensureInitialized` holds `initMu` throughout the sequence. It returns if `initialized` is already true; otherwise it runs these steps:
+`ensureInitialized` runs at the start of every table method except `RetryAPIKey`. The update methods are not in the table and do not call it at the start; `SetUpdateChecksEnabled` reaches it through `saveUpdateChecksEnabled`, after its updater check (see the update methods below). `RetryAPIKey` re-reads the keyring (`refreshAPIKey` does not call `ensureInitialized`), then reaches that check only through `GetAppState`. If init succeeds, its key read replaces the cached result of any pre-init key read. `initializeOnce` holds `initMu` throughout the sequence. It returns if `initialized` is already true; otherwise it runs these steps:
 
 1. `appdata.Resolve()`, then `appdata.Ensure(paths)`. On failure: `logging.Fallback()`, set `initError` to `The app could not create its folders.`, and return that sentence with the raw `create app directories: ...` error kept for the log.
 2. `logging.Init(paths.LogFile)`.
@@ -121,11 +125,13 @@ The frontend shows the message of a `RuntimeError`, which Wails uses for a bound
 5. `readSteamAPIKey()`. `keyring.ErrMissing` is normal. Any other error is logged, and `apiKeyError` gets the keyring sentence.
 6. Under `mu`: `initialized = true`, `paths`, `repo`, the key cache, `apiKeyError`, and `initError = ""`.
 
+After `initMu` is released, `ensureInitialized` calls `loadUpdateChecks` when this call was the one that succeeded (`initializeOnce` reports it). That reads the `update_checks_enabled` setting once, so the update service caches the toggle before `ServiceStartup` starts the startup check (see [updater.md](updater.md#persistence)).
+
 `ensureInitialized` sets `paths` as soon as they are resolved, and `logFile` once `logging.Init` has run, so a failed init still reports the data folder and, when logging is up, the log file. It returns the init sentence wrapped with the raw cause (`usererr.Wrap`), so neither the bound methods' errors nor `AppState.InitError` carry a path. The cause is logged through `redact.Paths`, which reduces path errors to base names. A failed init leaves `initialized` false, so the next call tries again. Each retry re-runs `logging.Init` and `OpenAndMigrate`.
 
 ## Bound methods
 
-The table lists every bound method: exported methods on `*App`, excluding lifecycle hooks. Each appears in the generated bindings and frontend mock. "state" means the method returns `AppState`, assembled by `GetAppState`.
+The tables list every bound method: exported methods on `*App`, excluding lifecycle hooks. The first table covers the app methods; the update methods have their own table below. Each appears in the generated bindings and frontend mock. "state" means the method returns `AppState`, assembled by `GetAppState`.
 
 | Method | Parameters | Returns | Behavior | Errors and side effects |
 | --- | --- | --- | --- | --- |
@@ -142,7 +148,20 @@ The table lists every bound method: exported methods on `*App`, excluding lifecy
 | `DisableGame` | `appID int64`, `groupID int64` | state, `error` | Sets `disabled = 1` with reason `manual` on one set and deletes its tags. Sibling sets are not changed. | The no-profile sentence, or the generic sentence for a DB error. No check that the set exists. |
 | `EnableGame` | `appID int64`, `groupID int64` | state, `error` | Clears `disabled` and its reason on one set, then recomputes its tags. | The no-profile sentence, or the generic sentence for a DB error. No check that the set exists. |
 
-Every method except `GetAppState` and `RetryAPIKey` can return the init error from `ensureInitialized`. Those two return the base state with `initError` set and no error. The `groupID` selects one achievement set of a game. Group `0` is the base set. The frontend passes the set's group id on every game action.
+Every method above except `GetAppState` and `RetryAPIKey` can return the init error from `ensureInitialized`. Those two return the base state with `initError` set and no error. The `groupID` selects one achievement set of a game. Group `0` is the base set. The frontend passes the set's group id on every game action.
+
+The update methods below are separate from the table. They do not call `ensureInitialized`, except `SetUpdateChecksEnabled`, which opens the database to store the toggle. Each one is a single `callBound` or `callBoundErr` return. When the updater is unavailable in this build (no version stamp, or the framework refused its configuration), every one except `GetUpdateState` returns the fixed sentence `Updates are not available in this build.`. See [updater.md](updater.md).
+
+| Method | Parameters | Returns | Behavior | Errors and side effects |
+| --- | --- | --- | --- | --- |
+| `GetUpdateState` | none | `update.Snapshot`, `error` | Read-only snapshot: current version, whether checks are on, latest release, phase, download progress, notify-only reason and error sentence. No I/O. With no updater it returns `unavailable: true`. | Never fails. |
+| `CheckForUpdates` | none | `error` | Manual "Check now". Sets the phase to `checking`, then `up-to-date`, `available` or `error`. | Refused at once while another operation runs (`Another update step is already running.`) or while `ready` (`An update is ready. Restart the app to apply it first.`). A failed check returns `Could not check for updates. Try again later.` and sets `error`. |
+| `InstallUpdate` | `version string` | `error` | Downloads, verifies and stages the release the user saw. The call returns when the download ends. Nothing is downloaded before this call. | Refused for package installs, unsupported platforms and notify-only releases (with the reason as the sentence). Refused while busy. A changed newest release returns to `available` with no error, and the banner asks for a new review. |
+| `CancelUpdate` | none | `error` | Stops a running download, verification or install, if it can be stopped. Cancels the install context and sets the cancel flag. It never changes the phase; the running install sets the outcome. | No effect when no install runs. |
+| `RestartToUpdate` | none | `error` | Applies the staged update. Moves the phase to `restarting`, then calls the framework restart, which quits the app. A failed restart returns `The app could not restart into the update...` and leaves the update staged. | Refused unless `ready` (`There is no downloaded update to restart into.` or the busy sentence). |
+| `SetUpdateChecksEnabled` | `enabled bool` | `update.Snapshot`, `error` | Stores `update_checks_enabled` first, then changes the cached toggle, and returns the new snapshot. Persists. | Init error. Unavailable sentence. A database write error gives the generic sentence and changes nothing. |
+
+The `update.Snapshot` JSON fields are `unavailable`, `currentVersion`, `checksEnabled`, `phase`, `latest` (`version`, `size`, `releaseURL`), `progress` (`written`, `total`), `notifyOnly`, `notifyReason` and `error`.
 
 ### GetAppState details
 
@@ -258,7 +277,7 @@ The cover content and the source order are described in [covers.md](covers.md).
 The frontend relies on generated bindings and a hand-written mock.
 
 - Generated file: `frontend/bindings/github.com/gjrud/steam-achievement-tracker/app.js`, with `models.js` next to it and the repository models under `internal/repository/models.js`. The directory is git-ignored. Do not edit it. Regenerate with `wails3 generate bindings` from the repository root. `wails3 dev` and `wails3 build` do this too.
-- `App.svelte` imports these twelve functions from the generated file:
+- `App.svelte` imports these eighteen functions from the generated file (the update calls are passed into `createUpdateStore` in `lib/update.js`, which does not import the bindings):
 
   | Function | Go result | JavaScript result |
   | --- | --- | --- |
@@ -274,8 +293,14 @@ The frontend relies on generated bindings and a hand-written mock.
   | `ToggleGameMissingAchievementsInDLC` | `AppState, error` | `AppState` |
   | `DisableGame` | `AppState, error` | `AppState` |
   | `EnableGame` | `AppState, error` | `AppState` |
+  | `GetUpdateState` | `update.Snapshot, error` | `Snapshot` |
+  | `CheckForUpdates` | `error` | `void` |
+  | `InstallUpdate` | `error` | `void` |
+  | `CancelUpdate` | `error` | `void` |
+  | `RestartToUpdate` | `error` | `void` |
+  | `SetUpdateChecksEnabled` | `update.Snapshot, error` | `Snapshot` |
 
-  These are the twelve bound methods. The generated file has exactly these twelve functions. Lifecycle hooks and the unexported `setEventEmitter` are not in it.
+  These are the eighteen bound methods that the frontend calls. The generated file has exactly these eighteen functions. Lifecycle hooks and the unexported `setEventEmitter` and `setUpdater` are not in it.
 
 - `frontend/src/test/wails-app-mock.js` is used in place of the generated file by the test alias. It exports one function per binding, with explicit parameters, and a `defaultHandlers` object that holds one handler per binding. `__setWailsMocks` and `__resetWailsMocks` swap handlers per test.
 - `frontend/src/test/wails-bindings.test.js` checks the mock against the generated file and against the frontend and Go sources:
@@ -313,6 +338,7 @@ These are behaviors that the code shows and that the user guide does not describ
 
 - `app_test.go`: bound orchestration with the `go-keyring` mock backend, and key state.
 - `app_events_test.go`: `sync:changed` emission.
+- `app_update_test.go`: the update bindings without an updater (one fixed sentence), the toggle persisting, `GetUpdateState` reading no settings, the shutdown sync bound (`syncShutdownWait`) and a quiet shutdown.
 - `service_lifecycle_test.go`: `ServiceStartup` and `ServiceShutdown`, lifetime context, init failure, shutdown refusal.
 - `covers_test.go`: `/game-covers` handler.
 - `wailslog_test.go`: the Wails logger bridge.

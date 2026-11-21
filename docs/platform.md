@@ -98,6 +98,19 @@ The Steam Web API key is not a file. It is one keyring item outside the app fold
 
 Deleting the cache folder is safe. The next sync downloads the covers again. The `cover_images` rows then point at missing files, and `NeedsRefresh` treats a missing file as stale (see [covers.md](covers.md)).
 
+### Updater leftovers
+
+The in-app updater (see [updater.md](updater.md)) writes outside the three app roots. The framework creates these, and the app never removes them except as noted:
+
+| Path | Created by | Left behind when | Removed by |
+| --- | --- | --- | --- |
+| `<target>.bak`, where `<target>` is the AppImage on Linux or the exe on Windows | The swap helper, as a backup of the installed file | A swap or launch fails. A successful swap deletes it. | Nothing. Delete by hand. |
+| `<exe>.old.<UnixNano>` (Windows, next to the exe) | The swap helper, which renames the old exe aside | Every successful Windows update, while the old file is still in use. | The next update's helper, when the file is free. The NSIS uninstaller deletes `<exe>.old.*` (see below). |
+| `wails-update-*` directory next to the target | `Updater.DownloadAndInstall`, which stages the payload | The update was downloaded and not applied, the helper failed, or the app crashed during an update. | The app, at shutdown while the phase is `ready` (`Service.Shutdown`, through `fsretry`). The helper removes it after a successful swap. |
+| `wails-update-<pid>.log` in the OS temp directory (`os.TempDir()`) | The swap helper, for each update it runs | Always. The log has full paths, usually including the OS user name. | Nothing. Delete by hand. |
+
+The NSIS uninstaller (`build/windows/nsis/project.nsi`) deletes `$INSTDIR\<exe>.old.*` and `$INSTDIR\<exe>.bak` before its non-recursive `RMDir "$INSTDIR"`. It never uses `RMDir /r`, so an unrelated file or a leftover `wails-update-*` folder in the install folder keeps the folder, and the install folder stays behind.
+
 ## internal/keyring
 
 Stores the Steam Web API key exclusively in the OS keyring via `github.com/zalando/go-keyring`: Secret Service on Linux, Windows Credential Manager on Windows (go-keyring also supports macOS, which this project does not target). No environment-variable or plaintext fallback exists.

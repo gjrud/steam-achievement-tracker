@@ -69,13 +69,21 @@ Cards are built from:
 
 ### Settings keys
 
-The `settings` table holds app-level keys. Only `active_profile_id` is used.
+The `settings` table holds app-level keys. Two are used: `active_profile_id` (this section) and `update_checks_enabled` (see [Update check setting](#update-check-setting)).
 
 | Key | Value | Meaning |
 | --- | --- | --- |
 | `active_profile_id` | decimal `profiles.id` | Active profile. |
 | `active_profile_id` | `''` | No active profile (set by `DeactivateProfile` and by deleting the active profile). |
 | (no row) | | Also no active profile. |
+
+### Update check setting
+
+`settings.go` holds `update_checks_enabled`, the app-wide key for the startup update check. The methods are `UpdateChecksEnabled() (bool, error)` and `SetUpdateChecksEnabled(enabled bool) error`.
+
+- A missing row reads as on (the default). `"1"` is on and `"0"` is off.
+- Any other stored value returns an error with `false`. The app treats that as unreadable and skips the startup check (see [updater.md](updater.md#persistence)).
+- `SetUpdateChecksEnabled` upserts only this key. Other settings rows, including `active_profile_id`, are not touched.
 
 Per-profile library options are not in `settings`; they are in `profile_library_settings` (see [Library settings](#library-settings-settingsgo)).
 

@@ -6,7 +6,7 @@ Developer reference for the SQLite layer in `internal/db` (`db.go`, `dsn.go`). T
 
 - Driver: `github.com/mattn/go-sqlite3` (CGO). `go.mod` pins v1.14.x.
 - One database file: `<data>/steam-achievement-tracker.db` (`config.DBFileName`), with `<data>` set to `appdata.Paths.DataDir`. Backups go in `<data>/backups/`.
-- Privacy (GDPR): all data in this file stays on the user's machine. The app sends it nowhere; its only network traffic is to Steam (Web API and CDN), and the README "Where your data stays" section says the same. The database never stores filesystem paths, since they carry the OS user name. Cover files are found from `image_appid` and `file_name` only (`cover_images.cached` is the flag). Two things can still hold personal data, and the README privacy section tells users about them. The sync error text (`sync_runs.error`, `profile_games.last_error`) holds only user-safe sentences: `steam.UserMessage` text, the usererr sentences the app writes, and the run texts the app writes itself (see [app-service.md](app-service.md#error-boundary)). Migration 3 rewrote the rows written by earlier versions, which had stored raw error text, so no row keeps a request address, SteamID64, vanity name or backend text (see [Migrations](#migrations)). Backups made before migration 2 still hold the old `cover_images.path` values. A backup made before migration 3 still holds the old raw `last_error` and `sync_runs.error` text, which can include request addresses with a SteamID64 from older versions; the app does not display it, but the file stays on disk until the user deletes it.
+- Privacy (GDPR): all data in this file stays on the user's machine. The app sends it nowhere. Its network traffic goes to Steam (Web API and CDN) and, for update checks and update downloads, to GitHub (see [updater.md](updater.md#network)); the README "Where your data stays" section says the same. The update check setting is stored here, but no database content is sent with an update request. The database never stores filesystem paths, since they carry the OS user name. Cover files are found from `image_appid` and `file_name` only (`cover_images.cached` is the flag). Two things can still hold personal data, and the README privacy section tells users about them. The sync error text (`sync_runs.error`, `profile_games.last_error`) holds only user-safe sentences: `steam.UserMessage` text, the usererr sentences the app writes, and the run texts the app writes itself (see [app-service.md](app-service.md#error-boundary)). Migration 3 rewrote the rows written by earlier versions, which had stored raw error text, so no row keeps a request address, SteamID64, vanity name or backend text (see [Migrations](#migrations)). Backups made before migration 2 still hold the old `cover_images.path` values. A backup made before migration 3 still holds the old raw `last_error` and `sync_runs.error` text, which can include request addresses with a SteamID64 from older versions; the app does not display it, but the file stays on disk until the user deletes it.
 - Journal mode WAL. Foreign keys enforced.
 - Connection pool capped at one open and one idle connection (`SetMaxOpenConns(1)`, `SetMaxIdleConns(1)`). Every query, including nested queries, shares that connection. Do not query `*sql.DB` while a transaction or an open `*sql.Rows` on the same handle remains in use; the query blocks forever. Repository code closes `rows` before issuing the next statement for this reason (see the comments in `loadGameCards` and `profileGameTags`).
 - Timestamps are stored as text. The repository writes `time.Now().UTC().Format(time.RFC3339)`. `SaveGameSync` takes its timestamp (`SyncedAt`) from the caller.
@@ -119,14 +119,17 @@ All tables are created by migration 1 (`initial_schema`), except `schema_migrati
 
 ### `settings`
 
-Key-value store for app-level settings. Only one key is used today.
+Key-value store for app-level settings.
 
 | Column | Type | Null | Key | Notes |
 | --- | --- | --- | --- | --- |
 | `key` | text | no | PK | |
 | `value` | text | no | | |
 
-Used keys: `active_profile_id`. Value is the decimal `profiles.id`, or the empty string meaning no active profile. A missing row also means no active profile. See [repository.md](repository.md#settings-keys).
+Used keys:
+
+- `active_profile_id`. Value is the decimal `profiles.id`, or the empty string meaning no active profile. A missing row also means no active profile. See [repository.md](repository.md#settings-keys).
+- `update_checks_enabled`. Value `1` (on) or `0` (off), written by `SetUpdateChecksEnabled`. A missing row means on, which is the default. Any other value, or a read error, makes the repository return an error, and the updater then treats the setting as unreadable: the startup check is skipped and the snapshot reports checks off. The setting is app-wide, not per profile, and it is added without a migration: the table already exists, and older rows are unaffected. See [updater.md](updater.md#persistence).
 
 ### `schema_migrations`
 
