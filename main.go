@@ -11,6 +11,7 @@ import (
 
 	"github.com/gjrud/steam-achievement-tracker/internal/appdata"
 	"github.com/gjrud/steam-achievement-tracker/internal/redact"
+	"github.com/gjrud/steam-achievement-tracker/internal/update"
 )
 
 //go:embed all:frontend/dist
@@ -75,6 +76,21 @@ func main() {
 
 	// Sync state events reach the frontend through the app's event bus. The backend has no other route to it.
 	backend.setEventEmitter(func(name string) { app.Event.Emit(name) })
+
+	// The in-app updater runs headless: its state reaches the frontend through update:changed, and the framework's
+	// own events reach Go only, through OnEvent. Init reads the version stamp; a build without one has no updater. The
+	// startup check starts later, from ServiceStartup.
+	updates := update.New(update.Deps{
+		Updater: app.Updater,
+		Context: backend.context(),
+		OnEvent: func(name string, fn func(data any)) func() {
+			return app.Event.On(name, func(event *application.CustomEvent) { fn(event.Data) })
+		},
+		ChecksEnabled: backend.updateChecksEnabled,
+		OnChanged:     func() { app.Event.Emit(updateChangedEvent) },
+	})
+	backend.setUpdater(updates)
+	updates.Init()
 
 	app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:            "Steam Achievement Tracker",

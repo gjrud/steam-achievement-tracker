@@ -26,7 +26,7 @@ Build steps and the release workflow are in [build-and-release.md](build-and-rel
 | Wails shell | `main.go`, `wailslog.go` | Creates the `application.New` app, registers services, embeds assets, opens the window, bridges the Wails logger to `app.log`, emits the sync event. |
 | App service | `app.go` (`App`) | Bound to the frontend. Owns the lifetime context, the cached API key state, the sync goroutine, and the init sequence. Orchestrates every user action. |
 | Cover service | `covers.go` (`CoverService`) | Plain `http.Handler` mounted at `/game-covers`. Serves cached cover images from disk. Not bound to the frontend. |
-| Domain and infrastructure | `internal/*` | Paths, database, repository (SQL), Steam client, syncer, image cache, keyring, logging. No Wails imports. |
+| Domain and infrastructure | `internal/*` | Paths, database, repository (SQL), Steam client, syncer, image cache, keyring, logging, updater and version stamp. Only `internal/update` imports a Wails package (`pkg/updater`), and never the application shell. |
 | Frontend | `frontend/src/` | Svelte 5 UI. Calls bound methods through generated bindings, and refetches state on the `sync:changed` event. |
 
 Wails v3 services such as `App` and `CoverService` are plain Go structs. `App` uses its own lifetime context rather than a Wails runtime context: it creates it in `NewApp` and cancels it in `ServiceShutdown`.
@@ -62,6 +62,7 @@ flowchart TB
     Images["images (cover download/cache)"]
     Keyring["keyring (system keyring)"]
     Logging["logging (lumberjack file)"]
+    Updater["update (in-app updater, GitHub releases)"]
   end
 
   UI --> Bindings
@@ -81,6 +82,8 @@ flowchart TB
   AppSvc --> Repo
   AppSvc --> Keyring
   AppSvc --> Logging
+  AppSvc -->|"checks, install, restart"| Updater
+  Updater -->|"update:changed"| Bus
   AppSvc -->|"start, cancel, wait"| Syncer
   Syncer -->|"OnChange"| AppSvc
   Syncer --> Repo
@@ -115,18 +118,21 @@ Arrows indicate call direction. `Syncer` reports state changes to `App` through 
 
 If any step fails, `initialized` stays false, `initError` holds the message, and the next call to `ensureInitialized` retries the whole sequence. `ServiceStartup` always returns `nil`, so a failed init does not stop the app from starting. The frontend shows the failure from `AppState.InitError`.
 
-After init, `ServiceStartup` reads the state. If an API key is present and a profile exists, it calls `startSync(false)`, which starts a background sync without forcing one if a sync is already running.
+After init, `ServiceStartup` starts the update check (a few seconds after startup, and only when the setting is on and the updater is available), then reads the state. If an API key is present and a profile exists, it calls `startSync(false)`, which starts a background sync without forcing one if a sync is already running.
+
+The updater is created in `main.go` after `application.New` and before the window, so the bound update methods exist before the first frontend call. Its version stamp and framework configuration are read then. See [updater.md](updater.md#wiring).
 
 ## Shutdown
 
 On the normal quit path, Wails v3.1.0 runs `application.App.cleanup`. It cancels the Wails app context, runs `shutdownServices` through `InvokeSync`, and then closes the windows. `shutdownServices` calls each service's `ServiceShutdown` in reverse registration order, so `CoverService` (registered second) goes first; it has no shutdown hook. Then `App.ServiceShutdown`:
 
 1. Cancels the lifetime context. Any later `startSync` returns `errShuttingDown`, and any `context()`-derived request fails.
-2. Reads the current `syncCancel` under `mu` and cancels the running sync.
-3. Waits on `syncWG`, which the sync goroutine releases in `endSync` after its final event.
-4. Clears `repo` under `mu` and closes the database.
+2. Stops the updater (`Service.Shutdown`). It never waits on an update operation. A running download is cancelled, and a staged update that was not applied is removed. Nothing is removed while a restart is in progress (see [updater.md](updater.md#shutdown-and-restart-safety)).
+3. Reads the current `syncCancel` under `mu` and cancels the running sync.
+4. Waits on `syncWG` for at most 10 s (`syncShutdownWait`), then logs a warning and goes on. The sync goroutine releases `syncWG` in `endSync` after its final event. The bound matters for an in-app restart: the update helper gives the old process 30 s to exit.
+5. Clears `repo` under `mu` and closes the database.
 
-Wails closes the windows only after `shutdownServices` returns, so the frontend may still be running. A call that reaches Go after step 4 behaves as follows:
+Wails closes the windows only after `shutdownServices` returns, so the frontend may still be running. A call that reaches Go after step 5 behaves as follows:
 
 - `GetAppState` does not fail. `initialized` stays true and `repo` is nil, so it returns a state with `profileExists` false, a null dashboard and no error. The frontend routes on that state (see [frontend.md](frontend.md)).
 - Actions that need the repository (`SaveProfile`, `SetLibrarySettings`, `ClearActiveUserData`, and the game actions) fail with the not-ready sentence (`The app database is not available. Restart the app, or see the log file for details.`).
@@ -201,7 +207,7 @@ The Steam Web API key is the only secret.
 
 | Primitive | Protects |
 | --- | --- |
-| `initMu` | The init sequence. `ensureInitialized` holds it for the whole sequence. |
+| `initMu` | The init sequence (`initializeOnce`). It is released before `ensureInitialized` loads the update toggle. |
 | `keyMu` | Keyring operations that change the cached key state: `SaveAPIKey`, `refreshAPIKey`, `clearSteamAPIKey`. |
 | `mu` | All other `App` state: paths, repo, key cache, sync flags, cancel func, baseline, emitter. |
 | `syncWG` | Running sync goroutines. Waited on by `ServiceShutdown` and `cancelSyncAndWait`. |
@@ -216,12 +222,27 @@ Sync concurrency:
 - `startSync` with `force=false` returns quietly when a sync is already running. With `force=true` it returns `errSyncAlreadyInProgress`.
 - The cover HTTP handler reads the paths under `mu`, then serves files without holding the lock.
 
+## Network
+
+The app makes outgoing requests to exactly these services:
+
+| Destination | Code | When |
+| --- | --- | --- |
+| Steam Web API (`api.steampowered.com`) | `internal/steam` | Profile validation, sync. Carries the Steam Web API key only in the requests that need it. |
+| Steam image servers and CDN | `internal/images` (covers); `frontend/src/lib/components/ProfileCard.svelte` (avatars, loaded by the webview) | Cover downloads during sync. Avatars are not fetched by Go: the webview loads the avatar URL from Steam's API responses. |
+| GitHub API (`api.github.com`) and the GitHub file host it redirects to | `internal/update` (through the framework's `github` provider) | Update checks (startup and "Check now"; a check also fetches `SHA256SUMS` when a newer release exists) and the release file for an update the user approved with Install. Sends no account or install identifier and no app version. |
+
+Nothing else is contacted. The "Get a Steam Web API key" link and the update banner's release link open in the system browser, so the webview does not load them. The app has no telemetry or analytics. Update requests use the same process proxy settings as any Go HTTP client (`http.ProxyFromEnvironment`). See [updater.md](updater.md#network).
+
 ## Package map
 
 | Package or file | Responsibility | Doc |
 | --- | --- | --- |
-| `main.go` | Wails application setup, embedded assets, window, service registration, event emitter wiring | [app-service.md](app-service.md) |
+| `main.go` | Wails application setup, embedded assets, window, service registration, event emitter and updater wiring | [app-service.md](app-service.md) |
 | `app.go` | `App` service: bound API, init, sync orchestration, state assembly, API key cache | [app-service.md](app-service.md) |
+| `app_update.go` | Glue between `App` and the updater: the six update bindings and the toggle | [app-service.md](app-service.md), [updater.md](updater.md) |
+| `internal/update` | In-app updater: GitHub provider, install gate, phase state machine, errors, staging cleanup | [updater.md](updater.md) |
+| `internal/version` | The version stamp (`-ldflags -X`) and the rule that makes it a usable version | [updater.md](updater.md#version-stamp) |
 | `covers.go` | `CoverService`: `/game-covers` HTTP handler for cached covers | [app-service.md](app-service.md), [covers.md](covers.md) |
 | `wailslog.go` | Wails `slog` logger bridged to the app log writer, level Warn | [app-service.md](app-service.md), [platform.md](platform.md) |
 | `internal/appdata` | XDG and Known Folder path resolution, directory creation | [platform.md](platform.md) |

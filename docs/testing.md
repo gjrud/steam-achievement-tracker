@@ -2,7 +2,7 @@
 
 This document describes the test strategy, layout, helpers and commands. The user guide ([../README.md](../README.md)) has no testing section. Suite coverage and guidance for adding tests are listed here.
 
-In brief: Go tests exercise package APIs against real SQLite databases and a real on-disk image cache, while faking only Steam HTTP endpoints. Tests isolate state with temporary directories rather than filesystem mocks. Frontend tests run in jsdom against a mocked Wails binding layer and a mocked runtime; drift checks keep those mocks in step with the Go backend. Mutation testing (gremlins) is a local diagnostic, not a gate.
+In brief: Go tests exercise package APIs against real SQLite databases and a real on-disk image cache, while faking only the Steam and GitHub HTTP endpoints. Tests isolate state with temporary directories rather than filesystem mocks. Frontend tests run in jsdom against a mocked Wails binding layer and a mocked runtime; drift checks keep those mocks in step with the Go backend. Mutation testing (gremlins) is a local diagnostic, not a gate.
 
 ## Commands
 
@@ -46,6 +46,7 @@ No Go test calls `t.Parallel`. Tests that modify process environment (XDG variab
 | --- | --- |
 | `app_test.go` | The Wails-bound `App` methods: `GetAppState` (key and profile presence, the key never returned), init failures, sync single-flight guards and lifecycle, baseline and run tracking, profile save and validation (SteamID, vanity name, player not found, HTTP errors), clear-data combinations of profile data and key, game actions (disable, enable, previously completed, DLC toggle), cached image removal, `SaveAPIKey` and `RetryAPIKey`, cancel-and-wait. |
 | `app_events_test.go` | The `sync:changed` event sequence: events at start, after each write and at the end, and the final event reporting the idle state. An early exit (no API key) still emits the start and end events, `[true false]` (`TestStartSyncEarlyExitEmitsStartAndEnd`). Also an emitter that is absent. |
+| `app_update_test.go` | The update bindings with no updater (one fixed sentence, `GetUpdateState` unavailable), the toggle persisting (and not persisting when unavailable), `GetUpdateState` reading no settings, the toggle loaded when the database opens, and the shutdown bound on a running sync (`syncShutdownWait` shortened) and quiet shutdown. |
 | `covers_test.go` | `CoverService` routing: prefix stripping, rejection of non-positive app ids, paths without a leading slash, invalid cover routes, serving of each cover kind, and a race test that reads app paths while `ensureInitialized` runs. |
 | `service_lifecycle_test.go` | `ServiceStartup` init failure (returns nil, reports the error), `ServiceShutdown` cancels the lifetime context, and `startSync` after shutdown returns `errShuttingDown`. A zero-value `App` has a background context that `ServiceShutdown` does not cancel (`TestAppLiteralContextIsBackground`). |
 | `wailslog_test.go` | Forwarding of Wails' `slog` output to the app log, and that Debug is disabled. |
@@ -120,6 +121,21 @@ Retry tests call `client.SetRetryBackoff(func(int) time.Duration { return 0 })` 
 
 `openTestRepository` opens a real repository under isolated paths. Fixtures (`storeFixture`, `groupFixture`, `achFixture`, `gameFailure`) are built inline.
 
+### internal/update
+
+| File | Covers |
+| --- | --- |
+| `match_test.go` | `matchAsset` against the real release asset list (portable vs setup, packages, source tarball, `SHA256SUMS`); `appImageTarget` with a fake environment (`fakeEnv`), including an inherited `APPIMAGE` in a process that is not an AppImage run; `hostRefusal` and `installRefusal` (nil verification, wrong digest length); `releasePageURL`. |
+| `client_test.go` | The GitHub provider against an `httptest` server (`newStubGitHub`, `providerFor`): AppImage and portable selection, digest verification, missing checksum (notify-only), checksum fetch failure, no release, not newer, no asset for the platform. Also the framework config and the HTTP client's timeouts. |
+| `phase_test.go` | Phase guards (`canStart`, `cancelable`), the framework event guard, the no-error rule for a framework error event, and the restart refusal sentences. |
+| `service_test.go` | The service with a fake environment (`fakeEnv`): unavailable without a stamp (and no log), refusals that never reach the framework, pre-release screening (`TestScreenRelease`), the startup toggle read once, unreadable settings, init-failure logging, cancel and shutdown, and concurrent state, cancel, event and refusal calls. |
+| `errors_test.go` | `categorize` precedence and that every failure sentence is cause-less. |
+| `staging_test.go` | `stagingDirFor`: only `wails-update-*` directories are eligible for removal. |
+
+`internal/version/version_test.go` covers `ParseStamp`, `Valid` and `IsPrerelease`, and that an unstamped test binary has no version.
+
+Stub GitHub the same way the provider is wired in production: `githubConfig(base, client)` (in `client.go`) with `base` set to an `httptest` server URL and `client` set to an `*http.Client` you control. The provider calls `GET /repos/{owner}/{repo}/releases/latest`, then `SHA256SUMS`, then the asset URL from the release JSON, so the stub's asset `url` values must point at the stub too. Never leave `BaseURL` empty in a test: an empty value means `https://api.github.com`. Do not call `t.Parallel` in tests that set the package variables `startupDelay` or `syncShutdownWait`.
+
 ## Isolation helpers
 
 ### appdatatest (`internal/appdata/appdatatest`)
@@ -182,9 +198,10 @@ Suites:
 | `src/lib/sync.test.js` | `syncBand` for every run status and the announce text. |
 | `src/lib/tag.test.js` | Tag derivation, order, tones, labels, and count consistency between `tagCountsFromGames` and the per-tag reference. |
 | `src/lib/components/*.test.js` | `ApiKeyForm`, `ClearDataConfirmModal`, `ProfileCard` (fake timers for the 30 s refresh), `SettingsView`, `SummaryStats`. |
+| `src/lib/update.test.js`, `src/lib/components/UpdateBanner.test.js`, `src/lib/components/UpdateSettings.test.js`, `src/App.update.test.js` | The in-app update store, banner, Settings section and the update flow in `App.svelte`, all against the mocked update bindings. No test calls GitHub. |
 | `src/test/wails-bindings.test.js` | Drift checks (below). |
 
-Shared helpers (`src/test/app-fixtures.js`): state builders (`baseState`, `dashboardState`, `game`, `manyGames`, `syncRun`, `syncingState`, `finishedState`, `missingKeyState`, `profileSetupState`), `emitSyncChanged` (fires `sync:changed` through the runtime mock), and `settle`/`advance` for fake timers.
+Shared helpers (`src/test/app-fixtures.js`; the update tests use `src/test/update-fixtures.js` instead, which has `updateSnapshot`, `latestRelease`, `availableSnapshot`, `fakeUpdateApi`, `loadedStore` and `flush`): state builders (`baseState`, `dashboardState`, `game`, `manyGames`, `syncRun`, `syncingState`, `finishedState`, `missingKeyState`, `profileSetupState`), `emitSyncChanged` (fires `sync:changed` through the runtime mock), and `settle`/`advance` for fake timers.
 
 Rules when writing frontend tests:
 
@@ -213,13 +230,17 @@ CI behavior is defined in `.github/workflows/ci.yml` (see [build-and-release.md]
 - The required status check is the `test` job, which passes only when both legs succeed.
 - The release workflow reuses CI (`workflow_call`), so a release runs the same tests.
 
+## Manual update checks
+
+Some updater behavior depends on a real host, a real release, or timing, so no automated test covers it: the Cancel and busy-rule behavior in the UI, a failed Restart that can be retried, the staged folder removed on close, the not-writable folder, a hanging download, the Windows swap and relaunch, and the first AppImage and rollback checks. The list is in [updater.md](updater.md#acceptance-checks-without-automated-tests). Build a local copy stamped with an old version to test against the current release: `VERSION=0.0.1` with `wails3 task windows:build` on Windows. On Linux, a plain `wails3 build` binary cannot be tested this way (it is notify-only, and its check fails until the first release that ships the updater). Use `VERSION=0.0.1 wails3 package` and run the AppImage once that release exists. Every Install-dependent check is Windows-only until then. Do not commit any temporary change made for a manual check, such as a short `HelperReadyTimeout`.
+
 ## Adding tests
 
 Go:
 
 - Use `appdatatest.Isolate(t)` for any test that uses the repository, the cover cache, or logs. Call `t.Cleanup(logging.Fallback)` after isolation if `Init` runs.
 - For keyring use, call `zk.MockInit()` first. Swap seams only through the helpers in the test file, and do not call `t.Parallel`.
-- For Steam, use `newTestServer` or `newSteamStub` and call `SetRetryBackoff` to skip sleeps. Never let a test reach the real Steam API.
+- For Steam, use `newTestServer` or `newSteamStub` and call `SetRetryBackoff` to skip sleeps. Never let a test reach the real Steam API. For GitHub, see [internal/update](#internalupdate).
 - For repository behavior, use `testRepositoryPath` (in the `internal/repository` tests) or `openTestRepository` (in the `internal/syncer` tests) so the database is real and temporary.
 - Keep the key out of expected error text. Existing tests check that a key never appears in an error (`TestSaveAPIKeyErrorsNeverContainTheKey`, `TestTransportErrorDoesNotLeakAPIKey`); follow that pattern for any new error path that touches the key.
 - Put cross-platform file mode checks behind `runtime.GOOS != "windows"`.

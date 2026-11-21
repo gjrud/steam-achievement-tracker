@@ -26,6 +26,7 @@ I built this app for personal use, entirely through vibecoding. I have entry-lev
 - **Library sync options** for unvetted apps and played free-to-play games, per profile.
 - **Remove profile** from Settings. By default, this only disconnects the profile and keeps its data. You can also delete the data and the saved API key.
 - **Local storage** in SQLite, with a backup before database upgrades, and rotating log files.
+- **Update checks** against this project's GitHub releases. The Windows portable and installed builds and the Linux AppImage can update in place. You choose when to install (see [Updates](#updates)).
 
 ## Requirements
 
@@ -42,7 +43,7 @@ I built this app for personal use, entirely through vibecoding. I have entry-lev
 ### Both systems
 
 - A Steam Web API key (see [Get a Steam Web API key](#get-a-steam-web-api-key)).
-- Network access to Steam's Web API and Steam's image servers.
+- Network access to Steam's Web API and Steam's image servers. Update checks also need access to GitHub; they can be turned off (see [Updates](#updates)).
 - Your own Steam profile, from the account that owns the API key. It can have any privacy setting, including private.
 
 ## Install
@@ -225,7 +226,7 @@ These flags are local bookkeeping stored on your computer for each profile. You 
 
 ### Library sync options
 
-In **Settings**, choose what to load when syncing the active profile. Each profile has its own settings; both options are on for a new profile:
+In **Settings**, choose what to load when syncing the active profile. Each profile has its own settings; both options are on for a new profile. The update check setting is different: it applies to the whole app (see [Updates](#updates)).
 
 - **Include unvetted apps**: includes new Steam apps that Steam hides until it vets them. Those games are tagged **Unvetted** and counted separately in the **Completed** counters. With the option off, every game counts as vetted.
 - **Include played free games**: includes free-to-play games you played without buying. With the option off, only purchased games are tracked, and **Purchased** equals **All games**.
@@ -244,6 +245,39 @@ The confirm button describes what will be deleted, such as **Remove profile and 
 If both switches are off, the app only disconnects the profile. Its data stays on disk and the key is kept. Connecting the same SteamID64 again restores the data and starts a sync. Disconnected profile data stays on disk until you reconnect that profile and remove it with **Delete profile data**. If you deleted the profile data, reconnecting starts with both library sync options on.
 
 ![Remove active profile](assets/screenshots/clear-data.gif)
+
+## Updates
+
+The app can check GitHub for a newer stable release. It checks a few seconds after startup, and when you click **Check now** in **Settings**. It does not check on a timer. Nothing is downloaded until you click **Install**. When a newer version is available, the dashboard shows a banner with **Install**, a link to the release notes, and **Later**. Installs that cannot update in place (see below) get the same banner without **Install**. **Later** hides the banner until the next launch or your next manual check.
+
+**What is contacted.** The app makes ordinary HTTPS requests to `api.github.com`. A check asks for the latest release. When a newer one exists, it also downloads `SHA256SUMS`, which `api.github.com` redirects to a GitHub file host. Install downloads the release file the same way. Each request has no account, install or user identifier and no app version. There is no telemetry: the app does not report its usage, crashes or version to anyone. Your library, profile and API key are never sent.
+
+**Turn checks off.** In **Settings**, clear **Check for updates on startup**. With it off, the app makes no request at startup. **Check now** still works. The setting is stored in the app's database and applies to the whole app, not to one profile.
+
+**Which installs update in place.** The Windows portable exe, the Windows installer (per-user), and the Linux AppImage. Click **Restart now** to apply a downloaded update. The app closes, the new version replaces the old one, and the app starts again. **Restarting cancels a running sync.** When the app opens again, it starts a new sync if a profile and API key are set. Your database is kept.
+
+**Which installs only get a notice.** Linux deb, rpm and Arch packages. The banner shows the new version and a link to the release page. Update these with your package manager, or download the new release yourself.
+
+**What the check guarantees.** Every in-app update is compared with `SHA256SUMS` from the same release. This detects a damaged or incomplete download. It does not prove that the release came from the developer, because the checksum file comes from the same release as the file. To verify where a downloaded file came from, use its build provenance attestation:
+
+```sh
+gh attestation verify <file> --repo gjrud/steam-achievement-tracker
+```
+
+**Limits and leftovers.**
+
+- Only stable releases are offered. Pre-releases (tags with a `-` suffix) are never offered.
+- If the new version cannot start, the app restores the previous version. If it starts and then crashes, there is no rollback: it stays installed. Reinstall the same or a newer version from the release page. Do not reinstall an older version: an older build refuses a database that a newer build has upgraded.
+- On Windows, **Apps & Features** keeps showing the version the installer recorded, even after in-app updates.
+- The portable exe keeps the file name it was downloaded with, which includes the old version number. The AppImage name has no version. A file you renamed keeps your name.
+- A Windows install in a folder you cannot write to (for example a machine-wide install) fails at download with a message and the release link. The app keeps working.
+- An update can leave these files:
+  - `<app file>.bak`, a copy of the previous version, next to the AppImage on Linux or the exe on Windows (the Windows uninstaller removes it), and `<exe>.old.<number>` next to the exe on Windows. A later update removes the Windows `.old` files when Windows allows it.
+  - A folder named `wails-update-<random>` next to the app, after a failed update or a crash. An update that was downloaded but not applied is removed when you close the app.
+  - A log file named `wails-update-<pid>.log` in your system's temporary folder. It contains full file paths, usually including your user name. The app never removes it. Delete it when you no longer need it.
+- Versions released before this feature need one manual update: download the new release from the release page and install it.
+- Builds made from source without a version tag (development, Docker and untagged local builds) have no update checks and no update controls.
+- Unauthenticated GitHub requests are limited to 60 per hour per IP address. If a check fails, try again later.
 
 ## Data and privacy
 
@@ -267,12 +301,13 @@ Your Steam Web API key is stored only in the system keyring, not in these folder
 
 All your data stays on your computer: profiles, library, achievements, sync history, settings, and logs. The app never sends this data to the developer or any other service. It has no accounts, telemetry, or analytics.
 
-The app connects only to Steam:
+The app connects to Steam and, for update checks, to GitHub:
 
 - **Steam's Web API** (`api.steampowered.com`). Your API key is sent only to the requests that need it, to find your profile and read your games and achievements.
 - **Steam's CDN**, for cover art and profile avatars.
+- **GitHub** (`api.github.com`, and the GitHub file host that serves downloads), for update checks and in-app update downloads. No account or identifier is sent, but GitHub sees your IP address, as with any web request. You can turn startup checks off. See [Updates](#updates).
 
-The only other network action is the **Get a Steam Web API key** link. It opens Steam's key page in your default browser; your browser loads the page, not the app.
+Besides these, the only other network actions are two links that open in your default browser, so your browser loads the page, not the app: **Get a Steam Web API key** opens Steam's key page, and the release link in the update banner opens the GitHub release page.
 
 Your API key is never written to the database, the log files or error messages.
 
@@ -291,7 +326,7 @@ The vanity name or profile URL you enter during setup is used once to look up yo
 
 ### Log files
 
-Log files are in the `logs` folder inside the state folder. The current file is `app.log`. When it reaches 5 MB, it is rotated: the 5 newest old files are kept and older ones are removed. Old files are not compressed. Logs record app events, sync warnings, and errors, mostly by Steam app ID. The API key is always removed from these messages. The SteamID64 and vanity name are also removed from the request address that a failed Steam request can include in an error, so new log lines do not contain them. Log lines can still include Steam's raw response text, the app ID, and database or system keyring error text. A file-system error (`*fs.PathError` or `*os.LinkError`) is logged with its paths reduced to file names; a path that appears inside other error text is not removed. Steam's own error text never reaches the app screens or the stored sync history; it is logged only. Errors shown in the app and saved for display are short plain-language messages instead (for example "Steam is temporarily unavailable. Try again later." or "Something went wrong. See the log file for details."): the per-game message in the Sync errors view, the sync run's error, which is stored and exposed in the app state, and the messages of the bound actions and the startup screen. They do not carry the raw Steam response, a file path, SQL, or keyring backend text. To remove log lines, delete the `logs` folder (see below). **Delete profile data** removes the sync history with the profile's data.
+Log files are in the `logs` folder inside the state folder. The current file is `app.log`. When it reaches 5 MB, it is rotated: the 5 newest old files are kept and older ones are removed. Old files are not compressed. Logs record app events, sync warnings, and errors, mostly by Steam app ID. The API key is always removed from these messages. The SteamID64 and vanity name are also removed from the request address that a failed Steam request can include in an error, so new log lines do not contain them. Log lines can still include Steam's raw response text, the app ID, and database or system keyring error text. A file-system error (`*fs.PathError` or `*os.LinkError`) is logged with its paths reduced to file names; a path that appears inside other error text is not removed. Steam's own error text never reaches the app screens or the stored sync history; it is logged only. Errors shown in the app and saved for display are short plain-language messages instead (for example "Steam is temporarily unavailable. Try again later." or "Something went wrong. See the log file for details."): the per-game message in the Sync errors view, the sync run's error, which is stored and exposed in the app state, and the messages of the bound actions and the startup screen. They do not carry the raw Steam response, a file path, SQL, or keyring backend text. Update checks and installs log only a short category, such as `update: check failed: check-failed`, with no file path. To remove log lines, delete the `logs` folder (see below). **Delete profile data** removes the sync history with the profile's data.
 
 ### Sharing and erasing your data
 
@@ -299,7 +334,7 @@ Before sharing the database, a log file, or a screenshot (for example, in a bug 
 
 To erase a profile in the app, use **Remove profile** (see [Remove the active profile](#remove-the-active-profile)). **Delete profile data** removes the data that only that profile uses. **Delete API key** removes the key from the keyring. Neither one deletes log files. Logs rotate at 5 MB and the 5 newest old files are kept. To remove all of them, delete the `logs` folder in the state folder.
 
-To erase everything, close the app and delete the data, cache, and state folders listed above. On Windows, the data and state folders are the same. If you did not use **Delete API key**, also remove the `steam-achievement-tracker` item from your keyring (Secret Service on Linux, Credential Manager on Windows).
+To erase everything, close the app and delete the data, cache, and state folders listed above. On Windows, the data and state folders are the same. If you did not use **Delete API key**, also remove the `steam-achievement-tracker` item from your keyring (Secret Service on Linux, Credential Manager on Windows). Update logs (`wails-update-<pid>.log`, see [Updates](#updates)) are in your system's temporary folder, not in these folders, so delete them there too.
 
 Before a database upgrade, the app copies the database to the `backups` folder inside the data folder. The app never reads or deletes these backups. A backup made before the upgrade that removed stored cover file paths still contains those paths, including your user name. A backup made before the upgrade that rewrote stored sync error text still holds the old text, which can include a request address with your SteamID64; the app does not display it. Delete any backups you do not need from `backups`. This does not affect the current database.
 
@@ -312,6 +347,8 @@ Before a database upgrade, the app copies the database to the `backups` folder i
 - **Startup error screen**: the message names the problem and shows the log file. The log has the details.
 - **Portable exe does not start on Windows 10**: install the WebView2 Runtime first (see [Windows requirements](#windows-requirements)).
 - **SmartScreen warning on Windows**: see the note in [Windows install](#windows-install).
+- **"Could not check for updates"**: GitHub may be unreachable or rate-limited. Try again later. To stop checks, see [Updates](#updates).
+- **"The app folder is not writable"**: download the new release from the release page and install it by hand.
 - **Covers are blank**: they download on the next sync. If Steam has no image for a game, the card keeps the placeholder.
 - **Sync failed or partial**: open the **Sync errors** tab to see which games failed. The next sync retries them.
 - **A game is missing**: check whether it is disabled, whether **Include played free games** or **Include unvetted apps** is off, and whether Steam still lists it for the profile.

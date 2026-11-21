@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/gjrud/steam-achievement-tracker/internal/appdata"
 	"github.com/gjrud/steam-achievement-tracker/internal/config"
@@ -20,6 +21,7 @@ import (
 	"github.com/gjrud/steam-achievement-tracker/internal/repository"
 	"github.com/gjrud/steam-achievement-tracker/internal/steam"
 	"github.com/gjrud/steam-achievement-tracker/internal/syncer"
+	"github.com/gjrud/steam-achievement-tracker/internal/update"
 	"github.com/gjrud/steam-achievement-tracker/internal/usererr"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
@@ -74,6 +76,9 @@ type App struct {
 	syncBaselineRunID int64
 	syncBaselineKnown bool
 	syncWG            sync.WaitGroup
+	// updates is the in-app updater, set once by main through setUpdater; nil in tests that do not set one. It is read
+	// under mu and used only after mu is released.
+	updates *update.Service
 	// steamBaseURL overrides the Steam API base URL of sync clients when non-empty. Tests only; production leaves it empty.
 	steamBaseURL string
 }
@@ -111,11 +116,19 @@ func NewApp() *App {
 // reserved by the binding engine, so the frontend never sees it as a bound method. Init failures are not returned:
 // they surface to the UI through AppState.InitError, so the app still starts.
 func (a *App) ServiceStartup(_ context.Context, _ application.ServiceOptions) error {
-	if err := a.ensureInitialized(); err != nil {
-		// The raw init error is logged here, once at startup. The UI gets only the sentence in InitError.
+	err := a.ensureInitialized()
+	// The update service's Init failure is logged here, whether or not the app's own init succeeded.
+	a.logUpdateInitFailure()
+	if err != nil {
+		// The raw init error is logged here, once at startup. The UI gets only the sentence in InitError. The update
+		// check is not started either: the toggle was never loaded, so StartupCheck would skip anyway.
 		log.Printf("startup init: %s", logText(err))
 		return nil
 	}
+	// The startup check relies on ServiceStartup being the first caller of ensureInitialized: that call loads the update
+	// toggle when the database opens, so the toggle is cached before StartupCheck reads it. Do not add machinery for
+	// other call orders.
+	a.startUpdateCheck()
 	state, err := a.appState()
 	if err != nil {
 		log.Printf("startup state: %v", redact.Paths(err))
@@ -129,19 +142,23 @@ func (a *App) ServiceStartup(_ context.Context, _ application.ServiceOptions) er
 
 // ServiceShutdown is the Wails v3 service shutdown hook. Wails calls it during application shutdown; windows may
 // still be open, so calls from the frontend can still arrive. Its name is reserved by the binding engine, so the
-// frontend never sees it as a bound method. It cancels the lifetime context, stops any running sync, waits for it,
-// and closes the database.
+// frontend never sees it as a bound method. It cancels the lifetime context, stops the update service and any running
+// sync, waits a bounded time for the sync, and closes the database.
+//
+// Restart in the update service runs this inside the framework's quit, and the helper gives the old process 30 s to
+// exit. The wait is bounded so a long sync cannot make the helper relaunch the old version.
 func (a *App) ServiceShutdown() error {
 	if a.lifeCancel != nil {
 		a.lifeCancel()
 	}
+	a.stopUpdates()
 	a.mu.Lock()
 	cancel := a.syncCancel
 	a.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
-	a.syncWG.Wait()
+	a.waitForSyncs()
 	a.mu.Lock()
 	repo := a.repo
 	a.repo = nil
@@ -150,6 +167,27 @@ func (a *App) ServiceShutdown() error {
 		_ = repo.Close()
 	}
 	return nil
+}
+
+// syncShutdownWait bounds ServiceShutdown's wait for running syncs. It is comfortably under the 30 s the update helper
+// gives the old process to exit. A variable so tests can shorten it.
+var syncShutdownWait = 10 * time.Second
+
+// waitForSyncs waits for running syncs to finish, for at most syncShutdownWait. After the bound it logs a warning
+// without paths and returns; the caller then closes the database. The waiting goroutine ends when the sync does.
+func (a *App) waitForSyncs() {
+	done := make(chan struct{})
+	go func() {
+		a.syncWG.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(syncShutdownWait)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		log.Printf("warning: shutdown: sync still running after %s; closing the database", syncShutdownWait)
+	}
 }
 
 // GetAppState is bound to the frontend. Like every bound method that returns an error, it is a one-line call to
@@ -474,14 +512,27 @@ func (a *App) enableGame(appID, groupID int64) (AppState, error) {
 	return a.appState()
 }
 
+// ensureInitialized opens the data folder, the log and the database once. When that first succeeds it loads the update
+// checks toggle, so the update service caches it before anything reads the snapshot. The load runs after initMu is
+// released: it reads the database and may notify.
 func (a *App) ensureInitialized() error {
+	first, err := a.initializeOnce()
+	if first {
+		a.loadUpdateChecks()
+	}
+	return err
+}
+
+// initializeOnce does the work of ensureInitialized under initMu. It reports whether this call is the one that
+// succeeded in opening the app; every later call returns false.
+func (a *App) initializeOnce() (bool, error) {
 	a.initMu.Lock()
 	defer a.initMu.Unlock()
 
 	a.mu.Lock()
 	if a.initialized {
 		a.mu.Unlock()
-		return nil
+		return false, nil
 	}
 	a.mu.Unlock()
 
@@ -491,7 +542,7 @@ func (a *App) ensureInitialized() error {
 	a.mu.Unlock()
 	if err := appdata.Ensure(paths); err != nil {
 		logging.Fallback()
-		return a.setInitError(msgInitDataFolder, fmt.Errorf("create app directories: %w", err))
+		return false, a.setInitError(msgInitDataFolder, fmt.Errorf("create app directories: %w", err))
 	}
 	logging.Init(paths.LogFile)
 	a.mu.Lock()
@@ -499,7 +550,7 @@ func (a *App) ensureInitialized() error {
 	a.mu.Unlock()
 	db, err := dbinit.OpenAndMigrate(paths)
 	if err != nil {
-		return a.setInitError(msgInitDatabase, err)
+		return false, a.setInitError(msgInitDatabase, err)
 	}
 	repo := repository.New(db)
 	if err := repo.CancelRunningSyncRuns("app restarted before sync completed"); err != nil {
@@ -522,7 +573,7 @@ func (a *App) ensureInitialized() error {
 	}
 	a.initError = ""
 	a.mu.Unlock()
-	return nil
+	return true, nil
 }
 
 func (a *App) activeRepoAndProfile() (*repository.Repository, *repository.Profile, error) {

@@ -34,6 +34,7 @@ Particularly relevant areas:
 - Handling of the Steam Web API key (entered in the app, stored only in the system keyring (Secret Service on Linux, Windows Credential Manager on Windows), deleted by the app only through the Remove profile dialog's Delete API key option, never logged)
 - Local data: the app's data, cache and log directories (XDG directories on Linux, `%LocalAppData%` on Windows; see the README's "Data and privacy" section)
 - Windows file permissions: POSIX permission bits are not enforced there, so local data relies on the ACLs of the user profile
-- Network requests to Steam
+- Network requests to Steam, and network requests to GitHub for update checks and in-app update downloads (`api.github.com` and the GitHub file host it redirects to). A check asks for the latest release and, when a newer one exists, for `SHA256SUMS`; an install downloads the release file. The updater sends no account or install identifier and no telemetry.
+- In-app update integrity: each downloaded update is checked against the SHA-256 in `SHA256SUMS` from the same release (see the README's "Updates" section and `docs/updater.md`). This is an integrity check, not a signature. Authenticity can be checked with `gh attestation verify`.
 
 Out of scope: vulnerabilities in Steam itself, Wails, or other upstream dependencies. Report those to the respective projects.

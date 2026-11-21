@@ -1,6 +1,9 @@
 <script>
   import {tick} from 'svelte'
+  import UpdateSettings from './UpdateSettings.svelte'
   export let state
+  // updates: the update store (lib/update.js). Optional; without it the Updates section is not shown.
+  export let updates = null
   export let clearingData = false
   export let savingSettings = false
   export let onClearData = () => {}
@@ -59,5 +62,6 @@
     </div>
     <p class="muted">Changes apply on next sync. Games no longer returned are marked as not owned.</p>
   </section>
+  <UpdateSettings {updates} />
   <section class="danger-zone"><div><h3>Remove active profile</h3><p class="muted">Remove the active profile. You choose whether to also delete its data and the API key.</p></div><button class="danger" on:click={onClearData} disabled={clearingData}>{clearingData ? 'Removing…' : 'Remove profile'}</button></section>
 </section>

@@ -36,6 +36,8 @@ tasks:
         msg: "windows:build must run on a Windows host with MinGW gcc on PATH (CGO). Cross-compiling from Linux or macOS is not supported."
       - sh: '{{if eq .DEV "true"}}true{{else}}test -n "{{.PKG_VERSION}}"{{end}}'
         msg: "No version. Set VERSION (e.g. VERSION=1.2.3) or check out a tagged commit (git tag vX.Y.Z)."
+      # This only checks the numeric core. The updater stamp (internal/version.Valid) is stricter: leading zeros, build
+      # metadata such as +x and bad pre-release identifiers pass here, but the build then has no updater.
       - sh: '[[ "{{.VERSION_CORE}}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]'
         msg: "VERSION must start with X.Y.Z (optional leading v, pre-release and build metadata allowed), got '{{.VERSION_CORE}}'. Set VERSION, e.g. VERSION=1.2.3 or v1.2.3-rc.1."
     cmds:
@@ -49,7 +51,8 @@ tasks:
       DEV: '{{.DEV | default "false"}}'
       OUTPUT: '{{.BIN_DIR}}/{{.APP_NAME}}.exe'
       # Dev: console window and no -H windowsgui, so logs show. Production: GUI subsystem, trimmed.
-      BUILD_FLAGS: '{{if eq .DEV "true"}}-buildvcs=false -gcflags=all="-l"{{else}}-tags production -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui"{{end}}'
+      # -trimpath keeps ldflags out of the binary's build info; the release marker grep (release.yml) relies on it, so a wrong -X import path still fails the grep.
+      BUILD_FLAGS: '{{if eq .DEV "true"}}-buildvcs=false -gcflags=all="-l"{{else}}-tags production -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui -X github.com/gjrud/steam-achievement-tracker/internal/version.tag=sat-version:{{.PKG_VERSION}};"{{end}}'
     env:
       GOOS: windows
       GOARCH: amd64

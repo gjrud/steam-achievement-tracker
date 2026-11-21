@@ -1254,6 +1254,171 @@
     margin: 4px 0 0;
   }
 
+  /* Update banner: the info tone by default, green for a ready update, red for a failure. Copy on the left, actions on
+     the right; the actions wrap under the copy in a narrow window. */
+  .update-banner {
+    --update-c: #38bdf8;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px 18px;
+    margin: 0 0 16px;
+    padding: 12px 16px;
+    border: 1px solid rgba(56, 189, 248, 0.5);
+    border-radius: 14px;
+    background: rgba(56, 189, 248, 0.1);
+    text-align: left;
+  }
+
+  .update-banner.is-ready {
+    --update-c: #22c55e;
+    border-color: rgba(34, 197, 94, 0.55);
+    background: rgba(34, 197, 94, 0.1);
+  }
+
+  .update-banner.is-error {
+    --update-c: #f87171;
+    border-color: rgba(248, 113, 113, 0.5);
+    background: rgba(248, 113, 113, 0.1);
+  }
+
+  .update-copy {
+    flex: 1 1 320px;
+    min-width: 0;
+  }
+
+  .update-copy > * {
+    margin: 0;
+  }
+
+  .update-copy > * + * {
+    margin-top: 6px;
+  }
+
+  .update-title {
+    color: #f4fbff;
+    font-weight: 800;
+  }
+
+  .update-detail,
+  .update-progress-text {
+    color: #b7c8d8;
+    font-size: 13px;
+  }
+
+  .update-progress-text {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .update-error-text {
+    font-size: 13px;
+    word-break: break-word;
+  }
+
+  .update-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .update-link,
+  .update-link:visited {
+    color: #66c0f4;
+    font-size: 13px;
+    font-weight: 800;
+  }
+
+  .update-link:hover {
+    color: #c7e8fb;
+    text-decoration: underline;
+  }
+
+  .update-link:focus-visible {
+    outline: 2px solid #66c0f4;
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  .update-meter {
+    height: 8px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: #07111c;
+  }
+
+  .update-meter-fill {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--update-c);
+    transition: width 200ms ease;
+  }
+
+  /* Unknown total (or verify and install steps): a short bar sliding across the track. */
+  .update-meter.indeterminate .update-meter-fill {
+    width: 35%;
+    animation: update-slide 1.4s ease-in-out infinite;
+  }
+
+  @keyframes update-slide {
+    0% {
+      transform: translateX(-100%);
+    }
+
+    100% {
+      transform: translateX(290%);
+    }
+  }
+
+  /* Focus moves here after a click replaces its button; the title and the live region are not controls, so no ring. */
+  .update-host:focus,
+  .update-title:focus {
+    outline: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    /* No motion: a striped track, not a solid bar, so the meter does not read as complete. */
+    .update-meter.indeterminate .update-meter-fill {
+      width: 100%;
+      background: repeating-linear-gradient(-45deg, var(--update-c) 0 6px, transparent 6px 12px);
+      opacity: 0.6;
+      animation: none;
+    }
+
+    .update-meter-fill {
+      transition: none;
+    }
+  }
+
+  /* Settings section reuses the .library-sync card; its rows sit under the heading. */
+  .update-settings > .update-current {
+    margin: 14px 0 0;
+  }
+
+  .update-check-row {
+    margin-top: 14px;
+  }
+
+  /* Check now is aria-disabled while it cannot run (it keeps focus); it looks the same as a disabled button. */
+  .update-settings .update-check-row button[aria-disabled='true'],
+  .update-settings .update-check-row button[aria-disabled='true']:hover {
+    opacity: 0.6;
+    cursor: not-allowed;
+    transform: none;
+    filter: none;
+  }
+
+  .update-settings .update-status {
+    margin: 0;
+    font-size: 13px;
+  }
+
+  .update-settings > .update-status {
+    margin-top: 10px;
+  }
+
   /* overflow: auto lets a short window scroll the dialog instead of clipping its top edge (grid centring pushes an
      overflowing child above the viewport, where nothing can scroll to). */
   .modal-backdrop {

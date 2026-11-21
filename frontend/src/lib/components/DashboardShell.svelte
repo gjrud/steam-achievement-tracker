@@ -6,8 +6,11 @@
   import SyncErrorsView from './SyncErrorsView.svelte'
   import DisabledView from './DisabledView.svelte'
   import SettingsView from './SettingsView.svelte'
+  import UpdateBanner from './UpdateBanner.svelte'
   import {gameTags} from '../tag.js'
   export let state
+  // updates: the update store (lib/update.js). Optional; without it no update UI shows.
+  export let updates = null
   export let error = ''
   export let summary = {}
   export let latestSyncRun = null
@@ -66,6 +69,7 @@
     <SummaryStats {summary} {integer} />
     <ProfileCard {state} {latestSyncRun} {syncIsRunning} {onSyncNow} />
   </header>
+  <UpdateBanner {updates} />
   {#if error}<div class="banner error-banner" aria-live="polite">{error}</div>{/if}
   <nav class="tabs" aria-label="Dashboard views"><button class="tab" class:active={activeView === 'suggestions'} aria-current={activeView === 'suggestions' ? 'page' : undefined} on:click={() => onActiveViewChange('suggestions')}>Not completed</button><button class="tab" class:active={activeView === 'completed'} aria-current={activeView === 'completed' ? 'page' : undefined} on:click={() => onActiveViewChange('completed')}>Completed</button><button class="tab" class:active={activeView === 'warnings'} aria-current={activeView === 'warnings' ? 'page' : undefined} on:click={() => onActiveViewChange('warnings')}>Sync errors</button><button class="tab" class:active={activeView === 'disabled'} aria-current={activeView === 'disabled' ? 'page' : undefined} on:click={() => onActiveViewChange('disabled')}>Disabled</button><button class="tab tab-settings" class:active={activeView === 'settings'} aria-current={activeView === 'settings' ? 'page' : undefined} on:click={() => onActiveViewChange('settings')}>Settings</button></nav>
   {#if activeView !== 'settings'}
@@ -80,6 +84,6 @@
   {:else if activeView === 'disabled'}
     <DisabledView games={filteredDisabled} {viewSearch} {gameTitle} {gameWarning} {hasAchievements} {completionLabel} {pct} {formatPlaytime} {onRunGameAction} showDisabledReasonLabel={showDisabledReasonLabel} />
   {:else}
-    <SettingsView {state} {clearingData} {savingSettings} onClearData={onClearData} onSetLibrarySettings={onSetLibrarySettings} />
+    <SettingsView {state} {updates} {clearingData} {savingSettings} onClearData={onClearData} onSetLibrarySettings={onSetLibrarySettings} />
   {/if}
 </main>

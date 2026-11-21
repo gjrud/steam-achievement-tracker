@@ -23,6 +23,12 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+// The dashboard has two status regions now: the sync line in the profile card and the update banner's announcer. The
+// sync tests read the profile card's.
+function syncStatus() {
+  return within(document.querySelector('.profile-card')).getByRole('status')
+}
+
 // The app reads state once on mount and again only when the backend emits sync:changed (or, after a failed read during
 // a sync, every 2s until a read succeeds or the sync ends). These tests drive those events under fake timers, so every
 // async step goes through settle()/advance() and fireEvent. userEvent and waitFor both wait on timers the fake clock
@@ -48,7 +54,7 @@ describe('App sync events', () => {
     render(App)
     await settle()
 
-    expect(screen.getByRole('status')).toHaveTextContent('Current sync: Sync running')
+    expect(syncStatus()).toHaveTextContent('Current sync: Sync running')
     expect(screen.getByText(/Syncing 1 \/ 6/)).toBeInTheDocument()
     expect(screen.getByRole('button', {name: 'Syncing…'})).toBeDisabled()
     expect(getState).toHaveBeenCalledTimes(1)
@@ -60,7 +66,7 @@ describe('App sync events', () => {
 
     emitSyncChanged()
     await settle()
-    expect(screen.getByRole('status')).toHaveTextContent('Last sync: Partial sync, 1 failed')
+    expect(syncStatus()).toHaveTextContent('Last sync: Partial sync, 1 failed')
     expect(screen.getByRole('button', {name: 'Sync now'})).toBeEnabled()
     expect(getState).toHaveBeenCalledTimes(3)
   })
@@ -128,7 +134,7 @@ describe('App sync events', () => {
     resolveInitial(syncingState(1))
     await settle()
     expect(getState).toHaveBeenCalledTimes(2)
-    expect(screen.getByRole('status')).toHaveTextContent('Last sync: All games synced')
+    expect(syncStatus()).toHaveTextContent('Last sync: All games synced')
     expect(screen.getByRole('button', {name: 'Sync now'})).toBeEnabled()
 
     await advance(5000)
@@ -158,7 +164,7 @@ describe('App sync events', () => {
     await settle()
     expect(getState).toHaveBeenCalledTimes(2)
     expect(screen.queryByText(/Syncing 2 \/ 6/)).not.toBeInTheDocument()
-    expect(screen.getByRole('status')).toHaveTextContent('Last sync: All games synced')
+    expect(syncStatus()).toHaveTextContent('Last sync: All games synced')
     expect(screen.getByRole('button', {name: 'Sync now'})).toBeEnabled()
   })
 
@@ -190,7 +196,7 @@ describe('App sync events', () => {
     await settle()
     expect(screen.queryByText(/Syncing 2 \/ 6/)).not.toBeInTheDocument()
     expect(getState).toHaveBeenCalledTimes(3)
-    expect(screen.getByRole('status')).toHaveTextContent('Last sync: All games synced')
+    expect(syncStatus()).toHaveTextContent('Last sync: All games synced')
     expect(screen.getByRole('button', {name: 'Sync now'})).toBeEnabled()
   })
 
@@ -376,7 +382,7 @@ describe('App sync events', () => {
     // The retry armed 2s after the failed read still fires, though the action failed in between and no event followed.
     await advance(1000)
     expect(getState).toHaveBeenCalledTimes(3)
-    expect(screen.getByRole('status')).toHaveTextContent('Last sync: All games synced')
+    expect(syncStatus()).toHaveTextContent('Last sync: All games synced')
     expect(screen.getByRole('button', {name: 'Sync now'})).toBeEnabled()
     // The action's own error is not a read error, so the successful read leaves it in place.
     expect(screen.getByText('Disable failed')).toBeInTheDocument()
@@ -582,6 +588,6 @@ describe('App sync now', () => {
 
     expect(syncNow).toHaveBeenCalledOnce()
     expect(await screen.findByRole('button', {name: 'Syncing…'})).toBeDisabled()
-    expect(screen.getByRole('status')).toHaveTextContent('Current sync: Sync running')
+    expect(syncStatus()).toHaveTextContent('Current sync: Sync running')
   })
 })
