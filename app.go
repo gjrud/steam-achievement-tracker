@@ -119,6 +119,8 @@ func (a *App) ServiceStartup(_ context.Context, _ application.ServiceOptions) er
 	err := a.ensureInitialized()
 	// The update service's Init failure is logged here, whether or not the app's own init succeeded.
 	a.logUpdateInitFailure()
+	// Post-update cleanup runs before the init-error return, so a database failure does not skip it.
+	a.startUpdateHousekeeping()
 	if err != nil {
 		// The raw init error is logged here, once at startup. The UI gets only the sentence in InitError. The update
 		// check is not started either: the toggle was never loaded, so StartupCheck would skip anyway.

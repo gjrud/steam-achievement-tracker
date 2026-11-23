@@ -268,13 +268,12 @@ gh attestation verify <file> --repo gjrud/steam-achievement-tracker
 
 - Only stable releases are offered. Pre-releases (tags with a `-` suffix) are never offered.
 - If the new version cannot start, the app restores the previous version. If it starts and then crashes, there is no rollback: it stays installed. Reinstall the same or a newer version from the release page. Do not reinstall an older version: an older build refuses a database that a newer build has upgraded.
-- On Windows, **Apps & Features** keeps showing the version the installer recorded, even after in-app updates.
 - The portable exe keeps the file name it was downloaded with, which includes the old version number. The AppImage name has no version. A file you renamed keeps your name.
 - A Windows install in a folder you cannot write to (for example a machine-wide install) fails at download with a message and the release link. The app keeps working.
 - An update can leave these files:
-  - `<app file>.bak`, a copy of the previous version, next to the AppImage on Linux or the exe on Windows (the Windows uninstaller removes it), and `<exe>.old.<number>` next to the exe on Windows. A later update removes the Windows `.old` files when Windows allows it.
-  - A folder named `wails-update-<random>` next to the app, after a failed update or a crash. An update that was downloaded but not applied is removed when you close the app.
-  - A log file named `wails-update-<pid>.log` in your system's temporary folder. It contains full file paths, usually including your user name. The app never removes it. Delete it when you no longer need it.
+  - `<app file>.bak`, a copy of the previous version, next to the AppImage on Linux or the exe on Windows, and `<exe>.old.<number>` next to the exe on Windows. When the app starts again, it removes the `.old` files, and the `.bak` file once it is more than 10 minutes old. The Windows uninstaller removes them too.
+  - A folder named `wails-update-<random>` next to the app, after a failed update or a crash. An update that was downloaded but not applied is removed when you close the app. When the app starts again, it removes such a folder if it holds only plain files and has not changed for 10 minutes, and no update is in progress.
+  - A log file named `wails-update-<pid>.log` in your system's temporary folder. It contains full file paths, usually including your user name. The app removes it the next time it starts, once the file is more than 10 minutes old. So a log from a failed update stays if you restart the app within 10 minutes.
 - Versions released before this feature need one manual update: download the new release from the release page and install it.
 - Builds made from source without a version tag (development, Docker and untagged local builds) have no update checks and no update controls.
 - Unauthenticated GitHub requests are limited to 60 per hour per IP address. If a check fails, try again later.

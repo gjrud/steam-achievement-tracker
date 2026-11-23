@@ -100,16 +100,20 @@ Deleting the cache folder is safe. The next sync downloads the covers again. The
 
 ### Updater leftovers
 
-The in-app updater (see [updater.md](updater.md)) writes outside the three app roots. The framework creates these, and the app never removes them except as noted:
+The in-app updater (see [updater.md](updater.md)) writes outside the three app roots. The framework creates these. The app removes them at its next start, about five seconds after startup (`sweepLeftovers` in `internal/update/postupdate.go`). That start can be the new version or, after a rollback, the old one. The sweep does nothing on a Linux package install. It removes a staging folder only when it is flat and idle for 10 minutes, so a concurrent instance's in-flight files stay. It removes the folder's files one by one, then the empty folder, and never a whole tree. A file or folder that fails its check is skipped silently:
 
 | Path | Created by | Left behind when | Removed by |
 | --- | --- | --- | --- |
-| `<target>.bak`, where `<target>` is the AppImage on Linux or the exe on Windows | The swap helper, as a backup of the installed file | A swap or launch fails. A successful swap deletes it. | Nothing. Delete by hand. |
-| `<exe>.old.<UnixNano>` (Windows, next to the exe) | The swap helper, which renames the old exe aside | Every successful Windows update, while the old file is still in use. | The next update's helper, when the file is free. The NSIS uninstaller deletes `<exe>.old.*` (see below). |
-| `wails-update-*` directory next to the target | `Updater.DownloadAndInstall`, which stages the payload | The update was downloaded and not applied, the helper failed, or the app crashed during an update. | The app, at shutdown while the phase is `ready` (`Service.Shutdown`, through `fsretry`). The helper removes it after a successful swap. |
-| `wails-update-<pid>.log` in the OS temp directory (`os.TempDir()`) | The swap helper, for each update it runs | Always. The log has full paths, usually including the OS user name. | Nothing. Delete by hand. |
+| `<target>.bak`, where `<target>` is the AppImage on Linux or the exe on Windows | The swap helper, as a backup of the installed file | A swap or launch fails. A successful swap deletes it. | The swap helper after a successful swap. Otherwise the app, at its next start, when it is a regular file or symlink (not a directory) idle for 10 minutes. |
+| `<exe>.old.<UnixNano>` (Windows, next to the exe) | The swap helper, which renames the old exe aside | Every successful Windows update, while the old file is still in use. | The next update's helper, or the app at its next start, when the file is free (no age limit). The NSIS uninstaller deletes `<exe>.old.*` (see below). The name matches in any letter case on Windows. |
+| `wails-update-*` directory next to the target | `Updater.DownloadAndInstall`, which stages the payload | The update was downloaded and not applied, the helper failed, or the app crashed during an update. | The app, at shutdown while the phase is `ready` (`Service.Shutdown`, through `fsretry`), or at its next start when it holds only regular files, is idle for 10 minutes, and no update is in flight or staged. The helper removes it after a successful swap. |
+| `wails-update-<pid>.log` in the OS temp directory (`os.TempDir()`) | The swap helper, for each update it runs | Always. The log has full paths, usually including the OS user name. | The app, at its next start once the log was last written more than 10 minutes earlier (not while it is restarting an update). Only regular files that match the name exactly are removed. A file another user owns is left alone. |
 
 The NSIS uninstaller (`build/windows/nsis/project.nsi`) deletes `$INSTDIR\<exe>.old.*` and `$INSTDIR\<exe>.bak` before its non-recursive `RMDir "$INSTDIR"`. It never uses `RMDir /r`, so an unrelated file or a leftover `wails-update-*` folder in the install folder keeps the folder, and the install folder stays behind.
+
+### Windows registry (installed copy)
+
+The per-user installer writes an Apps & Features entry under `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\gjrudSteam Achievement Tracker` (64-bit view). The app writes one value there: `DisplayVersion`, as the numeric core of the running version. It checks the stored value at each start and writes only when it differs from the running version, and only when `DisplayIcon` is the running exe. The installer removes the whole key on uninstall. The key name must match `UNINST_KEY_NAME` in `build/windows/nsis/wails_tools.nsh`. The app writes no other registry value.
 
 ## internal/keyring
 
@@ -198,7 +202,7 @@ Wrappers around `os.Rename`, `os.Remove` and `os.RemoveAll`. On Windows, they re
 - `RemoveAll` is safe to retry: `os.RemoveAll` returns nil for missing paths.
 - `policy` is a value (attempts, delay, sleep, transient) so tests inject a fake sleep and a fake classifier.
 
-Call sites: `internal/images` (cover temp-file rename and removal), `internal/db` (`writeBackupFile` removes a partial backup copy after close), and `app.go` (`removeCachedGameImages` on clear-data).
+Call sites: `internal/images` (cover temp-file rename and removal), `internal/db` (`writeBackupFile` removes a partial backup copy after close), `app.go` (`removeCachedGameImages` on clear-data), and `internal/update` (the updater's staged folder, leftover files and the startup sweep).
 
 Gotchas:
 

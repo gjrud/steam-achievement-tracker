@@ -82,6 +82,7 @@ These hooks are not bound. The binding generator excludes `ServiceStartup` and `
 ### ServiceStartup(ctx, options) error
 
 - Calls `ensureInitialized`. On failure it logs `startup init: ...` (the raw cause, reduced by `redact.Paths` and scrubbed by `steam.RedactSecrets`, through `logText`) and returns `nil`. The app starts with `AppState.InitError` set.
+- Calls `startUpdateHousekeeping` (the update service's `RunPostUpdate`: the installed version sync and the leftover sweep) right after `logUpdateInitFailure`, before the init-error return. It runs even when init failed, and does nothing when the updater is unavailable.
 - On success, starts the update service's startup check (`startUpdateCheck`), which does nothing when the update checks setting is off or the updater is unavailable. It does not run when init failed.
 - On success, reads the state. If `apiKeyPresent` and `profileExists` are both true, it calls `startSync(false)`. A sync that is already running is not restarted.
 - The Wails context argument is ignored. The `App` uses its own lifetime context.

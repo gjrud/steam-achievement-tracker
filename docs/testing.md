@@ -132,6 +132,8 @@ Retry tests call `client.SetRetryBackoff(func(int) time.Duration { return 0 })` 
 | `service_test.go` | The service with a fake environment (`fakeEnv`): unavailable without a stamp (and no log), refusals that never reach the framework, pre-release screening (`TestScreenRelease`), the startup toggle read once, unreadable settings, init-failure logging, cancel and shutdown, and concurrent state, cancel, event and refusal calls. |
 | `errors_test.go` | `categorize` precedence and that every failure sentence is cause-less. |
 | `staging_test.go` | `stagingDirFor`: only `wails-update-*` directories are eligible for removal. |
+| `postupdate_test.go` | The startup sweep (`sweepLeftovers`) against `t.TempDir()`: exact names, Windows-only `.old` files, the staging-folder shape and 10-minute age gate (`TestSweepStagingDirShape`), `.bak` rules, a late-added staging entry kept (`TestSweepStagingLateEntryKept`), temp log pattern, the 10-minute age gate on temp logs and restart skip, vanished and foreign temp logs (`removeFile` hook), in-flight staging skip, quiet logging, `RunPostUpdate` no-op when unavailable and one sweep when available. Tests age mtimes with `os.Chtimes` and wait on `Service.postDone`, never sleep; `displayVersion`, `sameFile`, `shouldWriteDisplayVersion`. |
+| `postupdate_windows_test.go` | `syncDisplayVersion` against a throwaway HKCU key (`Software\sat-test-<pid>`) that the test creates and deletes. Windows only; compiled with `GOOS=windows go test -c`. |
 
 `internal/version/version_test.go` covers `ParseStamp`, `Valid` and `IsPrerelease`, and that an unstamped test binary has no version.
 

@@ -49,10 +49,12 @@ type hostEnv struct {
 	getenv     func(string) string
 	executable func() (string, error)
 	stat       func(string) (fs.FileInfo, error)
+	// tempDir is the OS temp directory the leftover sweep reads. It must be set.
+	tempDir func() string
 }
 
 func realEnv() hostEnv {
-	return hostEnv{goos: runtime.GOOS, getenv: os.Getenv, executable: os.Executable, stat: os.Stat}
+	return hostEnv{goos: runtime.GOOS, getenv: os.Getenv, executable: os.Executable, stat: os.Stat, tempDir: os.TempDir}
 }
 
 // appImageTarget reproduces the framework's Linux target rule (pkg/updater spawn.go, appImageOr). It returns $APPIMAGE
