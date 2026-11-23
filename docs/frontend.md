@@ -1,6 +1,6 @@
 # Frontend
 
-The frontend is a Svelte 5 single-page app in `frontend/`, built with Vite 8. It runs inside the Wails webview and communicates with the Go backend only through generated bindings and the `sync:changed` event. Backend contracts are described in [app-service.md](app-service.md) and [architecture.md](architecture.md).
+The frontend is a Svelte 5 single-page app in `frontend/`, built with Vite 8. It runs inside the Wails webview and communicates with the Go backend only through generated bindings, the `sync:changed` and `update:changed` events, and `@wailsio/runtime` window and browser calls. Backend contracts are described in [app-service.md](app-service.md) and [architecture.md](architecture.md).
 
 ## Directory map
 
@@ -14,7 +14,7 @@ frontend/
     main.js                  imports style.css and app.css, mounts App.svelte
     App.svelte               root component: state, backend calls, routing between screens, title bar and custom scrollbar
     style.css                base element styles (html, body, #app sizing, form controls, selection)
-    app.css                  application styles (~1900 lines); imported globally, not scoped
+    app.css                  application styles; imported globally, not scoped
     vite-env.d.ts            Vite and Svelte type references
     lib/
       format.js  game.js  filter.js  tag.js  sync.js  disabled.js  update.js    pure helpers and the update store
@@ -30,7 +30,7 @@ frontend/
 import {...} from '../bindings/github.com/gjrud/steam-achievement-tracker/app.js'
 ```
 
-Child components receive data and callbacks through props. `@wailsio/runtime` is imported directly in `App.svelte` (`Events`), in `lib/update.js` (`Events`), and in `ApiKeyForm.svelte` and `UpdateBanner.svelte` (`Browser`).
+Child components receive data and callbacks through props. `@wailsio/runtime` is imported directly in `App.svelte` (`Events`), `lib/update.js` (`Events`), `lib/format.js` (`Call`), `TitleBar.svelte` (`Events`, `Window`), `ApiKeyForm.svelte` and `UpdateBanner.svelte` (`Browser`).
 
 ## Screens and routing
 
@@ -56,7 +56,7 @@ The update banner belongs to the dashboard only, and the Updates section belongs
 
 - `state` holds the `GetAppState` result. Fields used: `apiKeyPresent`, `apiKeyError`, `profileExists`, `profile`, `dashboard`, `settings`, `syncInProgress`, `initError`, `logFile`, `dataDir`, `cacheDir`, `logDir`.
 - `dashboard` holds `summary`, `suggestions`, `completed`, `warnings`, `disabled`, `latestSyncRun`.
-- `$:` derives `dashboard`, `latestSyncRun`, `syncIsRunning`, `summary`, `completed`/`disabled` (sorted by title with `sortByTitle`; `suggestions` keeps the backend order), `warningGames` (`syncWarning` set), tag filter counts and visible chips, `filtered*` lists, `viewFiltered`, and `clearConfirmText` (the SteamID64, or the display name when there is no SteamID).
+- `$:` derives `dashboard`, `latestSyncRun`, `syncIsRunning`, `summary`, `completed`/`disabled` (sorted by title with `sortByTitle`; `suggestions` keeps the backend order), `warningGames` (`syncWarning` set), tag filter counts and visible chips, `filtered*` lists, `viewFiltered`, and `clearConfirmText` (the SteamID64, or the display name when there is no SteamID). Tag chips exist only on Not completed and Completed; Sync errors and Disabled filter by search only, and the toolbar is hidden on Settings.
 
 ### Sync refresh (coalescing and events)
 
@@ -77,7 +77,7 @@ Each backend action uses `beginAction()` / `endAction()`:
 
 Actions: `retryKey` (`RetryAPIKey`), `validateProfile` (`ValidateProfile`, no begin/end: it only sets `validating` and `preview`), `saveProfile` (`SaveProfile`), `syncNow` (`SyncNow`), `saveLibrarySettings` (`SetLibrarySettings`), `confirmClearActiveUserData` (`ClearActiveUserData`), and `runGameAction` (`MarkGamePreviouslyCompleted`, `ToggleGameMissingAchievementsInDLC`, `DisableGame`, `EnableGame`).
 
-`saveApiKey` is the exception: it calls `SaveAPIKey` without `beginAction`, so the form, not the app banner, shows failures. On success it clears `preview`, drops the error banner, and calls `requestRefresh`. It throws on failure so the form can display the error.
+`saveApiKey` is the exception: it calls `SaveAPIKey` without `beginAction`, so the form, not the app banner, shows failures. On success it clears `preview`, drops the error banner, and calls `requestRefresh`. It throws on failure so the form can display the error. While `savingKey` is set, `validateProfile` and `saveProfile` do nothing, the setup buttons are disabled, and a second `saveApiKey` throws `A save is already in progress`.
 
 On a failed clear-data call the app re-reads state, because the backend may already have deleted the key before the failing step.
 
@@ -90,13 +90,13 @@ On a failed clear-data call the app re-reads state, because the backend may alre
 ### Other interaction
 
 - Global keydown (`handleGlobalKeydown`): Escape closes the context menu and the clear-data modal. In the list views (`suggestions`, `completed`, `warnings`, `disabled`), a printable key pressed outside a field or an interactive element focuses the view search box and appends the key.
-- Context menu (`openGameMenu`): positioned at the pointer, then clamped to the viewport by `positionGameMenu` (12 px margin). The menu is `visibility: hidden` until positioned. The top clamp starts below the title bar (`--title-bar-height` plus 12 px), so the menu never sits under the bar. The bottom clamp uses `window.innerHeight`, which is the bottom of the document's visible area. A mousedown on the title bar closes the menu, because a bar drag fires no `click` for the window-level handler to see.
-- Clear-data confirmation: `confirmClearActiveUserData` runs only when the typed text equals `clearConfirmText`. Switch values are passed as `ClearActiveUserData(deleteProfileData, deleteAPIKey)`.
-- Tab change (`changeView`, from a tab or the gear) resets the tag filter only when the view actually changes (a click on the active tab keeps it), and leaves focus alone: the bar cancels the mousedown focus change, so a tab click does not move focus onto the tab (see [Title bar and scroll layout](#title-bar-and-scroll-layout)).
+- Context menu (`openGameMenu`): opened by right-click on a card or sync-error row (not on disabled rows, which have a Re-enable button). Positioned at the pointer, then clamped to the viewport by `positionGameMenu` (12 px margin). The menu is `visibility: hidden` until positioned. The top clamp starts below the title bar, and the bottom clamp uses `window.innerHeight`. A mousedown on the title bar closes it (see [Title bar and scroll layout](#title-bar-and-scroll-layout)). Items: in Not completed only, Mark as previously completed (or Clear previously completed flag) and Flag missing achievements in DLC (or Clear DLC-missing flag); in every view with a menu, Disable game or Disable set, or Re-enable game or Re-enable set on a disabled game.
+- Clear-data confirmation: `confirmClearActiveUserData` runs only when the typed text equals `clearConfirmText`. Switch values are passed as `ClearActiveUserData(deleteProfileData, deleteAPIKey)`. On success the view returns to Not completed, and the tag filter, profile input and preview are cleared. On failure the dialog closes so the error banner shows, and the state is re-read.
+- Tab change (`changeView`, from a tab or the gear) does nothing when the view is already active. Otherwise it scrolls to the top and clears the tag filter. Focus behaviour is in [Title bar and scroll layout](#title-bar-and-scroll-layout).
 
 ## lib/ modules
 
-These modules contain pure functions and import only from one another, except `update.js`, which also imports `Events` from `@wailsio/runtime` to hear `update:changed`. Their exports are listed below.
+These modules import only from one another, except `format.js` (`Call` from `@wailsio/runtime`, for `Call.RuntimeError`) and `update.js` (`Events`, to hear `update:changed`). Their exports are listed below.
 
 | Module | Exports | Purpose |
 | --- | --- | --- |
@@ -112,7 +112,7 @@ These modules contain pure functions and import only from one another, except `u
 
 ### Sync band wording
 
-`syncBand` (`lib/sync.js`) builds the profile card's band from the latest run. The table lists the strings produced by the code:
+`syncBand` (`lib/sync.js`) builds the profile card's band from the latest run. The table lists the strings produced by the code. In every finished state the counts are omitted when the run's total is 0 (`countsOf`), leaving the headline and time:
 
 | Run state | Icon | Headline | Second line |
 | --- | --- | --- | --- |
@@ -125,8 +125,6 @@ These modules contain pure functions and import only from one another, except `u
 | `failed` | warn | `Sync failed · 1 error` or `Sync failed · N errors`, or `Sync failed` when N is 0 | `X / Y games synced` |
 | `canceled` | stop | `Sync canceled` | `X / Y games synced` |
 | Any other status | stop | The status text, or `Unknown` | `X / Y games synced` |
-
-`countsOf` (`lib/sync.js`) returns an empty string whenever the run's total is 0. This applies to every finished state, not only `success`. The counts part of the second line is then omitted, and the band shows the headline and time only.
 
 Time: a finished run is dated by `finishedAt` (or `startedAt` when that is missing); a running run by `startedAt`. An unparseable or missing time gives no time text. `formatRelativeTime` (`lib/format.js`) reads `just now` under a minute, `N min ago` under an hour, `1 hour ago` or `N hours ago` under a day, and `1 day ago` or `N days ago` under seven days. From seven days on it shows the absolute date and time from `formatDateTime`. `ProfileCard.svelte` also sets that absolute time as the hover title and re-evaluates the relative text every 30 s. Its live region changes only on a state transition, never with counts or time.
 
@@ -164,11 +162,11 @@ Time: a finished run is dated by `finishedAt` (or `startedAt` when that is missi
 | `ApiKeyForm.svelte` | Password field for the Steam Web API key. The value is kept only in a local variable and cleared on submit. Props: `saving`, `disabled`, `autofocus`, `showLabel`, `onSave`. The key-page link opens the system browser through `Browser.OpenURL`. A failed save shows an alert and refocuses the field. |
 | `TitleBar.svelte` | The app-drawn title bar: icon, the dashboard tabs (Not completed, Completed, Sync errors, Disabled) and the Settings gear on the dashboard, and the minimize, maximize/restore and close buttons on every screen. Runes syntax. See [Title bar and scroll layout](#title-bar-and-scroll-layout). |
 | `ScrollBar.svelte` | The custom document scrollbar, mounted once in `App.svelte` on every screen. Runes syntax. See [Title bar and scroll layout](#title-bar-and-scroll-layout). |
-| `DashboardShell.svelte` | Layout of the dashboard: header (brand, `SummaryStats`, `ProfileCard`), update banner, error banner, search and tag-filter toolbar, and the active view. It has no tab row; the tabs and the gear are in `TitleBar.svelte`. |
+| `DashboardShell.svelte` | Layout of the dashboard: header (brand, `SummaryStats`, `ProfileCard`), update banner, error banner, search and tag-filter toolbar, and the active view. The tabs and the gear are in `TitleBar.svelte`. |
 | `UpdateBanner.svelte` | The in-app update banner: available, a checking hold, progress with Cancel, ready with Restart now, restarting, and errors. See [Update banner and settings](#update-banner-and-settings). |
 | `UpdateSettings.svelte` | The Updates section of Settings: current version, the startup-check switch, Check now and the status line. Hidden when the updater is unavailable or before the first read. |
-| `SummaryStats.svelte` | Library, Completed and Unlocked counters. A completed counter shows the vetted count with the total in parentheses (`12 (15)`) only when some counted entries are unvetted. The hover title and screen-reader text say "vetted of total". |
-| `ProfileCard.svelte` | Avatar, name, Sync now button (disabled while syncing), and the sync band from `syncBand`. Re-evaluates the relative time every 30 s. Its live region only changes on state transitions. |
+| `SummaryStats.svelte` | Library, Completed and Unlocked counters (see [Dashboard counters](#dashboard-counters)). |
+| `ProfileCard.svelte` | Avatar, name, Sync now button (disabled and labelled `Syncing…` while `state.syncInProgress`), and the sync band from `syncBand` (see [Sync band wording](#sync-band-wording)). |
 | `GameCard.svelte` | One game or set card: cover (`coverUrl`, landscape for header or main kinds), title, tags, progress bar, completion label, playtime. Right-click calls `onContextMenu`. |
 | `IncrementalGrid.svelte` | Renders a list of cards in batches (see below). Uses a slot for each item. |
 | `SyncErrorsView.svelte` | Games with a current sync warning, with last good data time, error text, and a Disable button. |
@@ -207,15 +205,13 @@ Behavior:
 
 ## Title bar and scroll layout
 
-The window's top edge is an app-drawn bar (`TitleBar.svelte`, height `--title-bar-height` = 42 px, defined in `style.css`). The same bar shows on every screen. Issue #31 covers the design; this section describes what the code does. The window is frameless (see [app-service.md](app-service.md)), so this bar replaces the native title bar.
+The window's top edge is an app-drawn bar (`TitleBar.svelte`, height `--title-bar-height` = 42 px, defined in `style.css`). The same bar shows on every screen. The window is frameless (see [app-service.md](app-service.md)), so this bar replaces the native title bar.
 
-**Structure.** The document scrolls (`html` is the scroller, no inner scroll container). The bar is `position: fixed` (top, left and right 0, `z-index` 1100), so scrolling never moves it, and `#app` has `padding-top: var(--title-bar-height)` so the content starts below it. `html` has `scroll-padding-top: calc(var(--title-bar-height) + var(--title-fade-height))`, so keyboard focus, find-in-page and `scrollIntoView` stop short of the bar and the fade under it. The loading, setup and startup-error screens use `min-height: calc(100vh - var(--title-bar-height))`, so together with the padding they fill exactly one window. The native document scrollbar is hidden (`html::-webkit-scrollbar { width: 0; height: 0 }` in `style.css`), so the content keeps the full window width, and `ScrollBar.svelte` draws the bar instead, starting at the top of the content (`--content-top-gap` below the bar).
-
-**Decision D5, changed.** Issue #31 (D5) first chose an inner scroll container below the bar, with the scroll root passed to `IncrementalGrid`. The owner reversed it: dragging the thumb of an inner `overflow: auto` box was slow and choppy in WebKitGTK after a tab switch, while document scrolling (wheel and thumb) stayed smooth. So the page scrolls as a document with a fixed bar, and the full-height native scrollbar (which would run beside the title bar) is replaced by the custom one. `IncrementalGrid` and the focus handling are unchanged; there is no scroll-root prop (the observer root is the viewport).
+**Structure.** The document scrolls (`html` is the scroller). An inner scroll container is not used: dragging an inner `overflow: auto` box's thumb is choppy in WebKitGTK. The bar is `position: fixed` (top, left and right 0, `z-index` 1100), so scrolling never moves it, and `#app` has `padding-top: var(--title-bar-height)` so the content starts below it. `html` has `scroll-padding-top: calc(var(--title-bar-height) + var(--title-fade-height))`, so keyboard focus, find-in-page and `scrollIntoView` stop short of the bar and the fade under it. The loading, setup and startup-error screens use `min-height: calc(100vh - var(--title-bar-height))`, so together with the padding they fill exactly one window. The native document scrollbar is hidden (`html::-webkit-scrollbar { width: 0; height: 0 }` in `style.css`), so the content keeps the full window width, and `ScrollBar.svelte` draws the bar instead, starting at the top of the content (`--content-top-gap` below the bar).
 
 **Content.**
 
-- Icon: the title bar icon, `frontend/src/assets/appicon.svg`, imported by `TitleBar.svelte` and drawn as tall as the bar (`--title-bar-height`, 42 px). It started as a copy of `build/appicon.svg` and now differs from it: the background tile was removed, so the trophy ring sits straight on the bar. The ring and trophy fill about 69% of the viewBox, so the ring is about 29 px across its outer edge, centred on the bar's middle line. It is not made taller than the bar: the span's auto grid row would grow to the image and be aligned to the top of the span, so it would sit off the centre line. Its top-left arc reaches about 3.6 px into Wails' 15x15 top-left resize corner zone, so a press there starts a resize, not a drag. It is decorative (`alt=""`, `aria-hidden`, `draggable="false"`) and has `pointer-events: none`, so a press on it targets the icon span, which is the drag handle. It is now the title bar's own artwork, so do not copy `build/appicon.svg` over it when the app icon changes; edit this file by hand if the two should match again.
+- Icon: the title bar icon, `frontend/src/assets/appicon.svg`, imported by `TitleBar.svelte` and drawn as tall as the bar (`--title-bar-height`, 42 px). It is the title bar's own artwork (no background tile), not a copy of `build/appicon.svg`. The ring and trophy fill about 69% of the viewBox, so the ring is about 29 px across its outer edge, centred on the bar's middle line. It is not made taller than the bar: the span's auto grid row would grow to the image and be aligned to the top of the span, so it would sit off the centre line. Its top-left arc reaches about 3.6 px into Wails' 15x15 top-left resize corner zone, so a press there starts a resize, not a drag. It is decorative (`alt=""`, `aria-hidden`, `draggable="false"`) and has `pointer-events: none`, so a press on it targets the icon span, which is the drag handle. Do not overwrite it when the app icon changes.
 - Tabs (dashboard only): `<nav aria-label="Dashboard views">` with four buttons: Not completed, Completed, Sync errors, Disabled. The active one has `aria-current="page"`. The nav is not an ARIA tablist. The view ids are the ones the code already used (`suggestions`, `completed`, `warnings`, `disabled`).
 - Settings gear (dashboard only): `aria-label="Settings"`, with `aria-current="page"` while Settings is open. Settings is reached only through the gear; there is no Settings tab.
 - Window controls, on every screen: Minimize (`aria-label="Minimize"`), Maximize or Restore (`aria-label` follows the state), Close (`aria-label="Close"`). They are real `<button type="button">` elements with `tabindex="-1"`: keyboard users use the OS window shortcuts, but the names are still exposed. Each has a `title` tooltip with the same text as its label (the Maximize or Restore tooltip follows the state), like the gear's.
@@ -223,7 +219,7 @@ The window's top edge is an app-drawn bar (`TitleBar.svelte`, height `--title-ba
 
 **Window calls and maximise state.** The controls call `Window.Minimise()`, `Window.ToggleMaximise()` and `Window.Close()` from `@wailsio/runtime`. Maximise state comes from `Window.IsMaximised()`, read once at mount. It is read again, 120 ms after the last event, on each of `common:WindowMaximise`, `common:WindowUnMaximise` and `common:WindowRestore` (`Events.Types.Common`). Windows sends `WindowRestore` during a live resize and on keyboard snap, so all three are needed. The listeners are removed on unmount. The state only drives the label and the glyph.
 
-**Drag.** The bar has `--wails-draggable: drag`. Every bar button has `--wails-draggable: no-drag`. The value is a custom property, so it is inherited: the icon span, the gaps between tabs and the empty fill drag, and the buttons do not. `user-select: none` is set on the bar. The runtime reads the computed value (`node_modules/@wailsio/runtime/dist/drag.js`). jsdom does not load CSS, so drag is a manual check ([testing.md](testing.md#title-bar-manual-checks)). Double-click on the empty bar does nothing (E7, option b): Wails' double-click handler is macOS-only.
+**Drag.** The bar has `--wails-draggable: drag`. Every bar button has `--wails-draggable: no-drag`. The value is a custom property, so it is inherited: the icon span, the gaps between tabs and the empty fill drag, and the buttons do not. `user-select: none` is set on the bar. The runtime reads the computed value (`node_modules/@wailsio/runtime/dist/drag.js`). jsdom does not load CSS, so drag is a manual check ([testing.md](testing.md#title-bar-manual-checks)). Double-click on the empty bar does nothing: Wails' double-click handler is macOS-only.
 
 **Scroll fade.** `.title-bar::before` is a strip `--title-fade-height` (20 px, in `style.css`) tall, just under the bar (`top: 100%`): the page colour fading to clear, so cards scrolling up under the bar fade out instead of stopping at a hard edge. It is almost clear by 14 px (about 10 % opacity), the gap under the bar at the top of the dashboard, so the heading at rest is barely dimmed. It has `pointer-events: none` and lies outside the bar's box, so drag and clicks underneath are unaffected. It stops 20 px short of the right edge (`--resize-inset-right` plus the scrollbar's 14 px width), so the custom scrollbar's thumb is not faded; no content sits in that strip at the supported widths (the dashboard has a 28 px right margin above 720 px, and the window's minimum width is 900 px). It is part of the bar, so it draws above the context menu (z-index 1100 against 1000) and fades the top of a menu that sits within 20 px of the bar; the menu clamps at the bar height plus a 12 px margin, so a menu whose top is within 8 px of the clamp has its top edge faintly dimmed (at most about 25 %).
 
@@ -233,15 +229,15 @@ The window's top edge is an app-drawn bar (`TitleBar.svelte`, height `--title-ba
 
 **Press and focus.**
 
-- A mousedown on the bar calls `preventDefault`, so focus stays in a search box or modal input (E14, option a). The Wails drag handler listens in the capture phase, so it still starts the drag. Clicks on buttons still fire.
+- A mousedown on the bar calls `preventDefault`, so focus stays in a search box or modal input. The Wails drag handler listens in the capture phase, so it still starts the drag. Clicks on buttons still fire.
 - The same mousedown closes the game context menu (`closeGameMenu`), because a bar drag fires no `click` for the window-level handler to see.
 - A tab or gear click does not move focus onto the button (the bar cancels the mousedown focus change, above), so focus stays on the body or wherever it was. PgUp, PgDn, Home, End, Space and the arrow keys scroll the document natively from there, and a printable key starts the search as it does from the body. A tab reached by keyboard keeps its focus after Enter.
 
-**Modal.** While `ClearDataConfirmModal` is open, the tabs and the gear are `disabled` (`disabled` is used, not `inert`, because jsdom does not apply `inert`). The window controls stay live, so the window can still be moved, minimised or closed. The modal backdrop is `inset: var(--title-bar-height) 0 0 0`, so it starts below the bar (D14). The backdrop's one grid row is `minmax(0, 1fr)`, so the grid area has a definite height (the backdrop's content box: the window height less the bar and 40 px of padding). The dialog's `max-height: 100%` caps it at that height, which replaces `calc(100vh - 40px)`. The dialog scrolls inside itself when it is taller.
+**Modal.** While `ClearDataConfirmModal` is open, the tabs and the gear are `disabled` (`disabled` is used, not `inert`, because jsdom does not apply `inert`). The window controls stay live, so the window can still be moved, minimised or closed. The modal backdrop is `inset: var(--title-bar-height) 0 0 0`, so it starts below the bar. The backdrop's one grid row is `minmax(0, 1fr)`, so the grid area has a definite height (the backdrop's content box: the window height less the bar and 40 px of padding). The dialog's `max-height: 100%` caps it at that height, which replaces `calc(100vh - 40px)`. The dialog scrolls inside itself when it is taller.
 
-**Resize zones (E8).** Wails' resize zones are 5 px along each edge and 15 px at each corner (5 px plus `cornerExtra` 10 px), measured from the window edge (`node_modules/@wailsio/runtime/dist/drag.js`). Tuning is left at the Wails defaults (E8, option a); no `Options.Flags` changes. A plain click on the close button fires. About a fifth of the close button is inside the right zone (unmeasured).
+**Resize zones.** Wails' resize zones are 5 px along each edge and 15 px at each corner (5 px plus `cornerExtra` 10 px), measured from the window edge (`node_modules/@wailsio/runtime/dist/drag.js`). Tuning is left at the Wails defaults; no `Options.Flags` changes. Part of the close button lies in the right resize zone; a plain click still fires.
 
-**Custom scrollbar (E9, `ScrollBar.svelte`).** The native scrollbar is hidden, so Wails' document-scrollbar mitigation (`node_modules/@wailsio/runtime/dist/drag.js` measures `innerWidth - clientWidth`) sees 0 and does nothing; the custom bar has to stay out of the zones itself. It is `position: fixed` with `top: calc(var(--title-bar-height) + var(--content-top-gap))`, `right: var(--resize-inset-right)` (6 px) and `bottom: var(--resize-inset-bottom)` (15 px), both variables in `style.css`. A corner zone is a 15x15 px square that needs both: within 15 px of the right edge and within 15 px of the top or bottom edge. The 6 px right inset clears the 5 px right strip, but the bar is inside the 15 px right column, so the track must stay out of the corner squares: the 15 px bottom inset puts its end exactly above the bottom-right square. At the top the bar starts at y = 56 (the title bar's 42 px plus `--content-top-gap`, 14 px, so it lines up with the top of the dashboard content), so the window's 5 px top strip does not reach it, and the top-right square lies under the title bar's close button. `--wails-draggable: no-drag` is set on it, and a press on it calls `preventDefault` on `pointerdown` (which also cancels the compatibility `mousedown`). The geometry, not that, is what keeps it out of the zones. If Wails' zone sizes change, update the two variables (see [upgrading Wails](build-and-release.md#upgrading-wails)).
+**Custom scrollbar (`ScrollBar.svelte`).** The native scrollbar is hidden, so Wails' document-scrollbar mitigation (`node_modules/@wailsio/runtime/dist/drag.js` measures `innerWidth - clientWidth`) sees 0 and does nothing; the custom bar has to stay out of the zones itself. It is `position: fixed` with `top: calc(var(--title-bar-height) + var(--content-top-gap))`, `right: var(--resize-inset-right)` (6 px) and `bottom: var(--resize-inset-bottom)` (15 px), both variables in `style.css`. A corner zone is a 15x15 px square that needs both: within 15 px of the right edge and within 15 px of the top or bottom edge. The 6 px right inset clears the 5 px right strip, but the bar is inside the 15 px right column, so the track must stay out of the corner squares: the 15 px bottom inset puts its end exactly above the bottom-right square. At the top the bar starts at y = 56 (the title bar's 42 px plus `--content-top-gap`, 14 px, so it lines up with the top of the dashboard content), so the window's 5 px top strip does not reach it, and the top-right square lies under the title bar's close button. `--wails-draggable: no-drag` is set on it, and a press on it calls `preventDefault` on `pointerdown` (which also cancels the compatibility `mousedown`). The geometry, not that, is what keeps it out of the zones. If Wails' zone sizes change, update the two variables (see [upgrading Wails](build-and-release.md#upgrading-wails)).
 
 It mirrors the page and does not replace native scrolling: wheel, keys, touch and find-in-page scroll the document, and a wheel over the bar reaches the document too (it is a fixed element). It is therefore `aria-hidden="true"` and not focusable.
 
@@ -255,19 +251,19 @@ It mirrors the page and does not replace native scrolling: wheel, keys, touch an
 
 Visual and drag checks on WebView2 and WebKitGTK are manual ([testing.md](testing.md#title-bar-manual-checks)); jsdom does not draw scrollbars.
 
-**Margins.** With the native bar hidden the content has the whole window width, as before the title bar work. `.app-shell` has `padding: var(--content-top-gap) 28px 28px` (`--content-top-gap` is 14 px, and 9 px under 720 px, where the side and bottom padding is 18 px), so the dashboard is 28 px from the left, right and bottom window edges and 14 px below the title bar (the sides set the card width; the top is only the gap under the bar). That keeps the cards at 218 px in a 1210 px window (five columns, 16 px gap), so a tag such as "New achievements added" stays on one line; a card needs about 217.5 px for that, so there is under 1 px of slack per side: widening the left or right margin by even 1 px would wrap it. The custom scrollbar is fixed and takes no layout space, so it never narrows the cards (it can overlap the 28 px right margin, which is empty). Measured on WebKitGTK at 1210 px: cards 218 px, the tag 24 px tall (one line), no horizontal overflow (also at 900 px).
+**Margins.** With the native bar hidden the content has the whole window width. `.app-shell` has `padding: var(--content-top-gap) 28px 28px` (`--content-top-gap` is 14 px, and 9 px under 720 px, where the side and bottom padding is 18 px), so the dashboard is 28 px from the left, right and bottom window edges and 14 px below the title bar (the sides set the card width; the top is only the gap under the bar). At a 1210 px window the content is 1154 px wide (1210 less 2 × 28). `.game-grid` (`app.css`) fits five columns there (minimum card 210 px, gap 16 px), so each card is (1154 − 4 × 16) / 5 = 218 px. A tag such as "New achievements added" stays on one line if the card is about 217.5 px or wider; the five cards plus gaps then need about 1151.5 px of content, so there is 2.5 px of slack: each side margin can grow by about 1.25 px (or one side by 2.5 px) before the tag wraps. The custom scrollbar is fixed and takes no layout space, so it never narrows the cards (it can overlap the 28 px right margin, which is empty).
 
-**Narrow width (E16, option a).** At 1040 px and below, tab padding and tracking shrink. A label that still does not fit is cut with an ellipsis. Icon, tabs, gear and controls never wrap (`.title-bar` is one non-wrapping flex row), and the controls keep their width. The free drag area at 900 px is estimated at about 230 px (not measured). There is no minimum (E16, option a).
+**Narrow width.** At 1040 px and below, tab padding and tracking shrink. A label that still does not fit is cut with an ellipsis. Icon, tabs, gear and controls never wrap (`.title-bar` is one non-wrapping flex row), and the controls keep their width.
 
-**Sizes and look.** Every item sits on one centre line, y = 21 px: the icon, the tab labels, the gear glyph and the three control glyphs (measured within 0.5 px on WebKitGTK; the folder tabs' text range is centred on 21). The bar has no CSS border. Its bottom line is a 1 px `::after` inside the 42 px, so the centre is a whole pixel and 1 px strokes stay sharp. The icon span and the three window controls run the full 42 px height (centred by the grid). Tabs and the gear are folder tabs from 6 px (below Wails' 5 px top resize strip) to the bar's bottom edge, 36 px tall: a 1 px top border plus 7 px bottom padding put their content box on 7 to 35, whose middle is 21. The active tab (and the active gear) is page-coloured with an accent cap, and covers the bar's bottom line so it opens into the page; the bar's buttons are `position: relative; z-index: 1` over that line. Tabs and gear share hover and active rules. Widths: the gear and the controls are all 46 px; the divider is 1 px by 20 px with 4 px each side; tabs are 2 px apart. Glyphs: the controls are 12 px with a 1.2 px stroke; the gear is drawn at 14 px with stroke-width 1.37 (1.2 px on screen), so its ink is about 12 px against the controls' 10 px squares. Type: the bar is 13 px, tabs inherit it (700 weight, 0.08em tracking, uppercase); at 1040 px and below they drop to 12 px. Tab labels stay uppercase: they fit at 900 px with the shrink rule above. The bar's z-index (1100) keeps it above the context menu (1000).
+**Sizes and look.** Every item sits on one centre line, y = 21 px: the icon, the tab labels, the gear glyph and the three control glyphs. The bar has no CSS border. Its bottom line is a 1 px `::after` inside the 42 px, so the centre is a whole pixel and 1 px strokes stay sharp. The icon span and the three window controls run the full 42 px height (centred by the grid). Tabs and the gear are folder tabs from 6 px (below Wails' 5 px top resize strip) to the bar's bottom edge, 36 px tall: a 1 px top border plus 7 px bottom padding put their content box on 7 to 35, whose middle is 21. The active tab (and the active gear) is page-coloured with an accent cap, and covers the bar's bottom line so it opens into the page; the bar's buttons are `position: relative; z-index: 1` over that line. Tabs and gear share hover and active rules. Widths: the gear and the controls are all 46 px; the divider is 1 px by 20 px with 4 px each side; tabs are 2 px apart. Glyphs: the controls are 12 px with a 1.2 px stroke; the gear is drawn at 14 px with stroke-width 1.37 (1.2 px on screen), so its ink is about 12 px against the controls' 10 px squares. Type: the bar is 13 px, tabs inherit it (700 weight, 0.08em tracking, uppercase); at 1040 px and below they drop to 12 px. Tab labels stay uppercase: they fit at 900 px with the shrink rule above. The bar's z-index (1100) keeps it above the context menu (1000).
 
-**Left to the PR (decisions).**
+**Design decisions.**
 
-- No blurred state for the bar (optional item; skipped).
+- The bar has no window-blurred style.
 - Viewport height: `window.innerHeight` stays for `viewportBatch` and `positionGameMenu` (the document scrolls, so it is the viewport height).
 - Scroll position across views: reset to the top when the view changes (`changeView` in `App.svelte`, a tab or the gear), so a new view never opens already scrolled. The scroll position within a view is not remembered when you come back to it.
 - Background colours: the page keeps `#0b141f` (`style.css`), and the window keeps `RGB(27, 38, 54)` (`window.go`). The bar uses the page colour so the active tab reads as part of the page.
-- Linux window border: none added; the window keeps what GTK and the compositor give a frameless window.
+- No native (GTK or compositor) border is added; the only edge is the app-drawn 1 px outline (`body::after`).
 
 **Window creation.** The window is frameless, so this bar is the only title bar and its controls are the window's only on-screen controls. Creation is in `window.go` and is described in [app-service.md](app-service.md). If the frontend fails to load, the window has no controls; only window-manager shortcuts remain (no native fallback). On Linux the window is still shown in that case, because it is shown on `WindowLoadFinished`.
 
@@ -275,11 +271,11 @@ Visual and drag checks on WebView2 and WebKitGTK are manual ([testing.md](testin
 
 - `style.css`: base rules (html and body colors, font stack, `box-sizing`, form controls inherit font, selection color). It is the first import. Its `:root` variables are `--title-bar-height` (42 px), `--title-fade-height` (20 px, the fade under the bar), `--content-top-gap` (14 px, 9 px under 720 px: the space under the bar above the content, also where the custom scrollbar starts), the custom scrollbar's resize insets `--resize-inset-right` (6 px) and `--resize-inset-bottom` (15 px), and `--window-line-color` (`#2d4560`, the window outline and the title bar's lines). It also hides the native document scrollbar, pads `#app` below the fixed bar, and draws the bottom fade (`body::before`) and the window outline (`body::after`, see [Title bar and scroll layout](#title-bar-and-scroll-layout)).
 - `app.css`: all component classes (`game-card`, `profile-card`, `title-bar`, `title-tab`, `banner`, `context-menu`, `confirm-modal`, `app-scrollbar`, etc.). The CSS is global, so class names must stay unique across components. `.sr-only` is defined here and used for screen-reader-only text.
-- Tone classes (`tone-success`, `tone-warn`, and so on) come from `toneClass`.
+- Tone classes (`tone-success`, `tone-warn`, and so on) come from `toneClass`. The profile card's `tone-ok`, `tone-run`, `tone-warn`, `tone-fail` and `tone-none` come from `syncBand().tone` (`app.css`).
 
 ## Error banners
 
-Four kinds of messages can reach the user:
+Five kinds of messages can reach the user:
 
 1. Startup error: `state.initError` on the startup-error screen.
 2. Keyring error: `state.apiKeyError` on the missing-key screen.
@@ -356,24 +352,12 @@ Rendered by `SettingsView`, below the library sync section. It is hidden when th
 - The live announcer is a persistent visually hidden `<p class="sr-only" role="status">` that repeats the status text only while the banner is hidden. While the banner shows, it is empty, so a phase is spoken once (by the banner), not twice. Its role is never toggled.
 - Errors: a rejected toggle shows `settingsError` (`role="alert"`) always. The update error (`updateError`) shows as `role="alert"` only while the banner is hidden. While the banner shows the same error, Settings does not repeat it.
 
-### Tests
-
-| File | Covers |
-| --- | --- |
-| `src/lib/update.test.js` | Store reads and the sequence guard, the subscription, `later`, `install` and `check` (including the last operation and retry rules), checks that hold the banner, cancel and restart, `setChecksEnabled`, and the pure helpers. |
-| `src/lib/components/UpdateBanner.test.js` | Banner per phase, buttons and the release link, progress, errors and retry, the checking hold, hidden states, focus and the live region. |
-| `src/lib/components/UpdateSettings.test.js` | Section visibility, the startup switch (save, snap-back, busy), Check now (lock, focus, `aria-disabled`), the status line and its one announcer, and the error split between Settings and the banner. |
-| `src/App.update.test.js` | The update flow from `App.svelte` through the mocked bindings: banner placement by screen, refresh on `update:changed`, an unavailable updater, Settings wiring, and listener removal on unmount. |
-| `src/test/update-fixtures.js` | `releaseURL`, `latestRelease`, `updateSnapshot`, `availableSnapshot`, `fakeUpdateApi`, `loadedStore` and `flush`. |
-
-No test calls GitHub. The update bindings are mocked in `wails-app-mock.js` with explicit parameters.
-
 ## Build and dev server (vite.config.js)
 
 - Plugin: `@sveltejs/vite-plugin-svelte`.
 - Dev server: host `127.0.0.1`, port `WAILS_VITE_PORT` or 9245, `strictPort`. The Taskfile passes `--port` and `--strictPort` as well.
 - Scripts (`package.json`): `dev` (vite), `build` (`vite build`), `build:dev` (non-minified, development mode), `test` (`vitest run`), `preview`.
-- `build:frontend` in `build/Taskfile.yml` sets `PRODUCTION=true` (or `false` for dev) and runs `build` or `build:dev`. It depends on `generate:bindings`.
+- `build:frontend` (`build/Taskfile.yml`) is described in [build-and-release.md](build-and-release.md#task-files).
 - Output is `frontend/dist/`. `main.go` embeds `all:frontend/dist`. CI creates a placeholder `dist` before generating bindings, because the Go build needs the directory.
 - Wails' `/game-covers/...` route is served by `CoverService`, not Vite (see [covers.md](covers.md)).
 
@@ -381,45 +365,22 @@ No test calls GitHub. The update bindings are mocked in `wails-app-mock.js` with
 
 | File | Purpose |
 | --- | --- |
-| `setup.js` | Loaded for every test file (`test.setupFiles`). Imports `@testing-library/jest-dom/vitest`. After each test, resets runtime event listeners, the Browser mock and the window mock. |
+| `setup.js` | Loaded for every test file (`test.setupFiles`). Imports `@testing-library/jest-dom/vitest`. Replaces jsdom's `window.scrollTo` with a no-op so tests can spy on it. After each test, resets runtime event listeners, the Browser mock and the window mock. |
 | `wails-app-mock.js` | Replacement for the generated `app.js`, through the test alias. Exports one function per binding with the same explicit parameters. `__setWailsMocks` and `__resetWailsMocks` replace handlers. Unset handlers reject with `Missing Wails mock handler: <Name>`. |
-| `wails-runtime-mock.js` | Replacement for `@wailsio/runtime`. Exports `RuntimeError` (the class a bound method's error rejects with; tests reject backend failures with it). `Events.On` stores listeners, `Events.Types.Common` has the window event names, and `__emitWailsEvent`, `__listenerCount` and `__resetWailsEvents` control them. `Window` (`Minimise`, `Close`, `ToggleMaximise`, `IsMaximised`) records its calls for `__windowCalls()`; its maximised flag is set by `__setMaximised`, flipped by `ToggleMaximise` (which emits the matching event), and cleared by `__resetWindow`. `Browser.OpenURL` records URLs, and `__failBrowserOpen` makes it reject. |
+| `wails-runtime-mock.js` | Replacement for `@wailsio/runtime`. Exports `RuntimeError` (the class a bound method's error rejects with; tests reject backend failures with it). `Events.On` stores listeners, `Events.Types.Common` has the window event names, and `__emitWailsEvent`, `__listenerCount` and `__resetWailsEvents` control them. `Window` (`Minimise`, `Close`, `ToggleMaximise`, `IsMaximised`) records its calls for `__windowCalls()`; its maximised flag is set by `__setMaximised`, flipped by `ToggleMaximise` (which emits the matching event), and cleared by `__resetWindow`. `Browser.OpenURL` records URLs (`__openedUrls()` returns them), and `__failBrowserOpen` makes it reject. `Call` (`{RuntimeError}`) is what `format.js` reads. |
 | `app-fixtures.js` | State builders (`baseState`, `dashboardState`, `missingKeyState`, `profileSetupState`, `game`, `manyGames`, `syncRun`, `syncingState`, `finishedState`), `emitSyncChanged`, `settle`, `advance` (fake-timer helpers), `rejecting`, and click helpers. |
-| `wails-bindings.test.js` | Drift checks; see below. |
+| `wails-bindings.test.js` | Drift checks; see [testing.md](testing.md#drift-checks-wails-bindingstestjs). |
 | `update-fixtures.js` | Update state builders (`updateSnapshot`, `latestRelease`, `availableSnapshot`), `fakeUpdateApi`, `loadedStore` and `flush`, for the updater tests. |
 
 The test alias (`vite.config.js`, mode `test` only) maps `../bindings/.../app.js` to `wails-app-mock.js` and `@wailsio/runtime` to `wails-runtime-mock.js`. Test mode also sets the `browser` resolve condition, and jsdom is the environment.
 
-Drift checks (`wails-bindings.test.js`):
-
-- Every mock export exists in the generated bindings with the same argument count, and the mock uses no rest parameters.
-- Every generated binding has a mock.
-- Every name `App.svelte` imports exists in the generated bindings.
-- `syncChangedEvent` in `app.go` equals the one in `App.svelte`.
-- When `CI` is `1` or `true`, a missing `frontend/bindings` fails the suite. Locally, the generated-bindings tests are skipped.
+Drift checks (`wails-bindings.test.js`): see [testing.md](testing.md#drift-checks-wails-bindingstestjs).
 
 When a backend binding changes: run `wails3 generate bindings`, then update `wails-app-mock.js` to match.
 
-## Test suites
-
-| Suite | Covers |
-| --- | --- |
-| `App.test.js` | Setup screens, API key flows, dashboard views and tag filters, search, card cover kinds, Wails call failures, previously-completed flag, keyboard shortcuts, clear-data dialog, library settings. |
-| `App.sync.test.js` | Event-driven refresh: coalescing, follow-up reads, action interaction, the 2 s retry, unmount cleanup, sync now. |
-| `App.incremental.test.js` | Incremental grid with a controllable `IntersectionObserver` stub: batch sizes, reset rules, spacer, focus handoff. The observer has no root (the viewport), and the focus handoff is checked by spying on `window.scrollTo` and `scrollIntoView`, since jsdom does not scroll. |
-| `App.titlebar.test.js` | The title bar on every screen, the removed tab row, the document-scroll structure (no inner scroller, the custom scrollbar beside the bar), tab clicks not taking focus, a view change scrolling to the top, Escape and bar presses on the context menu, the context menu clamped below the bar, and the disabled tabs and gear while the clear-data dialog is open. |
-| `lib/components/TitleBar.test.js` | Bar DOM and ARIA (nav, `aria-current`, the gear's label, `tabindex="-1"` on the window controls), keyboard order, the bar press, window calls, and the maximise state from the events (debounce and listener removal). |
-| `lib/components/ScrollBar.test.js` | The custom scrollbar: hidden without overflow, thumb size (48 px floor) and position from mocked `scrollHeight`, `clientHeight` and `scrollY`, one update per frame on scroll, resize and `ResizeObserver` growth (and without a `ResizeObserver`), thumb drag math, clamping and release, and track-click paging. |
-| `lib/format.test.js`, `lib/sync.test.js`, `lib/tag.test.js` | Pure helpers. |
-| `lib/components/*.test.js` | `ApiKeyForm`, `ClearDataConfirmModal`, `ProfileCard`, `ScrollBar`, `SettingsView`, `SummaryStats`, `TitleBar`, `UpdateBanner`, `UpdateSettings`. |
-| `lib/update.test.js`, `App.update.test.js` | The update store and helpers, and the update flow in `App.svelte`. See [Update banner and settings](#update-banner-and-settings). |
-| `test/wails-bindings.test.js` | Drift checks above. |
-
-`filter.js`, `game.js` and `disabled.js` have no direct test file; they are exercised through the App and component tests. Fake timers are used in `App.sync.test.js` and `ProfileCard.test.js`. Under fake timers, use `settle()` and `advance()` from `app-fixtures.js` rather than `waitFor`.
-
-Run with `cd frontend && npm test` (`vitest run`). Build and test are both run in CI (see [build-and-release.md](build-and-release.md) and [testing.md](testing.md)).
+Suites, helpers and test-writing rules: [testing.md](testing.md#frontend-tests).
 
 ## Tooling notes
 
-- There is no ESLint, Prettier or typecheck script. `jsconfig.json` holds editor settings only (`checkJs` and other compiler options) for editor feedback.
+- There is no ESLint or Prettier setup.
 - Dependencies: Svelte 5, Vite 8, vitest 5, jsdom 31, `@testing-library/svelte` 5, `@testing-library/user-event`, and `@wailsio/runtime` 3.1.0 (pinned exactly, to match the Wails CLI).

@@ -1,6 +1,6 @@
 # App service (root package)
 
-This document describes the Go root package `main`: `main.go`, `window.go`, `window_csd_gtk4.go`, `window_csd_other.go`, `app.go`, `app_update.go`, `covers.go`, `wailslog.go`, and the frontend binding contract built on them. For the surrounding layers, see [architecture.md](architecture.md).
+This document describes the Go root package `main`: `main.go`, `window.go`, `window_csd_gtk4.go`, `window_csd_other.go`, `app.go`, `app_errors.go`, `app_update.go`, `covers.go`, `wailslog.go`, and the frontend binding contract built on them. For the surrounding layers, see [architecture.md](architecture.md).
 
 Files and Go identifiers cited here are in the repository, except names from the Wails v3.1.0 module (for example `AssetFileServerFS`, `WebviewUserDataPath` and `ServiceOptions`). Line numbers are omitted on purpose.
 
@@ -13,10 +13,11 @@ Files and Go identifiers cited here are in the repository, except names from the
 | `window_csd_gtk4.go` | `forceClientDecorations`: the GTK 4 Wayland titlebar step for GTK older than 4.16 (Linux, cgo, GTK 4 build only). |
 | `window_csd_other.go` | No-op `forceClientDecorations` for all other builds. |
 | `app.go` | `App` type, `AppState` and `ProfilePreview` types, lifecycle hooks, the bound methods for the app's own actions, init, sync orchestration, state assembly, API key cache. |
+| `app_errors.go` | User-facing sentences (`msg*`), sentinels, `callBound`/`callBoundErr`, `userFacingError`, `shouldLog`, `logText`. See [Error boundary](#error-boundary). |
 | `app_update.go` | Glue to the in-app updater (`internal/update`): the six update bindings, the update-check toggle, and the startup and shutdown hooks it calls. See [updater.md](updater.md). |
 | `covers.go` | `CoverService`, the `/game-covers` HTTP handler. |
 | `wailslog.go` | `logWriter` and `newWailsLogger`, which send Wails's own logging to `app.log`. |
-| `*_test.go` | `app_test.go`, `app_events_test.go`, `app_update_test.go`, `service_lifecycle_test.go`, `covers_test.go`, `wailslog_test.go`, `window_test.go`. |
+| `*_test.go` | `app_test.go`, `app_callbound_test.go`, `app_errors_test.go`, `app_events_test.go`, `app_update_test.go`, `service_lifecycle_test.go`, `covers_test.go`, `wailslog_test.go`, `window_test.go`. |
 
 ## main.go
 
@@ -31,8 +32,7 @@ Files and Go identifiers cited here are in the repository, except names from the
 - After `application.New`, before the window is created, `update.New(update.Deps{...})` builds the in-app updater around `app.Updater`. `backend.setUpdater` gives it to `App`, and `updates.Init()` reads the version stamp and configures the framework updater. Its `OnEvent` wires `app.Event.On` for the three framework events Go reads, and its `OnChanged` emits `update:changed`. See [updater.md](updater.md#wiring).
 - The window is `Steam Achievement Tracker`, 1280x980, minimum 900x650, background `RGB(27, 38, 54)`. The window is frameless and opaque, with the platform's default frameless decorations (no app-drawn radius, transparency or shadow; the frontend draws a 1 px outline around the window). The title bar is drawn by the frontend (`TitleBar.svelte`, see [frontend.md](frontend.md#title-bar-and-scroll-layout)). `window.go` builds the options (`mainWindowOptions`) and creates the window (`setupMainWindow`), before `app.Run`:
   - Windows: `Frameless: true` at creation.
-  - Linux: Wails skips `gtk_window_set_title` when `Frameless` is set at creation (read from the Wails source; the upstream report is unchecked), so a window created frameless would likely have no title in the taskbar, task switcher and overview. So the window is created `Hidden` and decorated, and a one-shot `WindowLoadFinished` listener calls `SetFrameless(true)` and then `Show()`. `WindowLoadFinished` is used because Wails' own hook for that event injects the JS `frameless` flag (which the runtime's resize zones need) from the options, and hooks run before listeners, so the listener's `SetFrameless` always pushes its flag last. It also fires after a failed page load, so the window is shown even if the frontend does not run (`WindowRuntimeReady` would not fire then, and the window would stay hidden). After `SetFrameless`, Wails ignores `SetTitle` on Linux. On GTK older than 4.16 (only 4.14 tested) under Wayland, GTK announces server-side decorations (through the KDE server-decoration protocol, so only compositors that support it, such as KWin, react; others like Mutter see no change) for any window that has no client-side titlebar, ignoring `decorated=FALSE`, so `SetFrameless` alone leaves the compositor (KWin) drawing a title bar. `decorated=FALSE` still matters: it keeps the shadow width at 0 and the titlebar hidden. The listener therefore calls `forceClientDecorations` (`window_csd_gtk4.go`) before `Show`: it sets an empty, hidden titlebar on the unrealized window, so GTK announces client-side decorations and the compositor draws nothing. The window keeps its GTK title. The step is a no-op on GTK 4.16 or later, on non-Wayland displays, and on Windows and other builds (`window_csd_other.go`). Verified on the AppImage's bundled GTK 4.14 under KDE Wayland (KWin frame height equals client height, window title kept in taskbar, square opaque corners with no shadow halo in a zoomed screenshot, resize works on all edges and corners, drag works). Not yet verified: maximize/restore/tile, GNOME (Mutter) with the Ubuntu 24.04 deb's system GTK 4.14, and the GTK >= 4.16 path visually. See the manual checks in [testing.md](testing.md#title-bar-manual-checks).
-  - Provisional: the Windows path (issue #31, E3 option a) and the Linux sequence (candidate (i), E4) have only been exercised on KDE Wayland (a dev build, and the AppImage with bundled GTK 4.14 for the titlebar step). See [testing.md](testing.md#title-bar-manual-checks).
+  - Linux: Wails skips `gtk_window_set_title` when `Frameless` is set at creation (`linux_cgo.go` in the Wails v3.1.0 module), so a window created frameless would have no title in the taskbar, task switcher and overview. So the window is created `Hidden` and decorated, and a one-shot `WindowLoadFinished` listener calls `SetFrameless(true)` and then `Show()`. `WindowLoadFinished` is used because Wails' own hook for that event injects the JS `frameless` flag (which the runtime's resize zones need) from the options, and hooks run before listeners, so the listener's `SetFrameless` always pushes its flag last. It also fires after a failed page load, so the window is shown even if the frontend does not run (`WindowRuntimeReady` would not fire then, and the window would stay hidden). After `SetFrameless`, Wails ignores `SetTitle` on Linux. On GTK older than 4.16 (only 4.14 tested) under Wayland, GTK announces server-side decorations (through the KDE server-decoration protocol, so only compositors that support it, such as KWin, react; others like Mutter see no change) for any window that has no client-side titlebar, ignoring `decorated=FALSE`, so `SetFrameless` alone leaves the compositor (KWin) drawing a title bar. `decorated=FALSE` still matters: it keeps the shadow width at 0 and the titlebar hidden. The listener therefore calls `forceClientDecorations` (`window_csd_gtk4.go`) before `Show`: it sets an empty, hidden titlebar on the unrealized window, so GTK announces client-side decorations and the compositor draws nothing. The window keeps its GTK title. The step is a no-op on GTK 4.16 or later, on non-Wayland displays, and on Windows and other builds (`window_csd_other.go`). Manual checks for this path are in [testing.md](testing.md#title-bar-manual-checks).
 - `app.Run()` blocks. A `Run` error is fatal (`log.Fatal`).
 
 ## App type
@@ -48,11 +48,13 @@ Files and Go identifiers cited here are in the repository, except names from the
 | `emit` | Set by `setEventEmitter` in `main` after `application.New`. In tests it is nil unless the test sets one; events are dropped while it is nil. |
 | `initialized`, `initError` | Init state. `initError` holds the last init failure sentence. The raw error is logged. |
 | `paths` | `appdata.Paths` for this run. |
+| `logFile` | Log file path. Set once `logging.Init` has run. Empty when the data folder cannot be created. |
 | `repo` | `*repository.Repository`. Nil before init and after shutdown. |
 | `steamAPIKey`, `apiKeyPresent`, `apiKeyError` | Cached key state. The key itself is never exposed. |
 | `syncInProgress`, `syncCancel` | Current sync flag and its cancel func. |
 | `syncProfileID`, `syncBaselineRunID`, `syncBaselineKnown` | Identify the run started by the current sync. A run of the same profile with a higher id is this sync's own run. |
 | `syncWG` | Tracks sync goroutines for shutdown and for `cancelSyncAndWait`. |
+| `updates` | `*update.Service`, set by `setUpdater` from `main`. Nil in tests that do not set one. Read under `mu`. |
 | `steamBaseURL` | Overrides the Steam API base URL. Set only by tests. |
 
 ## Public types
@@ -83,7 +85,7 @@ These hooks are not bound. The binding generator excludes `ServiceStartup` and `
 
 - Calls `ensureInitialized`. On failure it logs `startup init: ...` (the raw cause, reduced by `redact.Paths` and scrubbed by `steam.RedactSecrets`, through `logText`) and returns `nil`. The app starts with `AppState.InitError` set.
 - Calls `startUpdateHousekeeping` (the update service's `RunPostUpdate`: the installed version sync and the leftover sweep) right after `logUpdateInitFailure`, before the init-error return. It runs even when init failed, and does nothing when the updater is unavailable.
-- On success, starts the update service's startup check (`startUpdateCheck`), which does nothing when the update checks setting is off or the updater is unavailable. It does not run when init failed.
+- On success, starts the update service's startup check (`startUpdateCheck`), which does nothing when the update checks setting is off or the updater is unavailable. The check itself starts 5 s later (`startupDelay`). It does not run when init failed.
 - On success, reads the state. If `apiKeyPresent` and `profileExists` are both true, it calls `startSync(false)`. A sync that is already running is not restarted.
 - The Wails context argument is ignored. The `App` uses its own lifetime context.
 - Runs inside `app.Run`, before the window opens.
@@ -117,7 +119,7 @@ Every exported method of `App` that returns an error is bound to the frontend, a
 
 Paths, SQL, driver text, OS error text, wrapped Go error chains and the API key never reach the returned text. The returned error is always a fresh error, or a `usererr` value that holds only its sentence, so Wails' marshaled error cause (`{}`) carries nothing either.
 
-The same rule covers the stored and displayed state. `AppState.InitError` and `AppState.APIKeyError` hold sentences (see the field table), and the sync run error and per-game warning hold `steam.UserMessage` text (see [syncer.md](syncer.md)). Raw text is only logged. Rows written by older versions were rewritten by migration 3 (see [database.md](database.md#migrations)).
+The same rule covers the stored and displayed state. `AppState.InitError` and `AppState.APIKeyError` hold sentences (see the field table), and the sync run error and per-game warning hold `steam.UserMessage` text (see [syncer.md](syncer.md)). Raw text is only logged.
 
 The frontend shows the message of a `RuntimeError`, which Wails uses for a bound method's returned error (see [frontend.md](frontend.md)). Because every bound method returns only the sentences above, and `callBound` turns a panic into the generic sentence, a `RuntimeError` from this app is always a sentence the app wrote. Argument and unknown-method errors are `TypeError` and `ReferenceError` in Wails, and the frontend shows the generic sentence for them.
 
@@ -125,9 +127,9 @@ The frontend shows the message of a `RuntimeError`, which Wails uses for a bound
 
 `ensureInitialized` runs at the start of every table method except `RetryAPIKey`. The update methods are not in the table and do not call it at the start; `SetUpdateChecksEnabled` reaches it through `saveUpdateChecksEnabled`, after its updater check (see the update methods below). `RetryAPIKey` re-reads the keyring (`refreshAPIKey` does not call `ensureInitialized`), then reaches that check only through `GetAppState`. If init succeeds, its key read replaces the cached result of any pre-init key read. `initializeOnce` holds `initMu` throughout the sequence. It returns if `initialized` is already true; otherwise it runs these steps:
 
-1. `appdata.Resolve()`, then `appdata.Ensure(paths)`. On failure: `logging.Fallback()`, set `initError` to `The app could not create its folders.`, and return that sentence with the raw `create app directories: ...` error kept for the log.
-2. `logging.Init(paths.LogFile)`.
-3. `dbinit.OpenAndMigrate(paths)`. On failure: set `initError` to `The app could not open its database.` and return it the same way.
+1. `appdata.Resolve()` computes the data, cache, state and log paths from the XDG (or Windows Known Folder) base directories. `appdata.Ensure(paths)` creates them with mode `0700`. On failure: `logging.Fallback()`, set `initError` to `The app could not create its folders.`, and return that sentence with the raw `create app directories: ...` error kept for the log.
+2. `logging.Init(paths.LogFile)` opens `app.log` with lumberjack rotation (5 MB, 5 backups). From here on `log.Print` writes to the file.
+3. `dbinit.OpenAndMigrate(paths)` opens SQLite in WAL mode on one connection, applies pending migrations, and takes a backup first when the database already has tables and a migration is due (see [database.md](database.md)). On failure: set `initError` to `The app could not open its database.` and return it the same way.
 4. `repository.New(db)`, then `CancelRunningSyncRuns("app restarted before sync completed")`. Failure is logged only.
 5. `readSteamAPIKey()`. `keyring.ErrMissing` is normal. Any other error is logged, and `apiKeyError` gets the keyring sentence.
 6. Under `mu`: `initialized = true`, `paths`, `repo`, the key cache, `apiKeyError`, and `initError = ""`.
@@ -183,28 +185,20 @@ The `update.Snapshot` JSON fields are `unavailable`, `currentVersion`, `checksEn
 
 ## Profile validation and vanity resolution
 
-`ValidateProfile` gets the key from `requireAPIKey`, which first re-reads the keyring (`refreshAPIKey`), builds a `steam.Client` with it, applies `steamBaseURL` if set, and calls `ResolveProfileInput`. That function in `internal/steam` accepts:
+`ValidateProfile` gets the key from `requireAPIKey`, which first re-reads the keyring (`refreshAPIKey`), builds a `steam.Client` with it, applies `steamBaseURL` if set, and calls `ResolveProfileInput`.
 
-| Input | Result |
-| --- | --- |
-| 17-digit SteamID64 (`^\d{17}$`) | Used as is. |
-| URL with a `profiles/<steamid64>` segment | The SteamID64 from the path. |
-| URL with an `id/<vanity>` segment | `ResolveVanityURL` on the vanity part. |
-| Any other URL with a host and no matching segment | Error: `Enter a profile link like steamcommunity.com/profiles/<number> or steamcommunity.com/id/<name>.`. |
-| Anything else (no host) | Sent to `ResolveVanityURL` as a vanity name. |
+Accepted inputs and the error sentences are in [steam-client.md](steam-client.md#profile-resolution).
 
-Input is trimmed first. An empty input is an error. `GetPlayerSummary` then fetches the display name and avatar (`avatarfull`, falling back to `avatarmedium`). No profile row is written by validation.
+`GetPlayerSummary` then fetches the display name and avatar (`avatarfull`, falling back to `avatarmedium`). No profile row is written by validation.
 
-The code treats a URL without a scheme, such as `steamcommunity.com/id/name`, as a vanity name, so the whole string goes to the vanity lookup and fails. The README asks for URLs with a scheme (`https://`). Any URL with a host is parsed (an error if no `/profiles/` or `/id/` segment matches), and anything else goes to the vanity lookup.
-
-`SaveProfile` takes the preview as given. It checks only that `steamId64` is not empty. It does not check the format and does not call Steam. The frontend passes back the object returned by `ValidateProfile`.
+`SaveProfile` takes the preview as given. It checks only that `steamId64` is not empty. It does not check the format and does not call Steam. A malformed id is caught only when the sync calls Steam. The frontend passes back the object returned by `ValidateProfile`.
 
 ## Sync orchestration
 
 `startSync(force bool) error` is the sole entry point for starting a sync. It:
 
-1. Creates a child context of the lifetime context and refuses with `errShuttingDown` if the lifetime context is done.
-2. Under `mu`: returns quietly when a sync runs and `force` is false, returns `errSyncAlreadyInProgress` when it runs and `force` is true, otherwise sets `syncInProgress`, the cancel func, and `syncWG`.
+1. Creates a child context of the lifetime context.
+2. Under `mu`: refuses with `errShuttingDown` if the lifetime context is done (`ServiceShutdown` cancels it before it reads the sync cancel func under `mu`, so a start that passes this check is always seen by shutdown); returns quietly when a sync runs and `force` is false, returns `errSyncAlreadyInProgress` when it runs and `force` is true, otherwise sets `syncInProgress`, the cancel func, and `syncWG`.
 3. Emits `sync:changed`.
 4. Validates the state. Each early failure calls `endSync` (so the flag is cleared and the event is emitted): no repo, no key (`keyring.ErrMissing`), a failed active-profile read, no active profile, client build failure (a failed library settings read), or failure to read the latest run.
 5. Records the profile's latest run id as the baseline.
@@ -310,19 +304,12 @@ The frontend relies on generated bindings and a hand-written mock.
   These are the eighteen bound methods that the frontend calls. The generated file has exactly these eighteen functions. Lifecycle hooks and the unexported `setEventEmitter` and `setUpdater` are not in it.
 
 - `frontend/src/test/wails-app-mock.js` is used in place of the generated file by the test alias. It exports one function per binding, with explicit parameters, and a `defaultHandlers` object that holds one handler per binding. `__setWailsMocks` and `__resetWailsMocks` swap handlers per test.
-- `frontend/src/test/wails-bindings.test.js` checks the mock against the generated file and against the frontend and Go sources:
-  - Every mock export exists in the generated file with the same parameter count.
-  - No mock export uses rest parameters.
-  - Every generated binding has a mock export.
-  - Every name `App.svelte` imports from the bindings exists in the generated file.
-  - `syncChangedEvent` in `app.go` and `App.svelte` is the same string.
-
-  The comparison checks are skipped when the generated file is absent. A separate test, "are present when CI is set", fails when the file is absent and the `CI` environment variable is `1` or `true` (case-insensitive). The event-name check reads only the sources and always runs.
+- `frontend/src/test/wails-bindings.test.js` checks the mock against the generated bindings and the event name against `app.go` (see [testing.md](testing.md#drift-checks-wails-bindingstestjs)).
 - The drift test does not check `defaultHandlers`. When a method is added, update the export, its parameters, and the `defaultHandlers` entry by hand.
 
 Steps for a change to an exported method:
 
-1. Change the method in `app.go`, including its doc comment, which the generator copies into `app.js`.
+1. Change the method in `app.go` or `app_update.go`, including its doc comment, which the generator copies into `app.js`.
 2. Run `wails3 generate bindings`.
 3. Update `frontend/src/test/wails-app-mock.js`: the export (explicit parameters) and the `defaultHandlers` entry.
 4. Update `App.svelte` if the frontend calls the method.
@@ -330,24 +317,12 @@ Steps for a change to an exported method:
 
 ## Behavior notes
 
-These are behaviors that the code shows and that the README does not describe:
+Edge cases worth knowing when changing this code:
 
-- A failed init is retried on every call: `ensureInitialized` returns the redacted error and leaves `initialized` false, so the next call runs the init steps again.
 - `SaveProfile` does not cancel a running sync. If one is running, the new profile's sync is not started (the error is dropped), and the running sync keeps going for the old profile. The frontend only shows the setup screen when no profile is active, so this needs a second profile to be saved while a sync runs.
-- `ClearActiveUserData` needs an active profile, so the API key cannot be deleted while no profile is active. The key can still be replaced there with `SaveAPIKey`.
-- `MarkGamePreviouslyCompleted` returns `sql.ErrNoRows` unwrapped when the set has no row. `DisableGame`, `EnableGame`, and `ToggleGameMissingAchievementsInDLC` do not check that the set exists.
 - The keyring is read inside `initMu` during init. `ServiceStartup` runs init inside `app.Run`, before the first window opens, so a slow or blocked Secret Service prompt delays the window itself, and every bound call that needs init waits until the read returns. `CoverService` does not take `initMu`; before init it falls back to `appdata.Resolve()`.
-- `SaveProfile` does not check the SteamID64 format or call Steam. A malformed id reaches the sync and fails there.
-- An empty but valid `GetOwnedGames` answer (explicit `game_count` of 0) makes every profile game `not_owned`. That is by design in `internal/steam`, but it means one empty response disables the whole library until the next non-empty sync.
 - The cover handler serves any cache file of the four names that exists on disk. It does not check the `cover_images` table.
 
 ## Tests
 
-- `app_test.go`: bound orchestration with the `go-keyring` mock backend, and key state.
-- `app_events_test.go`: `sync:changed` emission.
-- `app_update_test.go`: the update bindings without an updater (one fixed sentence), the toggle persisting, `GetUpdateState` reading no settings, the shutdown sync bound (`syncShutdownWait`) and a quiet shutdown.
-- `service_lifecycle_test.go`: `ServiceStartup` and `ServiceShutdown`, lifetime context, init failure, shutdown refusal.
-- `covers_test.go`: `/game-covers` handler.
-- `wailslog_test.go`: the Wails logger bridge.
-
-`ValidateProfile` and `SyncNow` are tested offline by setting `steamBaseURL` to an `httptest` server. See [testing.md](testing.md).
+Root-package tests and helpers are listed in [testing.md](testing.md#root-package-package-main).

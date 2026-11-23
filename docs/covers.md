@@ -56,7 +56,7 @@ Asset hosts (`images.go`):
 
 ## Sync-side decision (`refreshCover`)
 
-This runs for each image id associated with a game after a successful game sync (`coverImageAppIDs`: the game id, followed by each distinct DLC id among its entries). Failures are logged (`refresh cover <id>: ...`) and never fail the game sync.
+Runs after a successful game sync: for a game without achievements only the game id (`saveGameWithoutAchievements`, `syncer.go`); otherwise `coverImageAppIDs` (the game id, then each distinct DLC id). Nothing runs when `Service.Images` is nil (`syncer.go`). Failures are logged (`refresh cover <id>: ...`) and never fail the game sync.
 
 1. Read the stored state (`storedCover` -> `images.Stored{Kind, FileName, CheckedAt}`). `CheckedAt` is parsed from RFC3339; an unparseable value counts as never checked.
 2. `NeedsRefresh(imageAppID, prev, now)`. If false, return with no network I/O.
@@ -83,7 +83,7 @@ Returns true (refresh required) in these cases, in order:
 4. Stored kind does not match the kind implied by the stored file name (`kindForFileName`).
 5. The stored file is missing from disk, or is not a regular file.
 
-Otherwise it returns false. A "not found" result is rechecked after 7 days, and a found cover after 30 days or when the file goes missing. The README does not document either interval.
+Otherwise it returns false. A "not found" result is rechecked after 7 days, and a found cover after 30 days or when the file goes missing.
 
 `Stored` holds only `Kind`, `FileName` and `CheckedAt`; `source_url` and `downloaded_at` are not inputs. A cover whose source changed on Steam is not refreshed until the 30-day window ends.
 
@@ -200,7 +200,7 @@ Which image id is displayed for an entry (`effectiveCoverAppIDSQL`):
 
 So a DLC set without its own cover shows the parent game's cover, and a DLC cover saved later takes over at the next read. The `missing_cover_art` tag uses the same rule, so a DLC set counts as covered when its parent is.
 
-When the displayed image URL is empty, `GameCard.svelte` renders a placeholder: the first letter of the game title and a small **Missing cover art** label. The image is loaded with `loading="lazy"`.
+When the displayed image URL is empty, `GameCard.svelte` renders a placeholder: the first letter of the game title and a small **Missing cover** label. The image is loaded with `loading="lazy"`.
 
 Ownership for refresh and orphan cleanup uses a different rule (`imageAppIDSQL`): the DLC id for DLC-bound entries, else the game id. This decides which cover row an entry writes to, not what it shows.
 
@@ -244,10 +244,6 @@ Cover failures are logged by the syncer and never fail a game sync or the sync r
 
 ## Notes
 
-- The recheck intervals (7 days for "not found", 30 days for found covers) are not documented in the README.
 - `mirrorSourceURLs` rewrites `cdn.cloudflare.steamstatic.com` URLs. Asset URLs always begin with the akamai base (`assetURL`), so that rewrite never matches in production. The fallback host is derived from the same path.
-- The store request sends `input_json` in both the query string and the form body, with method `GET`.
 - The store retry set (`storeItemsRetryStatus`: 429, 500, 503) is the same set as the Steam client's `retryableSteamStatus`. The syncer's `transientSteamStatus` (429, 500, 502, 503, 504) is not a retry set. It only decides whether a `GetGameAchievements` failure may fall back to the legacy API.
-- Cover files are always `.jpg`, regardless of the served content type.
-- `Result.Changed` is set but not read by the syncer.
 - `ItemAssets.Type` and `ItemAssets.ParentAppID` are filled by `storeItemsAssets` but nothing in production reads them. Only tests check them.

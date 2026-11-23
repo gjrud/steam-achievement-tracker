@@ -38,7 +38,7 @@ Linux packages (AppImage, deb, rpm and Arch) go to `bin/`:
 VERSION=0.0.0-dev wails3 package
 ```
 
-The Linux package version (deb, rpm, Arch) is `VERSION` if set, otherwise the `vX.Y.Z` git tag that points at the checked-out commit, without the `v` prefix. It is expanded by `build/linux/nfpm/nfpm.yaml` (`version: ${VERSION}`). So `git checkout v1.2.3 && wails3 package` yields `1.2.3`. If `VERSION` is unset and `HEAD` has no tag, the package tasks fail instead of building a wrong version. The repository stores no version. `VERSION` may be written with or without the `v` prefix, for example `1.2.3` or `1.2.3-rc.1`; the tag fallback ignores tags that do not start with `v` and a digit. A bare `bin/steam-achievement-tracker` runs, but has no menu entry or icon until a package installs it.
+Packages need a version; see [Version handling](#version-handling). A bare `bin/steam-achievement-tracker` runs, but has no menu entry or icon until a package installs it.
 
 The deb, rpm and Arch packages declare the GTK 4 and WebKitGTK 6.0 runtime packages as dependencies (see `build/linux/nfpm/nfpm.yaml`). They do not depend on a Secret Service provider, so install one separately. The AppImage step downloads `linuxdeploy`, so it needs network access.
 
@@ -51,7 +51,7 @@ wails3 task windows:create:nsis:installer  # bin\steam-achievement-tracker-amd64
 wails3 task windows:package                # build + installer
 ```
 
-`VERSION` must start with `X.Y.Z`. Pre-release suffixes (`1.2.3-rc.1`) and a leading `v` are accepted, but Windows resources and NSIS take only the numeric core plus `.0`, so `1.2.3-rc.1` becomes `1.2.3.0`. The full tag name belongs in release filenames, which the release workflow sets. Without `VERSION` or a tag on `HEAD`, `windows:build` and `windows:create:nsis:installer` fail. Dev builds (`DEV=true`) use `0.0.0`. `windows:create:nsis:installer` does not rebuild the exe. It writes the WebView2 bootstrapper (embedded in the Wails CLI) into `build/windows/nsis`, which git ignores.
+`VERSION` must start with `X.Y.Z`. Pre-release suffixes (`1.2.3-rc.1`) and a leading `v` are accepted, but Windows resources and NSIS take only the numeric core plus `.0`, so `1.2.3-rc.1` becomes `1.2.3.0`. The full tag name belongs in release filenames, which the release workflow sets. `windows:build` needs a version unless `DEV=true`; `windows:create:nsis:installer` always needs one (see [Version handling](#version-handling)). `windows:create:nsis:installer` does not rebuild the exe. It writes the WebView2 bootstrapper (embedded in the Wails CLI) into `build/windows/nsis`, which git ignores.
 
 Generated bindings: after adding, removing or changing an exported `App` method, run `wails3 generate bindings` from the repository root. It writes `frontend/bindings/` (git-ignored). `wails3 dev` and `wails3 build` regenerate it too. Do not edit those files by hand.
 
@@ -83,7 +83,7 @@ Root tasks: `build`, `package`, `run`, `dev` (`wails3 dev -config ./build/config
 
 ### Linux (build/linux/Taskfile.yml)
 
-- `APP_ID` is `io.github.gjrud.steam-achievement-tracker`. It must equal `ApplicationID` in `main.go`. GTK sends it as the Wayland app id, and the desktop shell matches the window to the `.desktop` file and the icon with the same name.
+- `APP_ID` is `io.github.gjrud.steam-achievement-tracker`. It must equal `ApplicationID` in `main.go`. GTK sends it as the Wayland app id, and the desktop shell matches the window to the `.desktop` file and the icon with the same name. It is not `config.AppID` (`steam-achievement-tracker`, the keyring service name); the two differ on purpose.
 - `build` selects `build:native` or `build:docker`. Native is used when `CGO_ENABLED` is not `1` (the `purego` tag), or when the host is Linux with a C compiler (`wails3 tool has "gcc|clang"`) and the target arch equals the host. Otherwise it uses `build:docker`.
 - `build:native` runs `go build` with `GOOS=linux`. Production uses `-tags production -trimpath -buildvcs=false -ldflags="-w -s"`, plus the version stamp `-X ...internal/version.tag=sat-version:<PKG_VERSION>;` when `PKG_VERSION` is set (see [Version stamping and marker checks](#version-stamping-and-marker-checks)). Dev uses `-gcflags=all="-l"` and no stripping. Obfuscated builds use `garble` (v0.18.0 in the error message) and add the `wails_obfuscated` tag.
 - `build:docker` runs the `wails-cross` image with the repository mounted. The image must already exist (`setup:docker`).
@@ -97,7 +97,7 @@ Root tasks: `build`, `package`, `run`, `dev` (`wails3 dev -config ./build/config
 ### Windows (build/windows/Taskfile.yml)
 
 - Native build only. It needs a Windows host with MinGW gcc on `PATH`, because `go-sqlite3` uses CGO. The precondition checks `gcc --version` and `OS == windows`.
-- `PKG_VERSION` (root `Taskfile.yml`) is `VERSION` if set, else the `vX.Y.Z` tag on `HEAD` (without `v`). `VERSION_CORE` is its numeric `X.Y.Z` part: a leading `v`, pre-release and build metadata are dropped. Empty (dev builds only) falls back to `0.0.0`. `WIN_VERSION` appends `.0` for the Windows `X.Y.Z.W` resource version. The precondition fails when `VERSION_CORE` is not `X.Y.Z`.
+- `VERSION_CORE` is the numeric `X.Y.Z` part of `PKG_VERSION`: a leading `v`, pre-release and build metadata are dropped. An empty `PKG_VERSION` gives `0.0.0`, which only dev builds reach. `WIN_VERSION` appends `.0` for the Windows `X.Y.Z.W` resource version. The precondition fails when `VERSION_CORE` is not `X.Y.Z`.
 - `build` runs `generate:resources`, then `generate:syso`, then `go build`, with a deferred `cleanup:syso`. The `.syso` (`wails_windows_amd64.syso`) is linked into the package, so it must not remain after the task.
   - Production: `-tags production -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui -X github.com/gjrud/steam-achievement-tracker/internal/version.tag=sat-version:<PKG_VERSION>;"` (GUI subsystem, no console, version stamp). Output `bin/steam-achievement-tracker.exe`.
   - Dev (`DEV=true`): no `windowsgui`, so logs go to a console.
@@ -133,12 +133,12 @@ The header of `build/config.yml` warns against running `common:update:build-asse
   - `./build/appicon-512.png` -> hicolor `512x512` `...png` (the 512 size is the largest hicolor directory, so a larger PNG would be ignored)
   - `./build/linux/io.github.gjrud.steam-achievement-tracker.desktop` -> `/usr/share/applications/`
 - Dependencies: `libgtk-4-1`, `libwebkitgtk-6.0-4` (Debian names). `overrides` give the RPM names (`gtk4`, `webkitgtk6.0`) and the Arch names (`gtk4`, `webkitgtk-6.0`).
-- `scripts.postinstall`: `build/linux/nfpm/scripts/postinstall.sh`. It refreshes the desktop database, the hicolor icon cache, and the MIME database. The MIME step refers to `x-scheme-handler` custom URL schemes, but the app registers none (see Surprises below).
+- `scripts.postinstall`: `build/linux/nfpm/scripts/postinstall.sh`. It refreshes the desktop database, the hicolor icon cache, and the MIME database. The MIME step refers to `x-scheme-handler` custom URL schemes, but the app registers none (no `Protocols` in `main.go`).
 - There is no pre-remove or post-remove script. Removing a package deletes only the installed files. The app's data, cache, state folders and the keyring item stay, which matches the README.
 
 ### AppImage (build/linux/appimage)
 
-`create:appimage` uses `wails3 generate appimage`, not the script in this folder. The directory also holds `build.sh`, a `linuxdeploy` script that no task calls. The `.gitignore` entries for `linuxdeploy*` and `*.AppDir/` match what that script produces. See Surprises below.
+`create:appimage` uses `wails3 generate appimage`, not the script in this folder. The directory also holds `build.sh`, a `linuxdeploy` script that no task calls. The `.gitignore` entries for `linuxdeploy*` and `*.AppDir/` match what that script produces.
 
 The Wails CLI names the AppImage `steam-achievement-tracker-x86_64.AppImage` in `bin/` (for amd64). The release job renames it to `steam-achievement-tracker-linux-x86_64.AppImage`, the name the in-app updater matches (`internal/update/match.go`). Package files keep their names. The rename happens only in the release, so a local AppImage has the CLI name.
 
@@ -191,15 +191,15 @@ Tags matching `v*` are protected by repository rulesets: only admins can create 
 
 ## Release (.github/workflows/release.yml)
 
-Job-by-job reference for the release workflow. Trigger: a push of a tag matching `v[0-9]+.[0-9]+.[0-9]+*`. The `verify` job then checks the tag against `vMAJOR.MINOR.PATCH[-prerelease]`. Concurrency does not cancel (`cancel-in-progress: false`).
+Job-by-job reference for the release workflow. Trigger: a push of a tag matching `v[0-9]+.[0-9]+.[0-9]+*`. The `verify` job then checks that the tag is semver `vMAJOR.MINOR.PATCH[-prerelease]` with no leading zeros (same rule as `internal/version.Valid`). Concurrency does not cancel (`cancel-in-progress: false`).
 
 | Job | Runs on | Steps |
 | --- | --- | --- |
-| `verify` | ubuntu-24.04 | Tag matches the version pattern. The tagged commit is an ancestor of `origin/main`, otherwise the job fails. |
+| `verify` | ubuntu-24.04 | Tag is semver `vMAJOR.MINOR.PATCH[-prerelease]` with no leading zeros (same rule as `internal/version.Valid`). The tagged commit is an ancestor of `origin/main`, otherwise the job fails. |
 | `test` | (reusable) | `uses: ./.github/workflows/ci.yml`. The same checks as CI. |
-| `package` | ubuntu-24.04 | Go, Node 22, apt packages, Wails CLI. `VERSION` from the tag without `v`. `wails3 package`. Checks that `go.mod` and `go.sum` are unchanged. Checks that exactly one AppImage, deb, rpm and `pkg.tar.zst` exist. Checks that `dpkg-deb` reports the tag version (the first `-` becomes `~`, then release `-1` is appended). Checks the version marker in `bin/steam-achievement-tracker` (`grep -aqF`). Uploads `linux-packages`. |
+| `package` | ubuntu-24.04 | Go, Node 22, apt packages, Wails CLI. `VERSION` from the tag without `v`. `wails3 package`. Checks the version marker in `bin/steam-achievement-tracker` (`grep -aqF`). Checks that `go.mod` and `go.sum` are unchanged. Checks that exactly one AppImage, deb, rpm and `pkg.tar.zst` exist. Checks that `dpkg-deb` reports the tag version (the first `-` becomes `~`, then release `-1` is appended). Uploads `linux-packages`. |
 | `package-windows` | windows-latest | Go, Node 22, a placeholder `frontend/dist`, the Wails CLI (its `GOPATH/bin` is added to `PATH`), gcc and makensis check (Chocolatey NSIS as fallback). `VERSION` from the tag. `wails3 task windows:build`, then the version marker check on `bin/steam-achievement-tracker.exe`, then `windows:create:nsis:installer`. Checks `go.mod`/`go.sum`. Checks that exactly two exes exist. Checks that the exe `ProductVersion` equals the numeric core plus `.0`. Renames to `steam-achievement-tracker-<version>-windows-amd64-portable.exe` and `...-setup.exe`. Uploads `windows-packages`. |
-| `release` | ubuntu-24.04 | Full-history checkout. Downloads both artifacts into one flat `dist/`. Renames the AppImage in `dist/` to `steam-achievement-tracker-linux-x86_64.AppImage` (it fails unless exactly one AppImage is there). Creates the source archive (`git archive`, tar.gz). Writes `SHA256SUMS` over all of `dist/` (`sha256sum -- *`) and fails unless it lists the portable exe and the renamed AppImage by name. Generates notes with `changelog.sh`. Attests build provenance (`actions/attest-build-provenance`). Creates the GitHub release with `gh release create --verify-tag`, adding `--prerelease` when the tag has a `-` suffix. |
+| `release` | ubuntu-24.04 | Full-history checkout. Downloads both artifacts into one flat `dist/` (fails on subdirectories or a missing portable/setup exe). Renames the AppImage in `dist/` to `steam-achievement-tracker-linux-x86_64.AppImage` (it fails unless exactly one AppImage is there). Creates the source archive (`git archive`, tar.gz). Writes `SHA256SUMS` over all of `dist/` (`sha256sum -- *`) and fails unless it lists the portable exe and the renamed AppImage by name. Generates notes with `changelog.sh`. Attests build provenance (`actions/attest-build-provenance`). Creates the GitHub release with `gh release create --verify-tag`, adding `--prerelease` when the tag has a `-` suffix. |
 
 Permissions: `contents: write`, `id-token: write`, `attestations: write` on `release` only.
 
@@ -227,6 +227,7 @@ Dependabot schedules weekly updates for three ecosystems. The Go and npm groups 
 - Source of truth: the tag. The release workflow sets `VERSION=${GITHUB_REF_NAME#v}`. Locally, `PKG_VERSION` in the root `Taskfile.yml` is `VERSION` if set, else the `vX.Y.Z` tag on `HEAD` (other tags such as `nightly` are ignored), else empty, and the package tasks fail. The repo does not store a version.
 - `nfpm.yaml` expands `${VERSION}`. Run directly through `wails3 tool package` without `VERSION`, packaging still succeeds with a wrong version (a deb shows `0.0.0~rc0-1`). The `PKG_VERSION` guard prevents that through the tasks, and the release job still checks the deb version.
 - Windows: `PKG_VERSION` (same rule: `VERSION`, else the tag on `HEAD`, else fail), `VERSION_CORE` and `WIN_VERSION` as above. `1.2.3-rc.1` becomes `1.2.3.0` in the exe and NSIS. Release artifact names keep the full version.
+- `VERSION` may have or omit the `v` prefix (`1.2.3`, `v1.2.3`, `1.2.3-rc.1`). The tag fallback ignores tags that do not start with `v` and a digit, so `nightly` never sets a version.
 - `create:appimage` unsets `VERSION` on purpose.
 - The frontend `package.json` `version` is `0.0.0` and is not the app version.
 
@@ -242,9 +243,7 @@ The app's own version is also compiled into the binary, for the in-app updater (
 - The AppImage, deb, rpm and Arch packages are compressed, so the marker check runs on the pre-package binary instead.
 - Builds without a stamp (`go build`, the CI smoke builds, `wails3 build` with no version and no tag, Docker builds) have no updater. The CI Windows smoke build is a direct `go build`, so it has no stamp.
 
-To test the updater on a local build, stamp it with an old version so that the current release is newer. On Windows, in PowerShell: `$env:VERSION = "0.0.1"` then `wails3 task windows:build`. A build stamped with the current release shows "up to date".
-
-On Linux, `VERSION=0.0.1 wails3 build` gives a plain binary. It is notify-only (no Install). Its check also fails until the first release that ships the updater, because the current release has no `steam-achievement-tracker-linux-x86_64.AppImage`. After that release, use the package build: `VERSION=0.0.1 wails3 package`, then run `bin/steam-achievement-tracker-x86_64.AppImage`. The matcher checks release asset names, not the local file name. Do not commit any change made for a local test.
+To test the updater on a local build, use the recipe in [updater.md](updater.md#local-test-build). Do not commit any change made for a local test.
 
 ### Updater asset names
 
@@ -254,7 +253,7 @@ The in-app updater matches release assets by name (`internal/update/match.go`), 
 - The Linux updater takes exactly `steam-achievement-tracker-linux-x86_64.AppImage`. The release job renames the AppImage to this name before it writes `SHA256SUMS`.
 - `SHA256SUMS` must list both assets by exact name. The release job checks this (step "Check SHA256SUMS lists the updater assets") and fails otherwise. Without a checksum for the asset, the gate refuses an in-app install.
 - Do not rename these assets, change the portable exe pattern, or add a second AppImage. Any of those makes the updater notify-only or unable to find the asset.
-- Pre-release tags (`-` in the version) are marked as pre-releases and are never offered by the updater. The tag regex in `release.yml` is unchanged.
+- Pre-release tags (`-` in the version) are marked as pre-releases and are never offered by the updater.
 
 ## Generated and ignored files
 
@@ -293,9 +292,3 @@ The Wails version is specified in these places. Update them together:
 
 Workflow or `changelog.sh` changes affect releases. For hosted validation, follow the authorization and `-rc` guidance in [Cutting a release](#cutting-a-release).
 
-## Surprises and inconsistencies
-
-- `build/linux/appimage/build.sh` is not used by any task. `create:appimage` uses `wails3 generate appimage`. Its `linuxdeploy` download and `.gitignore` entries are leftovers from that script.
-- `postinstall.sh` refreshes the MIME database for `x-scheme-handler` custom URL schemes. The app registers no protocols (no `Protocols` in `main.go`), so that step has no effect.
-- The Dockerfile's Darwin and Windows wrappers are not reachable from any task. Only Linux is.
-- The Linux `APP_ID` (`io.github.gjrud.steam-achievement-tracker`) and `config.AppID` (`steam-achievement-tracker`, used for the keyring service) are different identifiers on purpose.

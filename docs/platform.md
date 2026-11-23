@@ -96,24 +96,13 @@ The table lists every file the app writes and the code that creates it. `<data>`
 
 The Steam Web API key is not a file. It is one keyring item outside the app folders: Secret Service with `service=steam-achievement-tracker`, `username=steam-web-api-key` on Linux, and a Credential Manager generic credential named `steam-achievement-tracker:steam-web-api-key` on Windows. `keyring.SetSteamAPIKey` writes it when the user saves the key, and only `ClearActiveUserData(_, true)` deletes it (see [app-service.md](app-service.md)).
 
-Deleting the cache folder is safe. The next sync downloads the covers again. The `cover_images` rows then point at missing files, and `NeedsRefresh` treats a missing file as stale (see [covers.md](covers.md)).
+Deleting the cache folder is safe; see [covers.md](covers.md#cache-layout).
 
 ### Updater leftovers
 
-The in-app updater (see [updater.md](updater.md)) writes outside the three app roots. The framework creates these. The app removes them at its next start, about five seconds after startup (`sweepLeftovers` in `internal/update/postupdate.go`). That start can be the new version or, after a rollback, the old one. The sweep does nothing on a Linux package install. It removes a staging folder only when it is flat and idle for 10 minutes, so a concurrent instance's in-flight files stay. It removes the folder's files one by one, then the empty folder, and never a whole tree. A file or folder that fails its check is skipped silently:
-
-| Path | Created by | Left behind when | Removed by |
-| --- | --- | --- | --- |
-| `<target>.bak`, where `<target>` is the AppImage on Linux or the exe on Windows | The swap helper, as a backup of the installed file | A swap or launch fails. A successful swap deletes it. | The swap helper after a successful swap. Otherwise the app, at its next start, when it is a regular file or symlink (not a directory) idle for 10 minutes. |
-| `<exe>.old.<UnixNano>` (Windows, next to the exe) | The swap helper, which renames the old exe aside | Every successful Windows update, while the old file is still in use. | The next update's helper, or the app at its next start, when the file is free (no age limit). The NSIS uninstaller deletes `<exe>.old.*` (see below). The name matches in any letter case on Windows. |
-| `wails-update-*` directory next to the target | `Updater.DownloadAndInstall`, which stages the payload | The update was downloaded and not applied, the helper failed, or the app crashed during an update. | The app, at shutdown while the phase is `ready` (`Service.Shutdown`, through `fsretry`), or at its next start when it holds only regular files, is idle for 10 minutes, and no update is in flight or staged. The helper removes it after a successful swap. |
-| `wails-update-<pid>.log` in the OS temp directory (`os.TempDir()`) | The swap helper, for each update it runs | Always. The log has full paths, usually including the OS user name. | The app, at its next start once the log was last written more than 10 minutes earlier (not while it is restarting an update). Only regular files that match the name exactly are removed. A file another user owns is left alone. |
+The in-app updater writes outside the three app roots: `<target>.bak`, `<exe>.old.<n>` (Windows) and `wails-update-*` next to the exe or AppImage, `wails-update-<pid>.log` in the OS temp dir, and on Windows the HKCU Apps & Features `DisplayVersion`. Lifetimes and cleanup: [updater.md](updater.md#staging-and-leftover-files), [After an update](updater.md#after-an-update).
 
 The NSIS uninstaller (`build/windows/nsis/project.nsi`) deletes `$INSTDIR\<exe>.old.*` and `$INSTDIR\<exe>.bak` before its non-recursive `RMDir "$INSTDIR"`. It never uses `RMDir /r`, so an unrelated file or a leftover `wails-update-*` folder in the install folder keeps the folder, and the install folder stays behind.
-
-### Windows registry (installed copy)
-
-The per-user installer writes an Apps & Features entry under `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\gjrudSteam Achievement Tracker` (64-bit view). The app writes one value there: `DisplayVersion`, as the numeric core of the running version. It checks the stored value at each start and writes only when it differs from the running version, and only when `DisplayIcon` is the running exe. The installer removes the whole key on uninstall. The key name must match `UNINST_KEY_NAME` in `build/windows/nsis/wails_tools.nsh`. The app writes no other registry value.
 
 ## internal/keyring
 
@@ -123,12 +112,13 @@ Stores the Steam Web API key exclusively in the OS keyring via `github.com/zalan
 
 | Symbol | Kind | Description |
 | --- | --- | --- |
-| `ErrMissing` | error | No key stored (keyring item absent or empty). |
-| `ErrInvalidKey` | error | Key is empty after trimming, or contains whitespace, control or `Cf` (format) characters. Constant message; never includes the input. |
+| `ErrMissing` | error | No key stored (keyring item absent or empty). A `usererr` sentence, shown as is. |
+| `ErrInvalidKey` | error | Key is empty after trimming, or contains whitespace, control or `Cf` (format) characters. Constant message; never includes the input. A `usererr` sentence, shown as is. |
 | `ErrNotStored` | error | Read-back after write did not return the same key, or was absent. Usually a dismissed unlock or create prompt (Secret Service on Linux), or a duplicate item from another provider. |
-| `GetSteamAPIKey() (string, error)` | func | Reads the key. Maps `go-keyring` `ErrNotFound` and empty values to `ErrMissing`. Other errors pass through. |
-| `SetSteamAPIKey(key) (string, error)` | func | Trims the key, validates it, stores it, reads it back, returns the trimmed key. |
-| `DeleteSteamAPIKey() error` | func | Removes the item. An absent item is success (idempotent). Other errors are wrapped as `delete api key: ...`. |
+| `BackendError` | type | A failure of the keyring backend (locked, unavailable, denied) from Get, Set or Delete. `Error` and `Unwrap` pass the backend text through. The App logs it and shows `msgKeyring`. |
+| `GetSteamAPIKey() (string, error)` | func | Reads the key. Maps `go-keyring` `ErrNotFound` and empty values to `ErrMissing`. Other errors are returned as `*BackendError`. |
+| `SetSteamAPIKey(key) (string, error)` | func | Trims the key, validates it, stores it, reads it back, returns the trimmed key. A store or read-back backend failure is a `*BackendError` (`store api key: ...`, `read back api key: ...`). A read-back that is absent or different is `ErrNotStored`. |
+| `DeleteSteamAPIKey() error` | func | Removes the item. An absent item is success (idempotent). Other errors are a `*BackendError` wrapping `delete api key: ...`. |
 
 Storage identity:
 
@@ -138,7 +128,7 @@ Storage identity:
 
 ### Behavior
 
-- Read path (`GetSteamAPIKey`) is called at startup and by actions that need the key (`app.go`). `ErrMissing` leads to the missing-key screen. Another read error is kept as `apiKeyError` in app state and shown on that same screen (`SetupView.svelte`).
+- Read path (`GetSteamAPIKey`) is called at startup and by actions that need the key (`app.go`). `ErrMissing` leads to the missing-key screen. Another read error is logged as `keyring lookup: ...` (paths reduced by `redact.Paths`). `apiKeyError` is set to the fixed `msgKeyring` sentence (`app_errors.go`), which is shown on that same screen (`SetupView.svelte`).
 - Write path (`SetSteamAPIKey`) returns the trimmed key. Callers never log it.
 - Error text never contains the key. Tests check this for set and delete (`TestSetSteamAPIKeyErrorsNeverContainTheKey`, `TestDeleteSteamAPIKeyErrorNeverContainsKey`).
 
@@ -206,14 +196,12 @@ Call sites: `internal/images` (cover temp-file rename and removal), `internal/db
 
 Gotchas:
 
-- Use these wrappers only for files that the WebView or cover server may hold open. Plain `os` calls are fine elsewhere.
+- Use for files another process may briefly hold open (cover server, WebView, antivirus, indexer).
+- Plain `os` calls are fine elsewhere.
 - `transient_windows_test.go` is `//go:build windows` and does not compile on Linux CI. The generic retry tests in `fsretry_test.go` run everywhere.
 
 ## Testing these packages
 
-- `appdata`: `appdata_test.go` covers path layout, no directory creation by `Resolve`, `0700` creation and tightening, and error returns for file-blocked paths.
-- `keyring`: `keyring_test.go` (uses go-keyring mock) covers round-trip, trim, invalid input, read-back mismatches and error redaction.
-- `logging`: `logging_test.go` covers private file modes (skipped for mode checks on Windows), stderr fallback, a race between `Writer` and `Init`/`Fallback`, and previous-logger closing.
-- `fsretry`: `fsretry_test.go` covers retry counts, non-transient errors returning immediately, success on first try, and `os` error parity.
+Per-package test coverage is in [testing.md](testing.md#go-test-layout).
 
 Run `go test ./internal/appdata/... ./internal/keyring/... ./internal/logging/... ./internal/fsretry/...`; add `-race` for the logging race test. See [testing.md](testing.md).

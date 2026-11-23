@@ -5,7 +5,7 @@ These docs are for developers: readers who want to understand the app's internal
 ## Index
 
 - [architecture.md](architecture.md): application layers; startup and shutdown order; `sync:changed` event flow; binding flow; error and secret handling; concurrency; and package map.
-- [app-service.md](app-service.md): root package files (`main.go`, `window.go`, `window_csd_gtk4.go`, `window_csd_other.go`, `app.go`, `app_update.go`, `covers.go`, `wailslog.go`); every bound method; lifecycle hooks; profile validation; state assembly; remove-profile behavior; cover handler; and frontend binding contract.
+- [app-service.md](app-service.md): root package files (`main.go`, `window.go`, `window_csd_gtk4.go`, `window_csd_other.go`, `app.go`, `app_errors.go`, `app_update.go`, `covers.go`, `wailslog.go`); every bound method; lifecycle hooks; profile validation; state assembly; remove-profile behavior; cover handler; and frontend binding contract.
 - [updater.md](updater.md): the in-app updater: install targets, version stamp, GitHub provider and network use, phases, consent and the install gate, errors and log categories, trust model, restart and shutdown safety, leftover files, known limitations, and manual checks.
 - [syncer.md](syncer.md): the full sync run: owned games, the per-game worker pool, achievement sets, progress, and final status.
 - [steam-client.md](steam-client.md): the Steam Web API client: endpoints, retries, error redaction, and profile resolution.
@@ -30,8 +30,8 @@ These docs are for developers: readers who want to understand the app's internal
 
 ## Conventions
 
-- These docs describe the code as it was when they were written. If a doc and the code disagree, the code is authoritative; update the doc in the same change.
+- If a doc and the code disagree, the code is authoritative; update the doc in the same change.
 - The root [README.md](../README.md) is the only user-facing document: overview, requirements, install, usage, updates, data and privacy, troubleshooting. Nothing under `docs/` is for end users, and the README has no developer internals beyond a short development overview. Developer docs link to the README for user-facing behavior instead of repeating it. When a change alters what users see, update the README and the matching doc here in the same change.
-- The code is the source of truth. Function, type, file and constant names are cited without line numbers, because line numbers drift.
+- Function, type, file and constant names are cited without line numbers, because line numbers drift.
 - Generated files (`frontend/bindings/`, `frontend/dist/`) are not documented line by line. Regenerate them rather than editing them.
 - Secrets never appear in examples. The Steam Web API key is written as `<key>` or described by name only.
