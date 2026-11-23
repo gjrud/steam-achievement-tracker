@@ -254,7 +254,8 @@
   }
 
   .app-shell {
-    padding: 28px;
+    /* Less space under the title bar (14 px) than at the sides and bottom (28 px): the sides set the card width. */
+    padding: 14px 28px 28px;
     width: 100%;
     margin: 0 auto;
     box-sizing: border-box;
@@ -1903,7 +1904,7 @@
 
   @media (max-width: 720px) {
     .app-shell {
-      padding: 18px;
+      padding: 9px 18px 18px;
     }
 
     .setup-panel {
