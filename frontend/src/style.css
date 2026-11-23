@@ -1,7 +1,45 @@
+:root {
+  /* The app-drawn title bar (TitleBar.svelte), fixed at the top of the window. The page content starts below it, and
+     overlays (modal backdrop, context-menu clamp) start below it too. */
+  --title-bar-height: 42px;
+  /* The fade under the bar (.title-bar::before in app.css). Scroll targets stop below it as well. */
+  --title-fade-height: 20px;
+  /* The space between the bar and the top of the dashboard content (.app-shell padding-top). The custom scrollbar starts
+     at the same line, so its track lines up with the top of the content. */
+  --content-top-gap: 14px;
+  /* Insets that keep the custom scrollbar (ScrollBar.svelte) clear of Wails' resize zones
+     (node_modules/@wailsio/runtime/dist/drag.js). Wails draws a 5 px strip along each edge. Each corner is a 15x15 px
+     square (5 px plus cornerExtra 10 px), and a corner square needs both: within 15 px of the right edge and within 15 px
+     of the top or bottom edge. Right: 6 px clears the 5 px right strip, so the scrollbar sits almost at the window edge
+     like a system scrollbar. It does lie inside the 15 px corner columns, so the track must stay out of the corner
+     squares: Bottom: 15 px keeps the track's bottom end above the bottom-right square. The top needs no inset: the
+     scrollbar starts below the title bar, and the bar's own top-right corner square lies under the bar. If Wails' zone
+     sizes change, re-check these (docs/build-and-release.md#upgrading-wails). */
+  --resize-inset-right: 6px;
+  --resize-inset-bottom: 15px;
+  /* The window's structural lines: the outline around the window (body::after), the title bar's bottom line
+     (.title-bar::after in app.css), the border of the active title tab and gear, and the divider between the bar's
+     controls. One variable, so they always match. */
+  --window-line-color: #2d4560;
+}
+
 html {
   min-height: 100%;
   background: #0b141f;
   color: #f4fbff;
+  /* html is the scroller. Keyboard focus, find-in-page and scrollIntoView stop short of the fixed title bar and its
+     fade, so a target near the top of the viewport is not left under them. */
+  scroll-padding-top: calc(var(--title-bar-height) + var(--title-fade-height));
+}
+
+/* The document scrolls (not an inner box: dragging an inner scroller's thumb was choppy in WebKitGTK). The native
+   scrollbar is hidden, so the content keeps the full window width, and ScrollBar.svelte draws the bar below the title
+   bar. Only ::-webkit-scrollbar is used: scrollbar-width and scrollbar-color are deliberately not set, because
+   Chromium 121+ ignores ::-webkit-scrollbar as soon as either is set. Wheel, keys, touch and find-in-page still scroll
+   the document natively. */
+html::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 body {
@@ -11,8 +49,46 @@ body {
   min-height: 100vh;
 }
 
+/* The title bar's fade (.title-bar::before in app.css), mirrored at the bottom edge: clear at the top, the page colour
+   at the window's bottom edge, --title-fade-height tall, so content scrolling down does not stop at a hard edge. It is
+   nearly clear by 14 px from the edge, so the 28 px bottom padding of the content (.app-shell) leaves the last row
+   undimmed. Like the top fade it stops short of the custom scrollbar (its inset plus its 14 px width), so the thumb is
+   not faded, and it has no pointer events. z-index 800: over the page, under the scrollbar (900), the context menu
+   (1000) and the modal (1200). */
+body::before {
+  content: "";
+  position: fixed;
+  right: calc(var(--resize-inset-right) + 14px);
+  bottom: 0;
+  left: 0;
+  height: var(--title-fade-height);
+  background: linear-gradient(
+    to top,
+    #0b141f 0%,
+    rgba(11, 20, 31, 0.8) 20%,
+    rgba(11, 20, 31, 0.45) 45%,
+    rgba(11, 20, 31, 0.1) 70%,
+    rgba(11, 20, 31, 0) 100%
+  );
+  pointer-events: none;
+  z-index: 800;
+}
+
+/* 1 px outline around the whole window, drawn above everything and click-through. It gives the frameless window a
+   visible edge. */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  border: 1px solid var(--window-line-color);
+  pointer-events: none;
+  z-index: 2147483647;
+}
+
+/* The title bar is position: fixed, so the content is pushed down by its height. */
 #app {
   min-height: 100vh;
+  padding-top: var(--title-bar-height);
 }
 
 *,

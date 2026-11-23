@@ -1172,7 +1172,8 @@ describe('App keyboard shortcuts', () => {
 
     render(App)
     await screen.findByPlaceholderText('Search games in this view')
-    await user.click(screen.getByRole('button', {name: 'Completed'}))
+    // Keyboard focus on a tab in the title bar (a click would not move focus there: the bar cancels the mousedown).
+    screen.getByRole('button', {name: 'Completed'}).focus()
     expect(screen.getByRole('button', {name: 'Completed'})).toHaveFocus()
 
     await user.keyboard('p')
@@ -1180,7 +1181,7 @@ describe('App keyboard shortcuts', () => {
     const search = screen.getByPlaceholderText('Search games in this view')
     expect(search).not.toHaveFocus()
     expect(search).toHaveValue('')
-    expect(screen.getByRole('heading', {name: 'Portal'})).toBeInTheDocument()
+    expect(screen.getByRole('heading', {name: 'Hades'})).toBeInTheDocument()
   })
 
   test('typing on Settings does nothing, and search rebinds after returning to a list view', async () => {

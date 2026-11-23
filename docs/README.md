@@ -5,7 +5,7 @@ These docs are for readers who want to understand the app's internals, change th
 ## Index
 
 - [architecture.md](architecture.md): application layers; startup and shutdown order; `sync:changed` event flow; binding flow; error and secret handling; concurrency; and package map.
-- [app-service.md](app-service.md): root package files (`main.go`, `app.go`, `app_update.go`, `covers.go`, `wailslog.go`); every bound method; lifecycle hooks; profile validation; state assembly; remove-profile behavior; cover handler; and frontend binding contract.
+- [app-service.md](app-service.md): root package files (`main.go`, `window.go`, `app.go`, `app_update.go`, `covers.go`, `wailslog.go`); every bound method; lifecycle hooks; profile validation; state assembly; remove-profile behavior; cover handler; and frontend binding contract.
 - [updater.md](updater.md): the in-app updater: install targets, version stamp, GitHub provider and network use, phases, consent and the install gate, errors and log categories, trust model, restart and shutdown safety, leftover files, known limitations, and manual checks.
 - [syncer.md](syncer.md): the full sync run: owned games, the per-game worker pool, achievement sets, progress, and final status.
 - [steam-client.md](steam-client.md): the Steam Web API client: endpoints, retries, error redaction, and profile resolution.

@@ -52,7 +52,7 @@ I built this app for personal use, entirely through vibecoding. I have entry-lev
 
 Download a package for your distribution (deb, rpm, or Arch `pkg.tar.zst`) or the AppImage from the [GitHub Releases](https://github.com/gjrud/steam-achievement-tracker/releases) page. Each release lists `SHA256SUMS` for its files.
 
-The packages install the program, a menu entry, and app icons. The window and taskbar use the icon from that menu entry. The AppImage cannot install the menu entry itself, so on KDE its window title bar may show a generic icon.
+The packages install the program, a menu entry, and app icons. The window and taskbar use the icon from that menu entry. The title bar inside the app always shows the app's own icon.
 
 Removing the package removes only the program files. Your data, cache, logs, and saved API key stay (see [Data and privacy](#data-and-privacy)).
 
@@ -139,7 +139,7 @@ The profile card shows your avatar, name, and the **Sync now** button. Below the
 
 Below the headline, the dashboard shows the game counts and how long ago the sync finished, such as "5 min ago" or "2 hours ago". After seven days, it shows the date and time instead. While a sync runs, it shows `Started <time>` using the start time. Each state has an icon and text, so colour is not the only signal.
 
-The main tabs are **Not completed**, **Completed**, **Sync errors**, **Disabled** and **Settings**. On a narrow window the header stacks and the tabs wrap.
+The app's title bar across the top of the window holds the tabs **Not completed**, **Completed**, **Sync errors** and **Disabled**. A gear icon beside them opens **Settings**. On the setup screens the bar shows only the icon and the window controls (minimize, maximize, close). On a narrow window the tabs get tighter, and a label that does not fit is cut short with an ellipsis. The controls keep their place and the bar does not wrap. The dashboard header still stacks on a narrow window.
 
 ### Not completed
 

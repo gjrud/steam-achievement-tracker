@@ -10,9 +10,10 @@
     border: 0;
   }
 
+  /* #app is padded by the fixed title bar's height, so these screens fill the rest of the window. */
   .loading-screen,
   .setup-screen {
-    min-height: 100vh;
+    min-height: calc(100vh - var(--title-bar-height));
     display: grid;
     place-items: center;
     padding: 32px;
@@ -253,7 +254,8 @@
   }
 
   .app-shell {
-    padding: 28px;
+    /* Less space under the title bar (--content-top-gap) than at the sides and bottom (28 px): the sides set the card width. */
+    padding: var(--content-top-gap) 28px 28px;
     width: 100%;
     margin: 0 auto;
     box-sizing: border-box;
@@ -268,8 +270,7 @@
     font-weight: 800;
   }
 
-  .dashboard-header,
-  .tabs {
+  .dashboard-header {
     font-size: clamp(14px, 0.82vw + 4px, 22px);
   }
 
@@ -562,53 +563,273 @@
     color: #a9c3da;
   }
 
-  .tabs {
+  /* Title bar (TitleBar.svelte), 42 px at the top of the window. --wails-draggable is inherited, so the icon, the gaps
+     and the empty fill drag the window; every button sets no-drag (Wails reads the computed value, see docs/frontend.md).
+     The bar is position: fixed, so the document scrolling under it never moves it (#app is padded by its height).
+
+     One centre line: every item (icon, tab labels, gear glyph, the three control glyphs) is centred on the bar's vertical
+     middle, y = 21 px. The bar has no CSS border: its bottom line is the ::after below, drawn inside the 42 px, so the
+     content box is the full 42 px and the middle lands on a whole pixel (1 px strokes stay sharp).
+       - icon span and window controls: full height (0 to 42), centred by the grid.
+       - tabs and the gear: folder tabs from 6 px (below Wails' 5 px top resize strip) to 42 px, 36 px tall. The 1 px top
+         border plus 7 px bottom padding put the content box on 7 to 35, whose middle is 21. */
+  .title-bar {
+    position: fixed;
+    top: 0;
+    right: 0;
+    left: 0;
+    z-index: 1100;
     display: flex;
-    gap: 0.25em;
-    margin: 0 0 1.1em;
-    padding-left: 0.2em;
-    border-bottom: 1px solid #2d4560;
+    align-items: stretch;
+    height: var(--title-bar-height);
+    background: #0b141f;
+    color: #dbe9f6;
+    font-size: 13px;
+    user-select: none;
+    -webkit-user-select: none;
+    --wails-draggable: drag;
   }
 
-  .tabs .tab-settings {
-    margin-left: auto;
+  /* The bar's bottom line. It sits under the buttons (they are position: relative, z-index 1), so an active folder tab,
+     which is page-coloured and runs to the bar's bottom edge, covers it and opens into the page. */
+  .title-bar::after {
+    content: '';
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    height: 1px;
+    background: var(--window-line-color);
+    pointer-events: none;
   }
 
-  .tabs button.tab {
-    margin-bottom: -1px;
-    padding: 0.7em 1.4em;
-    border: 1px solid transparent;
-    border-bottom: 0;
-    border-radius: 0.7em 0.7em 0 0;
+  .title-bar button {
+    --wails-draggable: no-drag;
+    position: relative;
+    z-index: 1;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
     background: none;
     box-shadow: none;
-    color: #7f9bb5;
-    font-size: 0.82em;
-    font-weight: 800;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
+    color: #9fb7cc;
+    outline-offset: -2px;
   }
 
-  /* Overrides the global button hover lift; the tie with the global rule is broken by source order. */
-  .tabs button.tab:hover:not(:disabled) {
-    color: #e3f3ff;
-    background: rgba(102, 192, 244, 0.07);
+  /* Global button hover lift and brightness filter do not reach bar buttons. (0,5,1) beats the global hover rule (0,4,1). */
+  .title-bar button:hover:not(:disabled):not(.primary):not(.danger) {
     filter: none;
     transform: none;
   }
 
-  /* The active tab is the raised folder tab: page-coloured fill that covers the baseline below it. */
-  .tabs button.tab.active {
+  .title-bar button:focus-visible {
+    outline: 2px solid #66c0f4;
+  }
+
+  .title-icon {
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    width: 48px;
+  }
+
+  /* The title bar icon (src/assets/appicon.svg), as tall as the bar (42 px). The ring and trophy fill about 69% of the
+     viewBox, so the ring is about 29 px across its outer edge, centred on the bar's middle line. A taller image would
+     not stay centred: the span's auto grid row grows to the image and is aligned to the top of the span. pointer-events
+     none sends the press to the icon span, the drag handle. */
+  .title-icon-img {
+    display: block;
+    width: var(--title-bar-height);
+    height: var(--title-bar-height);
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-drag: none;
+  }
+
+  /* A fade under the bar, so content scrolling up does not stop at a hard edge. It is the page colour fading to clear,
+     --title-fade-height (20 px) tall, and nearly clear by 14 px (the gap under the bar at the top of the dashboard), so
+     the heading at rest is barely dimmed. It lies outside the bar's box and has no pointer events, so drag and clicks
+     underneath still work. It stops short of the custom scrollbar (its inset plus its 14 px width from the right edge),
+     so the thumb is not faded; no content sits in that strip. */
+  .title-bar::before {
+    content: '';
+    position: absolute;
+    top: 100%;
+    right: calc(var(--resize-inset-right) + 14px);
+    left: 0;
+    height: var(--title-fade-height);
+    background: linear-gradient(
+      to bottom,
+      #0b141f 0%,
+      rgba(11, 20, 31, 0.8) 20%,
+      rgba(11, 20, 31, 0.45) 45%,
+      rgba(11, 20, 31, 0.1) 70%,
+      rgba(11, 20, 31, 0) 100%
+    );
+    pointer-events: none;
+  }
+
+  .title-tabs {
+    display: flex;
+    align-items: stretch;
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  /* Folder tabs and the gear share one rule (see the centre-line note above). The tab runs from 6 px to the bar's bottom
+     edge, so the active tab, page-coloured with an accent cap, covers the bar's bottom line and reads as raised. */
+  .title-bar .title-tab,
+  .title-bar .title-gear {
+    margin: 6px 0 0;
+    padding: 0 0 7px;
+    border: 1px solid transparent;
+    border-bottom: 0;
+    border-radius: 10px 10px 0 0;
+    overflow: hidden;
+  }
+
+  .title-bar .title-tab {
+    flex: 0 1 auto;
+    min-width: 0;
+    margin-right: 2px;
+    padding-right: 14px;
+    padding-left: 14px;
+    color: #7f9bb5;
+    font-size: inherit;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    line-height: 1;
+    text-transform: uppercase;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .title-bar .title-tab:hover:not(:disabled),
+  .title-bar .title-gear:hover:not(:disabled) {
+    color: #e3f3ff;
+    background: rgba(102, 192, 244, 0.07);
+  }
+
+  .title-bar .title-tab.active,
+  .title-bar .title-gear.active {
     color: #f4fbff;
     background: #0b141f;
-    border-color: #2d4560;
-    border-bottom: 1px solid #0b141f;
+    border-color: var(--window-line-color);
     box-shadow: inset 0 2px 0 #66c0f4;
   }
 
-  .tabs button.tab.active:hover:not(:disabled) {
+  .title-bar .title-tab.active:hover:not(:disabled),
+  .title-bar .title-gear.active:hover:not(:disabled) {
     color: #f4fbff;
     background: #0b141f;
+  }
+
+  /* Narrow windows (the 900 px minimum): tab padding and tracking shrink first. A label that still does not fit is
+     clipped with an ellipsis, so the controls never overlap and the bar never wraps. */
+  @media (max-width: 1040px) {
+    .title-bar .title-tab {
+      padding-right: 9px;
+      padding-left: 9px;
+      font-size: 12px;
+      letter-spacing: 0.03em;
+    }
+  }
+
+  .title-fill {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .title-divider {
+    flex: 0 0 auto;
+    align-self: center;
+    width: 1px;
+    height: 20px;
+    margin: 0 4px;
+    background: var(--window-line-color);
+  }
+
+  /* Window controls and the gear: all 46 px wide and they never shrink or wrap. The controls run the full bar height (a
+     42 px target); the gear is the same width but a folder tab like the tabs (it must sit below the 5 px resize strip). */
+  .title-bar .title-control {
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    width: 46px;
+  }
+
+  .title-control svg {
+    display: block;
+  }
+
+  .title-bar .title-control:not(.title-gear):hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.08);
+    color: #f4fbff;
+  }
+
+  .title-bar .title-control:not(.title-gear):active:not(:disabled) {
+    background: rgba(255, 255, 255, 0.14);
+  }
+
+  .title-bar .title-control.title-close:hover:not(:disabled),
+  .title-bar .title-control.title-close:active:not(:disabled) {
+    background: #c42b1c;
+    color: #ffffff;
+  }
+
+  /* Custom document scrollbar (ScrollBar.svelte). Fixed below the title bar: top = bar height plus --content-top-gap (level with the top of the
+     content), right = --resize-inset-right (6 px, clear of Wails' 5 px right strip), bottom = --resize-inset-bottom (15 px, so the track end stays out of the
+     bottom-right resize corner square). 14 px hit area in every state: hover and drag change colour only, so nothing
+     shifts. The groove is a faint 8 px pill (::before); the thumb is a 14 px box with 3 px transparent borders and
+     background-clip: padding-box, which leaves an 8 px pill. z-index 900: over the page, under the context menu (1000),
+     the title bar (1100) and the modal backdrop (1200). no-drag: Wails must not read the bar's drag value here. Hidden
+     (visibility, so it still has a measurable height) while the page does not overflow. */
+  .app-scrollbar {
+    --wails-draggable: no-drag;
+    position: fixed;
+    top: calc(var(--title-bar-height) + var(--content-top-gap));
+    right: var(--resize-inset-right);
+    bottom: var(--resize-inset-bottom);
+    z-index: 900;
+    width: 14px;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+    visibility: hidden;
+  }
+
+  .app-scrollbar.scrollable {
+    visibility: visible;
+  }
+
+  .app-scrollbar::before {
+    content: '';
+    position: absolute;
+    inset: 0 3px;
+    border-radius: 4px;
+    background-color: rgba(159, 183, 204, 0.06);
+    pointer-events: none;
+  }
+
+  .app-scrollbar-thumb {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 14px;
+    border: 3px solid transparent;
+    border-radius: 7px;
+    background-color: #3a566f;
+    background-clip: padding-box;
+    will-change: transform;
+  }
+
+  .app-scrollbar-thumb:hover {
+    background-color: #5b7f9d;
+  }
+
+  .app-scrollbar.dragging .app-scrollbar-thumb {
+    background-color: #66c0f4;
   }
 
   .view-toolbar {
@@ -1419,13 +1640,17 @@
     margin-top: 10px;
   }
 
-  /* overflow: auto lets a short window scroll the dialog instead of clipping its top edge (grid centring pushes an
-     overflowing child above the viewport, where nothing can scroll to). */
+  /* The backdrop starts below the title bar, so the bar's controls and drag area stay live while a dialog is open (D14).
+     The backdrop's overflow: auto is only a fallback; the dialog scrolls itself (.confirm-modal below), and the one row
+     is capped at the backdrop height, so nothing overflows the backdrop. */
   .modal-backdrop {
     position: fixed;
-    inset: 0;
+    inset: var(--title-bar-height) 0 0 0;
     z-index: 1200;
     display: grid;
+    /* One row sized to the backdrop, not to the dialog. An auto (implicit) row would grow with the dialog, so a
+       percentage max-height on the dialog would have no definite height to resolve against. */
+    grid-template-rows: minmax(0, 1fr);
     place-items: center;
     padding: 20px;
     overflow: auto;
@@ -1435,7 +1660,10 @@
 
   .confirm-modal {
     width: min(560px, 100%);
-    max-height: calc(100vh - 40px);
+    /* .modal-backdrop's single row is minmax(0, 1fr), so the grid area is definite: its height is the backdrop's
+       content box (the backdrop height less its 20 px padding). 100% then caps the dialog at the window height less the
+       bar and 40 px. The dialog scrolls inside (overflow auto) when the window is short. */
+    max-height: 100%;
     overflow: auto;
     padding: 20px;
     border-radius: 20px;
@@ -1625,8 +1853,7 @@
   }
 
   @media (max-width: 1180px) {
-    .dashboard-header,
-    .tabs {
+    .dashboard-header {
       font-size: 15px;
     }
 
@@ -1669,23 +1896,6 @@
       font-size: 22px;
     }
 
-    .tabs {
-      flex-wrap: wrap;
-      gap: 0.4em;
-      padding-left: 0;
-      border-bottom: 0;
-    }
-
-    .tabs button.tab {
-      margin-bottom: 0;
-      border: 1px solid transparent;
-      border-radius: 0.7em;
-    }
-
-    .tabs button.tab.active {
-      border-color: #2d4560;
-    }
-
     .confirm-card {
       flex-direction: column;
       align-items: stretch;
@@ -1718,8 +1928,12 @@
   }
 
   @media (max-width: 720px) {
+    :root {
+      --content-top-gap: 9px;
+    }
+
     .app-shell {
-      padding: 18px;
+      padding: var(--content-top-gap) 18px 18px;
     }
 
     .setup-panel {

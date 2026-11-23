@@ -24,6 +24,8 @@
   import SetupView from './lib/components/SetupView.svelte'
   import DashboardShell from './lib/components/DashboardShell.svelte'
   import ClearDataConfirmModal from './lib/components/ClearDataConfirmModal.svelte'
+  import TitleBar from './lib/components/TitleBar.svelte'
+  import ScrollBar from './lib/components/ScrollBar.svelte'
   import {AppMessage, formatMessage, formatPlaytime, integer, pct} from './lib/format.js'
   import {createUpdateStore} from './lib/update.js'
   import {
@@ -289,6 +291,9 @@
 
   function changeView(value) {
     if (value === activeView) return
+    // The document is the scroller, so a new view would open at the old view's scroll position. Reset it before the view
+    // swaps: Svelte updates the DOM in a microtask, so the new view is first painted already at the top.
+    window.scrollTo({top: 0, behavior: 'instant'})
     activeView = value
     activeTagFilter = ''
   }
@@ -373,11 +378,18 @@
     return target instanceof HTMLElement && Boolean(target.closest('button, a, [role="button"]'))
   }
 
+  // titleBarHeight reads --title-bar-height (style.css), so the menu clears the bar however the bar is sized.
+  function titleBarHeight() {
+    const value = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--title-bar-height'))
+    return Number.isFinite(value) && value > 0 ? value : 42
+  }
+
   function positionGameMenu() {
     if (!contextMenu || !contextMenuEl) return
     const rect = contextMenuEl.getBoundingClientRect()
     const left = Math.max(menuMargin, Math.min(contextMenu.x, window.innerWidth - rect.width - menuMargin))
-    const top = Math.max(menuMargin, Math.min(contextMenu.y, window.innerHeight - rect.height - menuMargin))
+    // The top clamp starts below the title bar: the bar (z 1100) sits over the menu (z 1000).
+    const top = Math.max(titleBarHeight() + menuMargin, Math.min(contextMenu.y, window.innerHeight - rect.height - menuMargin))
     contextMenu = {...contextMenu, left, top, ready: true}
   }
 
@@ -422,9 +434,20 @@
   $: filteredDisabled = disabled.filter((game) => matchesSearchQuery(game, normalizedViewSearch))
   $: viewFiltered = Boolean(viewSearch.trim() || activeTagFilter)
   $: clearConfirmText = state?.profile ? state.profile.steamId64 || state.profile.displayName : ''
+  // Same order as the screen switch below: the dashboard is the last branch.
+  $: dashboardShown = !loading && !state?.initError && Boolean(state?.apiKeyPresent) && Boolean(state?.profileExists)
 </script>
 
 <svelte:window on:click={closeGameMenu} on:keydown={handleGlobalKeydown} />
+
+<TitleBar
+  dashboard={dashboardShown}
+  {activeView}
+  tabsDisabled={clearConfirmOpen}
+  onActiveViewChange={changeView}
+  onBarPress={closeGameMenu}
+/>
+<ScrollBar />
 
 {#if loading}
   <main class="loading-screen">
@@ -475,7 +498,6 @@
     {savingSettings}
     onSyncNow={syncNow}
     onSetLibrarySettings={saveLibrarySettings}
-    onActiveViewChange={changeView}
     onViewSearch={(value) => (viewSearch = value)}
     onActiveTagFilter={(value) => (activeTagFilter = value)}
     onOpenGameMenu={openGameMenu}

@@ -1,6 +1,6 @@
 # App service (root package)
 
-This document describes the Go root package `main`: `main.go`, `app.go`, `app_update.go`, `covers.go`, `wailslog.go`, and the frontend binding contract built on them. For the surrounding layers, see [architecture.md](architecture.md).
+This document describes the Go root package `main`: `main.go`, `window.go`, `app.go`, `app_update.go`, `covers.go`, `wailslog.go`, and the frontend binding contract built on them. For the surrounding layers, see [architecture.md](architecture.md).
 
 Files and Go identifiers cited here are in the repository, except names from the Wails v3.1.0 module (for example `AssetFileServerFS`, `WebviewUserDataPath` and `ServiceOptions`). Line numbers are omitted on purpose.
 
@@ -8,12 +8,13 @@ Files and Go identifiers cited here are in the repository, except names from the
 
 | File | Contents |
 | --- | --- |
-| `main.go` | Embeds `frontend/dist` and the app icon, builds the Wails application, registers the two services, creates the window, runs the app. |
+| `main.go` | Embeds `frontend/dist` and the app icon, builds the Wails application, registers the two services, runs the app. |
+| `window.go` | `mainWindowOptions` (per-OS window options) and `setupMainWindow` (creates the frameless main window; see below). |
 | `app.go` | `App` type, `AppState` and `ProfilePreview` types, lifecycle hooks, the bound methods for the app's own actions, init, sync orchestration, state assembly, API key cache. |
 | `app_update.go` | Glue to the in-app updater (`internal/update`): the six update bindings, the update-check toggle, and the startup and shutdown hooks it calls. See [updater.md](updater.md). |
 | `covers.go` | `CoverService`, the `/game-covers` HTTP handler. |
 | `wailslog.go` | `logWriter` and `newWailsLogger`, which send Wails's own logging to `app.log`. |
-| `*_test.go` | `app_test.go`, `app_events_test.go`, `app_update_test.go`, `service_lifecycle_test.go`, `covers_test.go`, `wailslog_test.go`. |
+| `*_test.go` | `app_test.go`, `app_events_test.go`, `app_update_test.go`, `service_lifecycle_test.go`, `covers_test.go`, `wailslog_test.go`, `window_test.go`. |
 
 ## main.go
 
@@ -26,7 +27,10 @@ Files and Go identifiers cited here are in the repository, except names from the
   - `application.NewServiceWithOptions(NewCoverService(backend), ServiceOptions{Name: "covers", Route: "/game-covers"})`.
 - `backend.setEventEmitter(func(name string) { app.Event.Emit(name) })` connects the sync event to the event bus.
 - After `application.New`, before the window is created, `update.New(update.Deps{...})` builds the in-app updater around `app.Updater`. `backend.setUpdater` gives it to `App`, and `updates.Init()` reads the version stamp and configures the framework updater. Its `OnEvent` wires `app.Event.On` for the three framework events Go reads, and its `OnChanged` emits `update:changed`. See [updater.md](updater.md#wiring).
-- The window is `Steam Achievement Tracker`, 1280x980, minimum 900x650, background `RGB(27, 38, 54)`.
+- The window is `Steam Achievement Tracker`, 1280x980, minimum 900x650, background `RGB(27, 38, 54)`. The window is frameless and opaque, with the platform's default frameless decorations (no app-drawn radius, transparency or shadow; the frontend draws a 1 px outline around the window). The title bar is drawn by the frontend (`TitleBar.svelte`, see [frontend.md](frontend.md#title-bar-and-scroll-layout)). `window.go` builds the options (`mainWindowOptions`) and creates the window (`setupMainWindow`), before `app.Run`:
+  - Windows: `Frameless: true` at creation.
+  - Linux: Wails skips `gtk_window_set_title` when `Frameless` is set at creation (read from the Wails source; the upstream report is unchecked), so a window created frameless would likely have no title in the taskbar, task switcher and overview. So the window is created `Hidden` and decorated, and a one-shot `WindowLoadFinished` listener calls `SetFrameless(true)` and then `Show()`. `WindowLoadFinished` is used because Wails' own hook for that event injects the JS `frameless` flag (which the runtime's resize zones need) from the options, and hooks run before listeners, so the listener's `SetFrameless` always pushes its flag last. It also fires after a failed page load, so the window is shown even if the frontend does not run (`WindowRuntimeReady` would not fire then, and the window would stay hidden). After `SetFrameless`, Wails ignores `SetTitle` on Linux.
+  - Provisional: the Windows path (issue #31, E3 option a) and the Linux sequence (candidate (i), E4) have only been exercised on a KDE Wayland dev build. See [testing.md](testing.md#title-bar-manual-checks).
 - `app.Run()` blocks. A `Run` error is fatal (`log.Fatal`).
 
 ## App type

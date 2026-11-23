@@ -134,6 +134,30 @@ describe('App update integration', () => {
     expect(banner()).not.toBeInTheDocument()
   })
 
+  test('Settings shows the Updates section when the first update read lands after Settings was opened', async () => {
+    const user = userEvent.setup()
+    // The store is not loaded until GetUpdateState resolves. The gear opens Settings first; the section must appear
+    // once the snapshot arrives, with no reload.
+    let resolveRead
+    const pendingRead = new Promise((resolve) => {
+      resolveRead = resolve
+    })
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState()),
+      GetUpdateState: vi.fn(() => pendingRead)
+    })
+
+    render(App)
+    await openSettings(user)
+    await flush()
+    expect(screen.queryByRole('heading', {name: 'Updates'})).not.toBeInTheDocument()
+
+    resolveRead(updateSnapshot({checksEnabled: true}))
+
+    expect(await screen.findByRole('heading', {name: 'Updates'})).toBeInTheDocument()
+    expect(screen.getByRole('switch', {name: 'Check for updates on startup'})).toBeChecked()
+  })
+
   test('the Settings toggle reaches SetUpdateChecksEnabled through the app', async () => {
     const user = userEvent.setup()
     // The backend keeps the value it stored (true), not the one clicked (false): the box must snap back to it. Starting

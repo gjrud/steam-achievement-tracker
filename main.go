@@ -92,14 +92,7 @@ func main() {
 	backend.setUpdater(updates)
 	updates.Init()
 
-	app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Title:            "Steam Achievement Tracker",
-		Width:            1280,
-		Height:           980,
-		MinWidth:         900,
-		MinHeight:        650,
-		BackgroundColour: application.NewRGB(27, 38, 54),
-	})
+	setupMainWindow(app, runtime.GOOS)
 
 	// Run blocks until the application exits. The app quits when its last window closes (the default on Linux).
 	if err := app.Run(); err != nil {

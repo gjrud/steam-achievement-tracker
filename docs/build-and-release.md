@@ -141,7 +141,7 @@ The header of `build/config.yml` warns against running `common:update:build-asse
 
 The Wails CLI names the AppImage `steam-achievement-tracker-x86_64.AppImage` in `bin/` (for amd64). The release job renames it to `steam-achievement-tracker-linux-x86_64.AppImage`, the name the in-app updater matches (`internal/update/match.go`). Package files keep their names. The rename happens only in the release, so a local AppImage has the CLI name.
 
-An AppImage cannot install the desktop entry and icons that the window uses. AppImageLauncher renames the entry, so on KDE the taskbar and menu icons are right but the window title bar may show a generic icon. The packages install the entry and icons directly, and the user guide notes the difference.
+An AppImage cannot install the desktop entry and icons that the window uses. AppImageLauncher renames the entry, so on KDE the taskbar and menu icons are right. The window has no native title bar, so there is no title-bar icon to get wrong; the app's own title bar (drawn in the frontend) always shows its built-in icon. The packages install the entry and icons directly.
 
 ## Docker cross-compile image (build/docker/Dockerfile.cross)
 
@@ -288,6 +288,7 @@ The Wails version is specified in these places. Update them together:
 6. Regenerate bindings with `wails3 generate bindings`. Update `frontend/src/test/wails-app-mock.js` if the exported methods changed. The drift test enforces it.
 7. If the NSIS helper or its templates changed, regenerate `wails_tools.nsh` as described in the NSIS section, and do not run `update:build-assets` on `build/`.
 8. Dockerfile.cross does not pin the Wails version (it builds the module from the repo). Only the Go image tag is pinned there (`golang:1.27-trixie`). Check that it still matches `go.mod`'s Go version (`go 1.27.4`).
+9. Re-check the custom scrollbar's resize insets (`ScrollBar.svelte`, `.app-scrollbar` in `app.css`; `--resize-inset-right`, 6 px: just over the 5 px right strip; `--resize-inset-bottom`, 15 px: the corner square size; both in `frontend/src/style.css`; the thumb sits that far from the right and bottom edges, and the track starts at `--title-bar-height` plus `--content-top-gap`) against Wails' resize zones in `frontend/node_modules/@wailsio/runtime/dist/drag.js` (5 px along each edge, corners 5 px plus `resizeCornerExtra`). The zone widths come from `GetFlag("system.resizeHandleWidth")` and `GetFlag("system.resizeHandleHeight")`, but on Windows the Go side writes them as a nested `system` map (`application_windows.go:83-86` in v3.1.0), so the flat lookup misses and the 5 px default applies whatever the system metric says. If a later Wails fixes that, the zone can change width: update the insets, then check the thumb on Windows as in [testing.md](testing.md#title-bar-manual-checks).
 
 Workflow or `changelog.sh` changes affect releases. For hosted validation, follow the authorization and `-rc` guidance in [Cutting a release](#cutting-a-release).
 
