@@ -48,10 +48,14 @@ func setupMainWindow(app *application.App, goos string) *application.WebviewWind
 		// too (not tested here). The GTK window exists by then, so SetFrameless reaches it.
 		//
 		// After this, Wails ignores SetTitle on Linux (linux_cgo.go setTitle skips Frameless windows).
+		//
+		// forceClientDecorations runs before Show: on GTK < 4.16 under Wayland, SetFrameless alone does not stop the
+		// compositor drawing a title bar (window_csd_gtk4.go). It is a no-op elsewhere.
 		var once sync.Once
 		win.OnWindowEvent(events.Linux.WindowLoadFinished, func(*application.WindowEvent) {
 			once.Do(func() {
 				win.SetFrameless(true)
+				forceClientDecorations(app, win)
 				win.Show()
 			})
 		})
