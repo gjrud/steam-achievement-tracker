@@ -3,7 +3,8 @@
   // reads --wails-draggable (app.css), and the buttons opt out with no-drag. Runes syntax (D15).
   import {onMount} from 'svelte'
   import {Events, Window} from '@wailsio/runtime'
-  // The real app icon: a copy of build/appicon.svg (see docs/frontend.md, refresh by hand when the source changes).
+  // The title bar's own icon artwork. It started as a copy of build/appicon.svg but no longer matches it: do not copy that
+  // file over it (see docs/frontend.md).
   import appIconUrl from '../../assets/appicon.svg'
 
   let {
@@ -85,7 +86,7 @@
 <header class="title-bar" onmousedown={handleBarMouseDown}>
   <!-- The icon is decorative: the image is not focusable and has no pointer events, so a press on it targets the icon span (the drag handle). -->
   <span class="title-icon" aria-hidden="true">
-    <img class="title-icon-img" src={appIconUrl} alt="" width="32" height="32" draggable="false" />
+    <img class="title-icon-img" src={appIconUrl} alt="" width="42" height="42" draggable="false" />
   </span>
   {#if dashboard}
     <nav class="title-tabs" aria-label="Dashboard views">

@@ -109,6 +109,29 @@ describe('scroll structure', () => {
 
     expect(screen.getByPlaceholderText('Search games in this view')).toHaveValue('p')
   })
+
+  test('changing view scrolls the document back to the top, and re-selecting the current view does not', async () => {
+    await renderWith(dashboardState())
+    // Record that the DOM still shows the old view when the scroll happens (the reset runs before Svelte flushes the view
+    // change). This catches a reset moved after the flush; it cannot tell the order of two statements in one tick.
+    const oldViewInDomAtScroll = []
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {
+      oldViewInDomAtScroll.push(screen.getByRole('button', {name: 'Not completed'}).getAttribute('aria-current') === 'page')
+    })
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', {name: 'Not completed'}))
+    expect(scrollTo).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', {name: 'Completed'}))
+    expect(scrollTo).toHaveBeenCalledTimes(1)
+    expect(scrollTo).toHaveBeenLastCalledWith({top: 0, behavior: 'instant'})
+    expect(oldViewInDomAtScroll).toEqual([true])
+
+    await user.click(screen.getByRole('button', {name: 'Settings'}))
+    expect(scrollTo).toHaveBeenCalledTimes(2)
+    expect(scrollTo).toHaveBeenLastCalledWith({top: 0, behavior: 'instant'})
+  })
 })
 
 describe('title bar and overlays', () => {

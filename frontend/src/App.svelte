@@ -291,6 +291,9 @@
 
   function changeView(value) {
     if (value === activeView) return
+    // The document is the scroller, so a new view would open at the old view's scroll position. Reset it before the view
+    // swaps: Svelte updates the DOM in a microtask, so the new view is first painted already at the top.
+    window.scrollTo({top: 0, behavior: 'instant'})
     activeView = value
     activeTagFilter = ''
   }

@@ -254,8 +254,8 @@
   }
 
   .app-shell {
-    /* Less space under the title bar (14 px) than at the sides and bottom (28 px): the sides set the card width. */
-    padding: 14px 28px 28px;
+    /* Less space under the title bar (--content-top-gap) than at the sides and bottom (28 px): the sides set the card width. */
+    padding: var(--content-top-gap) 28px 28px;
     width: 100%;
     margin: 0 auto;
     box-sizing: border-box;
@@ -634,15 +634,40 @@
     width: 48px;
   }
 
-  /* The app icon (src/assets/appicon.svg), 32 px: the artwork has about 9% padding inside its viewBox. pointer-events none
-     sends the press to the icon span, the drag handle. */
+  /* The title bar icon (src/assets/appicon.svg), as tall as the bar (42 px). The ring and trophy fill about 69% of the
+     viewBox, so the ring is about 29 px across its outer edge, centred on the bar's middle line. A taller image would
+     not stay centred: the span's auto grid row grows to the image and is aligned to the top of the span. pointer-events
+     none sends the press to the icon span, the drag handle. */
   .title-icon-img {
     display: block;
-    width: 32px;
-    height: 32px;
+    width: var(--title-bar-height);
+    height: var(--title-bar-height);
     pointer-events: none;
     user-select: none;
     -webkit-user-drag: none;
+  }
+
+  /* A fade under the bar, so content scrolling up does not stop at a hard edge. It is the page colour fading to clear,
+     --title-fade-height (20 px) tall, and nearly clear by 14 px (the gap under the bar at the top of the dashboard), so
+     the heading at rest is barely dimmed. It lies outside the bar's box and has no pointer events, so drag and clicks
+     underneath still work. It stops short of the custom scrollbar (its inset plus its 14 px width from the right edge),
+     so the thumb is not faded; no content sits in that strip. */
+  .title-bar::before {
+    content: '';
+    position: absolute;
+    top: 100%;
+    right: calc(var(--resize-inset-right) + 14px);
+    left: 0;
+    height: var(--title-fade-height);
+    background: linear-gradient(
+      to bottom,
+      #0b141f 0%,
+      rgba(11, 20, 31, 0.8) 20%,
+      rgba(11, 20, 31, 0.45) 45%,
+      rgba(11, 20, 31, 0.1) 70%,
+      rgba(11, 20, 31, 0) 100%
+    );
+    pointer-events: none;
   }
 
   .title-tabs {
@@ -753,8 +778,8 @@
     color: #ffffff;
   }
 
-  /* Custom document scrollbar (ScrollBar.svelte). Fixed below the title bar: top = bar height, right = --resize-inset-right
-     (6 px, clear of Wails' 5 px right strip), bottom = --resize-inset-bottom (15 px, so the track end stays out of the
+  /* Custom document scrollbar (ScrollBar.svelte). Fixed below the title bar: top = bar height plus --content-top-gap (level with the top of the
+     content), right = --resize-inset-right (6 px, clear of Wails' 5 px right strip), bottom = --resize-inset-bottom (15 px, so the track end stays out of the
      bottom-right resize corner square). 14 px hit area in every state: hover and drag change colour only, so nothing
      shifts. The groove is a faint 8 px pill (::before); the thumb is a 14 px box with 3 px transparent borders and
      background-clip: padding-box, which leaves an 8 px pill. z-index 900: over the page, under the context menu (1000),
@@ -763,7 +788,7 @@
   .app-scrollbar {
     --wails-draggable: no-drag;
     position: fixed;
-    top: var(--title-bar-height);
+    top: calc(var(--title-bar-height) + var(--content-top-gap));
     right: var(--resize-inset-right);
     bottom: var(--resize-inset-bottom);
     z-index: 900;
@@ -1903,8 +1928,12 @@
   }
 
   @media (max-width: 720px) {
+    :root {
+      --content-top-gap: 9px;
+    }
+
     .app-shell {
-      padding: 9px 18px 18px;
+      padding: var(--content-top-gap) 18px 18px;
     }
 
     .setup-panel {

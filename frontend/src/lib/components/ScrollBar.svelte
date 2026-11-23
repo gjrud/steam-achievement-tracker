@@ -1,6 +1,7 @@
 <script>
-  // Custom scrollbar for the document (runes, D15). The native scrollbar is hidden (style.css) because it would run the full
-  // window height beside the title bar. This one is position: fixed and starts below the bar (app.css .app-scrollbar).
+  // Custom scrollbar for the document (runes, D15). The native scrollbar is hidden (style.css) because it would run the
+  // full window height beside the title bar. This one is position: fixed and starts level with the top of the content,
+  // below the bar (app.css .app-scrollbar).
   // It only mirrors the page: wheel, keys, touch and find-in-page still scroll the document natively, so it is
   // aria-hidden and not focusable. Dragging the thumb or clicking the track just calls window.scrollTo.
   import {onMount} from 'svelte'
@@ -91,8 +92,8 @@
     }
   }
 
-  // A press on the track outside the thumb pages one track height toward the press. The track is the visible part below
-  // the title bar and above the bottom inset, so no content is skipped under the bar.
+  // A press on the track outside the thumb pages one track height toward the press. The track runs from the top of the
+  // content (title bar plus --content-top-gap) to the bottom inset, so no content is skipped under the bar.
   function onTrackDown(event) {
     if (event.button !== 0 || event.target !== trackEl) return
     event.preventDefault()

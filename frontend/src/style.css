@@ -2,6 +2,11 @@
   /* The app-drawn title bar (TitleBar.svelte), fixed at the top of the window. The page content starts below it, and
      overlays (modal backdrop, context-menu clamp) start below it too. */
   --title-bar-height: 42px;
+  /* The fade under the bar (.title-bar::before in app.css). Scroll targets stop below it as well. */
+  --title-fade-height: 20px;
+  /* The space between the bar and the top of the dashboard content (.app-shell padding-top). The custom scrollbar starts
+     at the same line, so its track lines up with the top of the content. */
+  --content-top-gap: 14px;
   /* Insets that keep the custom scrollbar (ScrollBar.svelte) clear of Wails' resize zones
      (node_modules/@wailsio/runtime/dist/drag.js). Wails draws a 5 px strip along each edge. Each corner is a 15x15 px
      square (5 px plus cornerExtra 10 px), and a corner square needs both: within 15 px of the right edge and within 15 px
@@ -18,9 +23,9 @@ html {
   min-height: 100%;
   background: #0b141f;
   color: #f4fbff;
-  /* html is the scroller. Keyboard focus, find-in-page and scrollIntoView stop short of the fixed title bar, so a
-     target near the top of the viewport is not left under it. */
-  scroll-padding-top: var(--title-bar-height);
+  /* html is the scroller. Keyboard focus, find-in-page and scrollIntoView stop short of the fixed title bar and its
+     fade, so a target near the top of the viewport is not left under them. */
+  scroll-padding-top: calc(var(--title-bar-height) + var(--title-fade-height));
 }
 
 /* The document scrolls (not an inner box: dragging an inner scroller's thumb was choppy in WebKitGTK). The native
