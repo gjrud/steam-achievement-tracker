@@ -5,7 +5,7 @@ import ScrollBar from './ScrollBar.svelte'
 
 // jsdom does no layout, so every metric the component reads is defined here: the document's scrollHeight and clientHeight,
 // window.scrollY, and the track's clientHeight and top. Layout used throughout unless a test says otherwise:
-// 600 px viewport, 3000 px page, 537 px track (600 - 48 bar - 15 inset). Thumb = 537 * 600 / 3000 = 107.4 px, travel = 429.6 px,
+// 600 px viewport, 3000 px page, 537 px track (an example height; the real one is 600 minus the bar and the bottom inset). Thumb = 537 * 600 / 3000 = 107.4 px, travel = 429.6 px,
 // range = 2400 px.
 const VIEWPORT = 600
 const TOTAL = 3000
@@ -38,7 +38,7 @@ function layout({viewport = VIEWPORT, total = TOTAL, y = 0} = {}) {
 }
 
 // The track only exists after render: its metrics are defined on the element, then a resize event re-measures.
-function layoutTrack({height = TRACK, top = 48} = {}) {
+function layoutTrack({height = TRACK, top = 42} = {}) {
   const el = track()
   define(el, 'clientHeight', height)
   el.getBoundingClientRect = () => ({top, bottom: top + height, left: 0, right: 14, width: 14, height, x: 0, y: top})
@@ -393,7 +393,7 @@ describe('ScrollBar track click', () => {
   test('a press above the thumb pages one track height up', async () => {
     await mount({y: 1800})
 
-    // The thumb is at 322.2 in the track, so 48 + 322.2 on screen; 100 is above it.
+    // The thumb is at 322.2 in the track, so 42 + 322.2 on screen; 100 is above it.
     await fireEvent.pointerDown(track(), {button: 0, clientY: 100, pointerId: 1})
 
     expect(scrollTo).toHaveBeenCalledWith({top: 1800 - TRACK, behavior: 'instant'})

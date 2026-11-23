@@ -1,7 +1,7 @@
 :root {
   /* The app-drawn title bar (TitleBar.svelte), fixed at the top of the window. The page content starts below it, and
      overlays (modal backdrop, context-menu clamp) start below it too. */
-  --title-bar-height: 48px;
+  --title-bar-height: 42px;
   /* Insets that keep the custom scrollbar (ScrollBar.svelte) clear of Wails' resize zones
      (node_modules/@wailsio/runtime/dist/drag.js). Wails draws a 5 px strip along each edge. Each corner is a 15x15 px
      square (5 px plus cornerExtra 10 px), and a corner square needs both: within 15 px of the right edge and within 15 px

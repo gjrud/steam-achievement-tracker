@@ -562,16 +562,16 @@
     color: #a9c3da;
   }
 
-  /* Title bar (TitleBar.svelte), 48 px at the top of the window. --wails-draggable is inherited, so the icon, the gaps
+  /* Title bar (TitleBar.svelte), 42 px at the top of the window. --wails-draggable is inherited, so the icon, the gaps
      and the empty fill drag the window; every button sets no-drag (Wails reads the computed value, see docs/frontend.md).
      The bar is position: fixed, so the document scrolling under it never moves it (#app is padded by its height).
 
      One centre line: every item (icon, tab labels, gear glyph, the three control glyphs) is centred on the bar's vertical
-     middle, y = 24 px. The bar has no CSS border: its bottom line is the ::after below, drawn inside the 48 px, so the
-     content box is the full 48 px and the middle lands on a whole pixel (1 px strokes stay sharp).
-       - icon span and window controls: full height (0 to 48), centred by the grid.
-       - tabs and the gear: folder tabs from 6 px (below Wails' 5 px top resize strip) to 48 px, 42 px tall. The 1 px top
-         border plus 7 px bottom padding put the content box on 7 to 41, whose middle is 24. */
+     middle, y = 21 px. The bar has no CSS border: its bottom line is the ::after below, drawn inside the 42 px, so the
+     content box is the full 42 px and the middle lands on a whole pixel (1 px strokes stay sharp).
+       - icon span and window controls: full height (0 to 42), centred by the grid.
+       - tabs and the gear: folder tabs from 6 px (below Wails' 5 px top resize strip) to 42 px, 36 px tall. The 1 px top
+         border plus 7 px bottom padding put the content box on 7 to 35, whose middle is 21. */
   .title-bar {
     position: fixed;
     top: 0;
@@ -634,7 +634,7 @@
   }
 
   /* The app icon (src/assets/appicon.svg), 32 px: the artwork has about 9% padding inside its viewBox. pointer-events none
-     sends the press to the 48 px span, the drag handle. */
+     sends the press to the icon span, the drag handle. */
   .title-icon-img {
     display: block;
     width: 32px;
@@ -725,7 +725,7 @@
   }
 
   /* Window controls and the gear: all 46 px wide and they never shrink or wrap. The controls run the full bar height (a
-     48 px target); the gear is the same width but a folder tab like the tabs (it must sit below the 5 px resize strip). */
+     42 px target); the gear is the same width but a folder tab like the tabs (it must sit below the 5 px resize strip). */
   .title-bar .title-control {
     flex: 0 0 auto;
     display: grid;

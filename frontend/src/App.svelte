@@ -378,7 +378,7 @@
   // titleBarHeight reads --title-bar-height (style.css), so the menu clears the bar however the bar is sized.
   function titleBarHeight() {
     const value = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--title-bar-height'))
-    return Number.isFinite(value) && value > 0 ? value : 48
+    return Number.isFinite(value) && value > 0 ? value : 42
   }
 
   function positionGameMenu() {

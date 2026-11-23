@@ -1,5 +1,5 @@
 <script>
-  // App-drawn title bar (48 px). It sits above the screen switch on every screen. The bar is the drag handle: Wails
+  // App-drawn title bar (42 px). It sits above the screen switch on every screen. The bar is the drag handle: Wails
   // reads --wails-draggable (app.css), and the buttons opt out with no-drag. Runes syntax (D15).
   import {onMount} from 'svelte'
   import {Events, Window} from '@wailsio/runtime'
@@ -83,7 +83,7 @@
      so the static-element warning does not apply (a header with no role is a static element for Svelte). -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <header class="title-bar" onmousedown={handleBarMouseDown}>
-  <!-- The icon is decorative: the image is not focusable and has no pointer events, so a press on it targets the 48 px span (the drag handle). -->
+  <!-- The icon is decorative: the image is not focusable and has no pointer events, so a press on it targets the icon span (the drag handle). -->
   <span class="title-icon" aria-hidden="true">
     <img class="title-icon-img" src={appIconUrl} alt="" width="32" height="32" draggable="false" />
   </span>

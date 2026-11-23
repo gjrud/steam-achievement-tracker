@@ -131,8 +131,8 @@ describe('title bar and overlays', () => {
 
     const menu = await screen.findByRole('menu')
     await waitFor(() => expect(menu.style.visibility).toBe('visible'))
-    // 48 px bar (--title-bar-height, read from the stylesheet or its 48 px fallback in jsdom) plus the 12 px menu margin.
-    expect(parseFloat(menu.style.top)).toBe(60)
+    // 42 px bar (--title-bar-height, read from the stylesheet or its 42 px fallback in jsdom) plus the 12 px menu margin.
+    expect(parseFloat(menu.style.top)).toBe(54)
   })
 
   test('the top clamp reads --title-bar-height, so a taller bar pushes the menu lower', async () => {
