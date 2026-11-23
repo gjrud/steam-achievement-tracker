@@ -215,7 +215,7 @@ Rules when writing frontend tests:
 
 Vitest covers the bar's DOM, ARIA, keyboard order, the maximise state from the events, the window calls, the modal's disabled tabs and gear, and the custom scrollbar's math. Jsdom loads no CSS and does no layout or window management, so the items below are manual. Run them on a production build (`wails3 build`, not `wails3 dev`: debug builds always show the native context menu) on KDE Wayland and on Windows 11. Record results in the PR.
 
-Go tests (`window_test.go`) cover only the window options per OS. The window itself (`window.go`) is manual, on both OSes, including the Windows frameless creation and, on Linux, the hidden-then-frameless sequence: also check that the window title shows in the taskbar, task switcher and overview, and note any native-frame flash at startup.
+Go tests (`window_test.go`) cover only the window options per OS. The window itself (`window.go`) is manual, on both OSes, including the Windows frameless creation and, on Linux, the hidden-then-frameless sequence and, on GTK older than 4.16 under Wayland, the empty titlebar set before `Show` (see the GTK 4.14 check below): also check that the window title shows in the taskbar, task switcher and overview, and note any native-frame flash at startup.
 
 - Frameless window: no native title bar; the window is opaque with no app-drawn corner radius, transparency or shadow; platform default decorations. Windows 11 shows the Wails default frameless decorations. If they are missing, record it; the owner decides.
 - Bar on every screen (loading, startup error, missing key, profile setup, dashboard): 42 px high, in the order icon, four tabs, gear, controls on the dashboard; icon and controls only on the other screens; no tab row in the dashboard body.
@@ -246,6 +246,8 @@ Go tests (`window_test.go`) cover only the window options per OS. The window its
 - Focus under the bar: scroll so a game card sits near the top of the viewport, then Tab to it (or use find-in-page to reach it). Its focus ring must be fully visible below the title bar and its fade, not under them (`html { scroll-padding-top }` in `style.css`).
 - The context menu opens near the bar and stays inside the window. Right-click on the bar shows no native menu in a production build.
 - Linux title (KDE Wayland): the window title shows in the taskbar, the task switcher and the overview. If it does not, record it as the limitation chosen in the spike (E1).
+- Linux GTK 4.14 (the AppImage's bundled GTK) on KDE Wayland, with `forceClientDecorations` (`window_csd_gtk4.go`). Verified: no KWin title bar; window title shows in the taskbar, task switcher and overview; square, opaque corners and no shadow halo (zoomed screenshot); edge resize from all four edges and all four corners; drag on the app title bar (double-click does nothing by design, per the E7 option b decision: Wails' double-click handler is macOS-only; see [frontend.md](frontend.md#title-bar-and-scroll-layout)). Not verified: maximize, restore and tile (snap). Not verified: the GTK >= 4.16 path visually (it should be unchanged; run the same checks there).
+- Linux GTK 4.14 (Ubuntu 24.04 deb, system GTK) on GNOME Wayland (Mutter): expect no visible change from before the step: borderless, square corners, no shadow or inset from the `csd` class, edge resize works. Not verified.
 
 ### Drift checks (`wails-bindings.test.js`)
 
