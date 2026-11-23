@@ -15,7 +15,17 @@ export const Call = {RuntimeError}
 
 const listeners = new Map()
 
+// Event names as the runtime's Events.Types exposes them (the common:* window events the title bar uses).
+const Types = {
+  Common: {
+    WindowMaximise: 'common:WindowMaximise',
+    WindowUnMaximise: 'common:WindowUnMaximise',
+    WindowRestore: 'common:WindowRestore'
+  }
+}
+
 export const Events = {
+  Types,
   // On mirrors the runtime: it returns a function that removes this subscription.
   On(name, callback) {
     let set = listeners.get(name)
@@ -32,6 +42,48 @@ export const Events = {
       if (current.size === 0) listeners.delete(name)
     }
   }
+}
+
+// Window stands in for the runtime's thisWindow. Maximised state is kept here so IsMaximised reports what the last
+// ToggleMaximise (or __setMaximised) set. ToggleMaximise emits the matching common:* event, as Wails does. Each
+// window call is recorded so tests can assert which calls ran.
+let maximised = false
+let windowCalls = []
+
+function record(name) {
+  windowCalls.push(name)
+  return Promise.resolve()
+}
+
+export const Window = {
+  Minimise() {
+    return record('Minimise')
+  },
+  Close() {
+    return record('Close')
+  },
+  ToggleMaximise() {
+    windowCalls.push('ToggleMaximise')
+    maximised = !maximised
+    __emitWailsEvent(maximised ? Types.Common.WindowMaximise : Types.Common.WindowUnMaximise)
+    return Promise.resolve()
+  },
+  IsMaximised() {
+    return Promise.resolve(maximised)
+  }
+}
+
+export function __setMaximised(value) {
+  maximised = Boolean(value)
+}
+
+export function __windowCalls() {
+  return [...windowCalls]
+}
+
+export function __resetWindow() {
+  maximised = false
+  windowCalls = []
 }
 
 // Browser.OpenURL records the URL instead of opening anything. __failBrowserOpen makes the next calls reject, the way

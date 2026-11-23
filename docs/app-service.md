@@ -26,7 +26,7 @@ Files and Go identifiers cited here are in the repository, except names from the
   - `application.NewServiceWithOptions(NewCoverService(backend), ServiceOptions{Name: "covers", Route: "/game-covers"})`.
 - `backend.setEventEmitter(func(name string) { app.Event.Emit(name) })` connects the sync event to the event bus.
 - After `application.New`, before the window is created, `update.New(update.Deps{...})` builds the in-app updater around `app.Updater`. `backend.setUpdater` gives it to `App`, and `updates.Init()` reads the version stamp and configures the framework updater. Its `OnEvent` wires `app.Event.On` for the three framework events Go reads, and its `OnChanged` emits `update:changed`. See [updater.md](updater.md#wiring).
-- The window is `Steam Achievement Tracker`, 1280x980, minimum 900x650, background `RGB(27, 38, 54)`.
+- The window is `Steam Achievement Tracker`, 1280x980, minimum 900x650, background `RGB(27, 38, 54)`. The window is still created with its native frame. The title bar is drawn by the frontend (`TitleBar.svelte`, see [frontend.md](frontend.md#title-bar-and-scroll-layout)); frameless creation is pending the window-setup spike (issue #31), and until it lands the native title bar is drawn above the app's own bar.
 - `app.Run()` blocks. A `Run` error is fatal (`log.Fatal`).
 
 ## App type

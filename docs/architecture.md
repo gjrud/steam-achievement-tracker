@@ -103,7 +103,7 @@ Arrows indicate call direction. `Syncer` reports state changes to `App` through 
 2. On Windows only, the WebView2 profile folder (`<cache>/webview`) is created before the window. If that fails, the profile path is left empty so Wails uses its default. Linux does not use a WebView2 profile.
 3. `application.New` is called with the Wails logger (`newWailsLogger(logWriter{})`), the icon, the platform options (WebView2 profile path, GTK application id), and two services: `App` (no route) and `CoverService` (route `/game-covers`, name `covers`).
 4. `backend.setEventEmitter` hands the app's event bus to `App`. The emitter is set before `Run`, so events from the first sync are delivered.
-5. The main window is created (1280x980, minimum 900x650) with `app.Window.NewWithOptions`.
+5. The main window is created (1280x980, minimum 900x650) with `app.Window.NewWithOptions`. It still has the native frame; the frameless step is pending (see [app-service.md](app-service.md)). The app's title bar is part of the frontend.
 6. `app.Run()` starts the services. Wails v3.1.0 starts services inside `Run` before pending windows are run, and it attaches each service's `Route` to the asset server at that point.
 
 `ServiceStartup` on `App` then runs the initialization sequence (`ensureInitialized`, in `app.go`):

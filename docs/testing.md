@@ -193,11 +193,13 @@ Suites:
 | --- | --- |
 | `src/App.test.js` | Setup states, API key flows, profile validation and save, dashboard views and tag filters, search, card covers, Wails call failures in each action, previously completed flag, keyboard shortcuts, clear-data dialog, library settings. |
 | `src/App.sync.test.js` | Event-driven refresh with fake timers: one read per event, coalesced bursts, follow-up reads, reads overtaken by actions, the 2 s retry while a sync runs, retry cancellation on success and unmount, unsubscribe on unmount. |
-| `src/App.incremental.test.js` | Incremental grid with a controllable `IntersectionObserver` stub (`stubIntersectionObserver`): batch size 48, resets, spacer height, viewport-sized growth, focus handoff without scrolling. |
+| `src/App.incremental.test.js` | Incremental grid with a controllable `IntersectionObserver` stub (`stubIntersectionObserver`): batch size 48, resets, spacer height, viewport-sized growth, focus handoff without scrolling. The observer has no root (the viewport), and the focus handoff is checked by spying on `window.scrollTo` and `scrollIntoView`, since jsdom does not scroll. |
+| `src/App.titlebar.test.js` | The title bar on every screen, the removed dashboard tab row, the document-scroll structure (no inner scroller, the custom scrollbar beside the bar), tab clicks not taking focus, Escape and bar presses closing the context menu, the context menu clamped below the bar, and the disabled tabs and gear while the clear-data dialog is open. |
+| `src/lib/components/ScrollBar.test.js` | The custom scrollbar (jsdom has no layout, so `scrollHeight`, `clientHeight`, `scrollY` and the track's size are mocked): hidden without overflow, thumb size with the 48 px floor and its position, one update per frame on scroll and resize, `ResizeObserver` growth and its absence, thumb drag math (delta * range / travel), clamping, release and cancel, and track-click paging. |
 | `src/lib/format.test.js` | Formatting helpers. |
 | `src/lib/sync.test.js` | `syncBand` for every run status and the announce text. |
 | `src/lib/tag.test.js` | Tag derivation, order, tones, labels, and count consistency between `tagCountsFromGames` and the per-tag reference. |
-| `src/lib/components/*.test.js` | `ApiKeyForm`, `ClearDataConfirmModal`, `ProfileCard` (fake timers for the 30 s refresh), `SettingsView`, `SummaryStats`. |
+| `src/lib/components/*.test.js` | `ApiKeyForm`, `ClearDataConfirmModal`, `ProfileCard` (fake timers for the 30 s refresh), `ScrollBar` (mocked layout: thumb size and position, drag, track paging), `SettingsView`, `SummaryStats`, `TitleBar` (DOM, ARIA, keyboard, window calls, maximise state from the events). |
 | `src/lib/update.test.js`, `src/lib/components/UpdateBanner.test.js`, `src/lib/components/UpdateSettings.test.js`, `src/App.update.test.js` | The in-app update store, banner, Settings section and the update flow in `App.svelte`, all against the mocked update bindings. No test calls GitHub. |
 | `src/test/wails-bindings.test.js` | Drift checks (below). |
 
@@ -205,8 +207,41 @@ Shared helpers (`src/test/app-fixtures.js`; the update tests use `src/test/updat
 
 Rules when writing frontend tests:
 
-- `setup.js` resets runtime event listeners and the Browser mock after each test. Tests that change backend handlers must call `__resetWailsMocks()` in `afterEach` (the App test files do).
+- `setup.js` resets runtime event listeners, the Browser mock and the Window mock after each test. Tests that change backend handlers must call `__resetWailsMocks()` in `afterEach` (the App test files do).
 - Under fake timers, use `advance()` and `settle()`. `waitFor` and `userEvent` rely on timers that the fake clock never fires; drive those tests with `fireEvent`. `app-fixtures.js` says the same.
+
+### Title bar manual checks
+
+Vitest covers the bar's DOM, ARIA, keyboard order, the maximise state from the events, the window calls, the modal's disabled tabs and gear, and the custom scrollbar's math. Jsdom loads no CSS and does no layout or window management, so the items below are manual. Run them on a production build (`wails3 build`, not `wails3 dev`: debug builds always show the native context menu) on KDE Wayland and on Windows 11. Record results in the PR.
+
+Window setup first: the frameless creation step (issue #31, section 5.1 step 1) is pending the spike. Until `main.go` creates the window frameless, the native title bar is still drawn, so the frameless items below wait for it.
+
+- Frameless window (after window setup lands): no native title bar; the window is opaque with no app-drawn corner radius, transparency or shadow; platform default decorations. Windows 11 shows the Wails default frameless decorations. If they are missing, record it; the owner decides.
+- Bar on every screen (loading, startup error, missing key, profile setup, dashboard): 48 px high, in the order icon, four tabs, gear, controls on the dashboard; icon and controls only on the other screens; no tab row in the dashboard body.
+- Hover, pressed and keyboard focus (`:focus-visible`) are visible on tabs, the gear and the controls, and the focus ring is not clipped at the bar's edges.
+- Maximize state after each of: Windows: Win+Up, Win+Down, snap, the maximize button, drag-restore, startup. KDE: the KWin maximize shortcut, the maximize button, drag-restore, startup. The glyph and the label must match the window.
+- Dragging the empty bar, the icon, or the gap between tabs moves the window. Tabs, the gear and the controls do not start a drag.
+- Resize from each of the 8 zones starts a resize with the edge under the pointer (KDE Wayland: 5 of 5 tries per zone, gate a). A plain click on close fires.
+- Maximized: the bar sits at the top of the screen. On Windows, nothing is under the taskbar.
+- At 900 px wide: the bar does not wrap, the controls stay fully visible, and tab labels are clipped (ellipsis) rather than overlapping. Measure the free drag area and record it.
+- Escape closes the context menu or the clear-data dialog with focus in the bar.
+- A mousedown on the empty bar leaves focus where it was: in the search box, or in the dialog's input. A tab click does not take focus either (the bar cancels it).
+- Clear-data dialog open: the backdrop starts below the bar; the window controls and the drag area work; the tabs and the gear are disabled.
+- The page scrolls as a document under the fixed bar, which never moves. The incremental grid loads the next batch near the bottom of the page (scroll to the bottom and check the count rises). There is no native scrollbar: nothing is drawn beside the title bar, and the content keeps the full window width.
+- Scrollbar versus resize (both OSes): press and drag the thumb, and press the track near its top and bottom ends. No resize starts: the cursor does not turn into a resize cursor over the scrollbar, which sits 6 px in from the right edge (just clear of the 5 px strip), and the track's bottom end sits 15 px above the window's bottom edge (clear of the bottom-right corner square). Also check the track's top end: it starts at y = 48, below the title bar, so the bar's 5 px top strip does not reach it and nothing is drawn over the bar. Wails' zones are 5 px along each edge and 15 px at the corners; the insets are `--resize-inset-right` and `--resize-inset-bottom` in `style.css`.
+- Bar alignment: the icon, the four tab labels, the gear glyph and the minimize, maximize and close glyphs share one horizontal centre line (y = 24 px). Look for a label or glyph that sits higher or lower than its neighbours, and for blurry (half-pixel) 1 px lines in the control glyphs. The gear and the controls are the same width, and the divider sits between the gear and Minimize.
+- Margins and card width: on the dashboard the content is 28 px from the window's left and right edges (above the 720 px breakpoint), the cards are 218 px wide at a 1210 px window, and the tag "New achievements added" stays on one line (24 px tall). The loading, startup error, setup and Settings screens are centred in the window. The scrollbar takes no layout space.
+- Scrollbar look: the custom scrollbar is the same width at rest, on hover and while dragging, so nothing shifts under the pointer. A faint groove runs the track's full height; the thumb is a rounded steel-blue bar, lighter on hover and accent blue while dragged. There are no arrow buttons and no corner square. On a very long list (thousands of games) the thumb is at least 48 px long and can be grabbed. The thumb is hidden on Settings and on any view short enough to fit. Check on WebView2 (Windows 11) and WebKitGTK (KDE Wayland). If the platform draws its own scrollbar next to ours, record it.
+- Scrollbar smoothness (WebKitGTK especially): on Not completed, switch to Completed and back, then drag the thumb a long way. The drag and the wheel stay smooth; the page follows the pointer 1:1 (the thumb does not lag or stall). This is why the page scrolls as a document and not in an inner box.
+- Scrollbar interaction: a click on the track above or below the thumb pages one track height (the window height less the title bar and the bottom inset), so no content is skipped under the bar. The wheel over the scrollbar scrolls the page. The thumb follows the page when it grows (scroll to the bottom of a long list and let the next batch load). With the clear-data dialog open, the backdrop covers the scrollbar and it cannot be dragged.
+- Scrollbar drag release: press and drag the thumb, release the mouse button outside the window, then move the pointer back in. The thumb must no longer follow the pointer.
+- The track's end is clear of the bottom-right corner: dragging the window's bottom-right corner still resizes it, and a press on the last pixels of the track does not start a resize.
+- Title bar icon: the bar shows the app icon (not a placeholder glyph). A press on the icon drags the window.
+- Clear-data dialog in a short window (about 600 px high): the dialog's `max-height` is 100% of the backdrop's grid row, so its content scrolls and the confirm and cancel buttons stay reachable on WebKitGTK and WebView2.
+- PgUp, PgDn, Home, End and Space scroll the page natively, also after a tab click (focus stays where it was, since the bar cancels the focus change).
+- Focus under the bar: scroll so a game card sits near the top of the viewport, then Tab to it (or use find-in-page to reach it). Its focus ring must be fully visible below the title bar, not under it (`html { scroll-padding-top }` in `style.css`).
+- The context menu opens near the bar and stays inside the window. Right-click on the bar shows no native menu in a production build.
+- Linux title (KDE Wayland): the window title shows in the taskbar, the task switcher and the overview. If it does not, record it as the limitation chosen in the spike (E1).
 
 ### Drift checks (`wails-bindings.test.js`)
 

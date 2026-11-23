@@ -32,7 +32,6 @@
   export let savingSettings = false
   export let onSyncNow = () => {}
   export let onSetLibrarySettings = () => {}
-  export let onActiveViewChange = () => {}
   export let onViewSearch = () => {}
   export let onActiveTagFilter = () => {}
   export let onOpenGameMenu = () => {}
@@ -71,7 +70,6 @@
   </header>
   <UpdateBanner {updates} />
   {#if error}<div class="banner error-banner" aria-live="polite">{error}</div>{/if}
-  <nav class="tabs" aria-label="Dashboard views"><button class="tab" class:active={activeView === 'suggestions'} aria-current={activeView === 'suggestions' ? 'page' : undefined} on:click={() => onActiveViewChange('suggestions')}>Not completed</button><button class="tab" class:active={activeView === 'completed'} aria-current={activeView === 'completed' ? 'page' : undefined} on:click={() => onActiveViewChange('completed')}>Completed</button><button class="tab" class:active={activeView === 'warnings'} aria-current={activeView === 'warnings' ? 'page' : undefined} on:click={() => onActiveViewChange('warnings')}>Sync errors</button><button class="tab" class:active={activeView === 'disabled'} aria-current={activeView === 'disabled' ? 'page' : undefined} on:click={() => onActiveViewChange('disabled')}>Disabled</button><button class="tab tab-settings" class:active={activeView === 'settings'} aria-current={activeView === 'settings' ? 'page' : undefined} on:click={() => onActiveViewChange('settings')}>Settings</button></nav>
   {#if activeView !== 'settings'}
     <section class="view-toolbar" aria-label="Search current view"><input bind:this={viewSearchInput} class="search-input" type="search" placeholder="Search games in this view" bind:value={viewSearch} on:input={(e) => onViewSearch(e.currentTarget.value)} />{#if tagFilterVisible}<div class="tag-filter-panel" aria-label={tagFilterLabel}><div class="tag-filter-heading"><span>Filter by tag</span>{#if activeTagFilter}<button class="link-button" on:click={() => onActiveTagFilter('')}>Clear tag filter</button>{/if}</div><div class="tag-filter-list"><button class="tag tag-filter" class:active={!activeTagFilter} aria-pressed={!activeTagFilter} on:click={() => onActiveTagFilter('')}>All <span>{integer(tagFilterGames.length)}</span></button>{#each visibleTagFilterOptions as tag}<button class={`tag tag-filter ${toneClass(tagTone(tag))}`} class:active={activeTagFilter === tag} aria-pressed={activeTagFilter === tag} on:click={() => onActiveTagFilter(tag)}>{tagLabel(tag)} <span>{integer(tagFilterCounts[tag])}</span></button>{/each}</div></div>{/if}</section>
   {/if}
