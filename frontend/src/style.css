@@ -17,6 +17,10 @@
      sizes change, re-check these (docs/build-and-release.md#upgrading-wails). */
   --resize-inset-right: 6px;
   --resize-inset-bottom: 15px;
+  /* The window's structural lines: the outline around the window (body::after), the title bar's bottom line
+     (.title-bar::after in app.css), the border of the active title tab and gear, and the divider between the bar's
+     controls. One variable, so they always match. */
+  --window-line-color: #2d4560;
 }
 
 html {
@@ -43,6 +47,42 @@ body {
   color: #f4fbff;
   font-family: Inter, "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
   min-height: 100vh;
+}
+
+/* The title bar's fade (.title-bar::before in app.css), mirrored at the bottom edge: clear at the top, the page colour
+   at the window's bottom edge, --title-fade-height tall, so content scrolling down does not stop at a hard edge. It is
+   nearly clear by 14 px from the edge, so the 28 px bottom padding of the content (.app-shell) leaves the last row
+   undimmed. Like the top fade it stops short of the custom scrollbar (its inset plus its 14 px width), so the thumb is
+   not faded, and it has no pointer events. z-index 800: over the page, under the scrollbar (900), the context menu
+   (1000) and the modal (1200). */
+body::before {
+  content: "";
+  position: fixed;
+  right: calc(var(--resize-inset-right) + 14px);
+  bottom: 0;
+  left: 0;
+  height: var(--title-fade-height);
+  background: linear-gradient(
+    to top,
+    #0b141f 0%,
+    rgba(11, 20, 31, 0.8) 20%,
+    rgba(11, 20, 31, 0.45) 45%,
+    rgba(11, 20, 31, 0.1) 70%,
+    rgba(11, 20, 31, 0) 100%
+  );
+  pointer-events: none;
+  z-index: 800;
+}
+
+/* 1 px outline around the whole window, drawn above everything and click-through. It gives the frameless window a
+   visible edge. */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  border: 1px solid var(--window-line-color);
+  pointer-events: none;
+  z-index: 2147483647;
 }
 
 /* The title bar is position: fixed, so the content is pushed down by its height. */
