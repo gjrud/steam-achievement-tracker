@@ -102,6 +102,7 @@ func fakeEnv(goos, exe string, vars map[string]string) hostEnv {
 		getenv:     func(k string) string { return vars[k] },
 		executable: func() (string, error) { return exe, nil },
 		stat:       os.Stat,
+		tempDir:    func() string { return "" },
 	}
 }
 

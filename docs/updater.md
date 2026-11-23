@@ -9,7 +9,7 @@ The updater wraps the framework updater from Wails v3.1.0 (`pkg/updater`, provid
 | Install | Behavior |
 | --- | --- |
 | Windows portable exe | Updated in place. |
-| Windows per-user installed exe (`%LocalAppData%\Programs\Steam Achievement Tracker\`) | Updated in place. "Apps & Features" keeps the old version (see [Known limitations](#known-limitations)). |
+| Windows per-user installed exe (`%LocalAppData%\Programs\Steam Achievement Tracker\`) | Updated in place. The app sets the "Apps & Features" version at its next start (see [After an update](#after-an-update)). |
 | Linux AppImage | Updated in place, when the process runs from that AppImage. |
 | Linux deb, rpm, Arch package, or any other Linux copy | Notify only. The banner shows the version and the release link. Install is never offered. |
 | Other platforms | The check fails: `matchAsset` finds no asset, so the provider returns an error. No supported build reaches this. |
@@ -37,6 +37,7 @@ To test the updater on a local build, stamp it with an old version: `VERSION=0.0
 - `main.go` creates the service after `application.New` and before the window: `update.New(update.Deps{...})`, then `backend.setUpdater`, then `updates.Init()`. The dependencies are the framework updater (`app.Updater`), the app lifetime context, `app.Event.On` (for the framework events Go listens to), the settings reader (`backend.updateChecksEnabled`, which the service caches), and `OnChanged`, which emits `update:changed`.
 - `Init` reads the stamp. With a valid stamp it builds one stock GitHub provider and calls the framework `Updater.Init`. Its configuration is `CurrentVersion` (the stamp), `Providers` (the provider), and `Window: WindowNone`. It has no `CheckInterval` and no `PublicKey`. If `Init` fails, the service is unavailable and logs `update: unavailable: other` once, after logging is up. No secret or key is involved.
 - `App.ServiceStartup` runs `StartupCheck` only after `ensureInitialized` succeeds. When init fails, the startup check is skipped (there is no database to read the toggle from), and the update UI does not show on the setup or init-error screens.
+- `App.ServiceStartup` calls `startUpdateHousekeeping` (which calls `RunPostUpdate`) right after `logUpdateInitFailure` and before the init-error return. The post-update work therefore runs even when the database fails to open. See [After an update](#after-an-update).
 - `App.ServiceShutdown` calls `stopUpdates` (`Shutdown`) before it waits for syncs (see [Shutdown and restart safety](#shutdown-and-restart-safety)).
 
 ### Provider configuration
@@ -219,6 +220,15 @@ The snapshot carries the current error sentence in `error`. The frontend also sh
 
 Settings read errors log `update: settings unreadable: update checks off` once per load. The app also logs `update: unavailable: other` when `Init` fails.
 
+The post-update work (see [After an update](#after-an-update)) logs only when it does something or fails, and never a path or raw error text:
+
+| Log line | When |
+| --- | --- |
+| `update: installed version registered` | The Apps & Features version was written. |
+| `update: version sync failed: other` | The registry read or write failed. |
+| `update: cleanup: removed <n> leftovers` | The sweep removed `<n>` files or folders. |
+| `update: cleanup: <n> leftovers could not be removed` | `<n>` removals failed, for example a file still held open. |
+
 Log lines never contain a full path. Framework messages such as `ErrHelperNotReady` text, which can carry paths, are not logged or returned.
 
 ## Shutdown and restart safety
@@ -239,6 +249,13 @@ Consequences:
 - A restart does not lose data: the database closes after the bounded wait, and the new process opens it normally.
 - Closing the app without applying a staged update removes the staged folder, so no full-size copy of the update stays next to the exe or the AppImage.
 
+## After an update
+
+`RunPostUpdate` (`internal/update/postupdate.go`) runs on every start of a stamped build, from `ServiceStartup`. It does nothing when the updater is unavailable (dev, Docker and untagged builds, tests). It starts one goroutine per process. No update state is stored: each start works from what is on disk and in the registry.
+
+- Apps & Features (Windows, per-user installed copy only). At once, on every start, the app reads the HKCU uninstall entry that the installer writes: `Software\Microsoft\Windows\CurrentVersion\Uninstall\gjrudSteam Achievement Tracker` (64-bit view). It writes `DisplayVersion` only when the stored value differs from the running version and `DisplayIcon` is the running exe. The value written is the numeric core of the running version. A pre-release part is dropped, as the installer drops it (`1.2.3-rc.1` writes `1.2.3`). A missing key (portable exe) or another install's entry is left alone. The key name must match `UNINST_KEY_NAME` in `build/windows/nsis/wails_tools.nsh`.
+- Leftover files. Five seconds after startup, or never if the app shuts down first. See [Staging and leftover files](#staging-and-leftover-files).
+
 ## Staging and leftover files
 
 The framework creates a `wails-update-*` directory next to the target (the exe or the AppImage). Several files can be left behind:
@@ -246,18 +263,30 @@ The framework creates a `wails-update-*` directory next to the target (the exe o
 | Path | Left when |
 | --- | --- |
 | `<target>.bak` (next to the AppImage on Linux, next to the exe on Windows) | the helper's copy of the previous version. The successful path deletes it, and a restore renames it back. It stays when the helper stops mid-update or a restore fails. |
-| `<exe>.old.<UnixNano>` (Windows, next to the exe) | every successful Windows update while the old file is still in use. A later update's helper removes them when Windows allows. |
+| `<exe>.old.<UnixNano>` (Windows, next to the exe) | every successful Windows update while the old file is still in use. A later update's helper, or the app at its next start, removes them when Windows allows. |
 | a `wails-update-*` directory next to the target | a helper failure, a crash or a kill during an update. A staged update that was never applied is removed at shutdown. |
-| `wails-update-<pid>.log` in the OS temp directory | every update attempt that starts the helper. It holds full paths, usually including the OS user name, and the framework never removes it. |
+| `wails-update-<pid>.log` in the OS temp directory | every update attempt that starts the helper. It holds full paths, usually including the OS user name. The framework never removes it; the app does at a later start, once the log is more than 10 minutes old (see below). |
 
-There is no startup sweep. The NSIS uninstaller deletes `<exe>.old.*` and `<exe>.bak` in the install folder before its non-recursive `RMDir` (see [platform.md](platform.md#updater-leftovers)). A leftover `wails-update-*` directory inside the install folder would make that `RMDir` fail, and the install folder stays.
+The startup sweep (`sweepLeftovers`) runs once per start, five seconds after startup (`cleanupDelay`). The delay lets the helper finish its own cleanup of `.bak` and the staging folder first. Each candidate is checked before it is removed:
+
+- `<target>.bak`: a regular file or symlink, never a directory, last modified more than 10 minutes ago (`leftoverMinAge`).
+- on Windows only, `<exe>.old.<digits>` regular files next to the exe. The `<exe>.old.` part matches in any letter case, and the rest must be one or more ASCII digits; any other name stays. There is no age limit: Windows keeps the file until the old process has exited, and its mtime is the old build's time. Elsewhere the match is case-sensitive.
+- `wails-update-*` folders next to the target. A folder is removed only when it is flat (regular files only, no subfolders and no symlinks) and neither the folder nor any file in it was changed in the last 10 minutes. It is never the folder that holds the staged payload, and none is removed while an update is downloading, verifying, installing, ready or restarting.
+- `wails-update-<digits>.log` regular files in the OS temp directory (the name must match exactly), once the log was last written more than 10 minutes ago (`leftoverMinAge`). A log from a failed update is therefore removed at the first start at least 10 minutes after it was written; a restart sooner keeps it. The sweep skips the temp logs while the phase is `restarting`, because that log belongs to the live helper.
+
+The age and shape checks cover a second instance of the app. There is no single-instance lock, and the target folder can be shared with another app. A concurrent update writes its files continuously, so its in-flight `.bak` and staging folder are young and are left alone. A folder that fails a check is skipped silently, and so is a file that vanished before its removal, or a temp log that another user owns (sticky `/tmp`). Those are not failures.
+
+The sweep never removes the target and never removes a tree. For a staging folder that passes the checks, it lists the folder's entries once, removes each listed file by name, then removes the folder with a non-recursive remove. A file added after the listing makes that last remove fail, so the folder and the new file stay and the failure is counted. If a listed file cannot be removed, the folder is not attempted. The sweep does nothing on a Linux package install (no target). Its log lines are counts only (see [Errors and logging](#errors-and-logging)). Nothing is logged when nothing is found.
+
+The NSIS uninstaller still deletes `<exe>.old.*` and `<exe>.bak` in the install folder before its non-recursive `RMDir` (see [platform.md](platform.md#updater-leftovers)). A leftover `wails-update-*` directory inside the install folder would make that `RMDir` fail, and the install folder stays. The startup sweep covers this only when the app starts again after the update.
 
 ## Known limitations
 
 - Update authenticity is not checked. The update is integrity-checked against a sums file from the same release.
 - Only part of the swap and relaunch can be checked before the first release that ships the updater (see [Acceptance checks](#acceptance-checks-without-automated-tests)). The rest, including the AppImage, is tested by that first real update. A bug there reaches users, who would reinstall by hand.
 - No rollback for a new version that starts and then crashes. Reinstall the same or a newer version. An older build refuses a database stamped with a newer schema (`internal/db`), so do not reinstall an older version after a newer one has run.
-- Windows installed copies show the old version in "Apps & Features" after an in-app update. The registry entry is not changed.
+- Apps & Features shows the old version from the update until the new version starts once. Then the app writes the numeric core of its version (see [After an update](#after-an-update)). This covers only the per-user (HKCU) installer entry. A machine-wide (HKLM) install is not supported by the updater, so its entry is never changed.
+- The pre-release part of a version is dropped from the Apps & Features version, as the installer drops it. A `1.2.3-rc.1` build shows `1.2.3`.
 - Portable exes keep their versioned download name (`...-<old>-windows-amd64-portable.exe`), so their name shows the old version. The AppImage asset name has no version, so it is unaffected unless the user renamed the file.
 - Unauthenticated GitHub rate limit: 60 requests per hour per IP. A check costs up to two requests. An Install costs a re-check (up to two) plus the download (one).
 - Installs into a folder that is not writable (for example a machine-wide Windows install) fail at download with the not-writable sentence and the release link. There is no probe before the download.
@@ -279,6 +308,7 @@ Some behavior depends on a real host, a real release, or timing. These are check
 7. A restart while a sync runs: the database is intact after restart. Shutdown finishes within the bound also with a sync that never ends.
 8. On the first release that ships the updater: the AppImage swap and relaunch, and the rollback when the new version cannot start.
 9. Stable and pre-release tags: a `-rc` release is never offered.
+10. Windows per-user installed copy (not the portable exe), updated in place: after the first start of the new version, Apps & Features shows the new version. About 5 s after that start, `<exe>.old.*` is gone. The `wails-update-<pid>.log` from the update stays until a start at least 10 minutes after the log was written, so a quick restart keeps it and a later start removes it. `<exe>.bak` and a `wails-update-*` folder are removed only when they are older than 10 minutes (a successful swap already removed them). Check `%LOCALAPPDATA%\Programs\Steam Achievement Tracker\` and `%TEMP%`.
 
 Every Install-dependent check (items 1 to 7) is Windows-only until the first release that ships the updater. The current release has no `steam-achievement-tracker-linux-x86_64.AppImage`, so on Linux the check fails with "Could not check for updates. Try again later." until a release renames the AppImage. After that release, Linux can be tested with `VERSION=0.0.1 wails3 package`, then running `bin/steam-achievement-tracker-x86_64.AppImage`. The matcher checks release asset names, not the local file name. Item 8 covers the AppImage swap and the rollback.
 
@@ -295,6 +325,8 @@ Code-review checks from the issue, not run by hand: AC 7, a failed `Updater.Init
 | `internal/update/client_test.go` | Provider against `httptest` through `githubConfig(base, client)`: the AppImage and portable selection with digest verification, missing checksum (notify-only), checksum fetch failure, no release, not newer, no asset for the platform. Also the provider config and the HTTP client without a total timeout. |
 | `internal/update/service_test.go` | The service with a fake environment (`fakeEnv`): unavailable without stamp (no log), refusals never reach the framework, pre-release screening (`TestScreenRelease`), the startup toggle read once, settings unreadable, init failure logged once, cancel and shutdown, concurrency with state. |
 | `internal/update/staging_test.go` | The staged-folder path (`stagingDirFor`): only `wails-update-*` directories are removed. |
+| `internal/update/postupdate_test.go` | The startup sweep (`sweepLeftovers`, `RunPostUpdate`): exact names, the Windows-only `.old` rule (case-insensitive on Windows only), the temp log pattern and age gate, the in-flight skip, quiet logging, and no sweep when unavailable or on a Linux package install. Also the pure version helpers (`displayVersion`, `sameFile`, `shouldWriteDisplayVersion`). |
+| `internal/update/postupdate_windows_test.go` | `syncDisplayVersion` against a throwaway HKCU key that the test creates and deletes (Windows only). |
 | `app_update_test.go` | Bound-method refusals without an updater give one sentence; the toggle persists; `GetUpdateState` reads no settings; the shutdown sync bound; a quiet shutdown. |
 
 Frontend: `App.update.test.js`, `lib/update.test.js`, `lib/components/UpdateBanner.test.js` and `UpdateSettings.test.js` use the mocked bindings and `frontend/src/test/update-fixtures.js`. No test calls GitHub.

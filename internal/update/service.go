@@ -111,6 +111,10 @@ type Service struct {
 	cancelled     bool
 	installCancel context.CancelFunc
 	unsubs        []func()
+	// postOnce makes RunPostUpdate start its goroutine once. postDone is closed when that goroutine returns; it is nil
+	// until RunPostUpdate starts one. Tests wait on it.
+	postOnce sync.Once
+	postDone chan struct{}
 	// initFailure is the category of a framework refusal in configure. It is logged once, by LogInitFailure, after
 	// logging is set up; empty when there is nothing to log.
 	initFailure category

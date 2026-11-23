@@ -59,6 +59,18 @@ func (a *App) startUpdateCheck() {
 	}
 }
 
+// startUpdateHousekeeping starts the update service's post-update work: the installed version sync and the leftover
+// sweep. ServiceStartup calls it on every start, before the init-error return, so it runs even when the app's own init
+// failed. The service does nothing when the updater is unavailable.
+func (a *App) startUpdateHousekeeping() {
+	a.mu.Lock()
+	svc := a.updates
+	a.mu.Unlock()
+	if svc != nil {
+		svc.RunPostUpdate()
+	}
+}
+
 // stopUpdates tells the update service that the app is closing. It never waits on a running update operation.
 func (a *App) stopUpdates() {
 	a.mu.Lock()
