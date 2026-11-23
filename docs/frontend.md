@@ -207,7 +207,7 @@ Behavior:
 
 ## Title bar and scroll layout
 
-The window's top edge is an app-drawn bar (`TitleBar.svelte`, height `--title-bar-height` = 48 px, defined in `style.css`). The same bar shows on every screen. Issue #31 covers the design; this section describes what the code does. The window is still created with its native frame (see [app-service.md](app-service.md)) until the window-setup step of #31 lands, so until then the native title bar is drawn above this one.
+The window's top edge is an app-drawn bar (`TitleBar.svelte`, height `--title-bar-height` = 48 px, defined in `style.css`). The same bar shows on every screen. Issue #31 covers the design; this section describes what the code does. The window is frameless (see [app-service.md](app-service.md)), so this bar replaces the native title bar.
 
 **Structure.** The document scrolls (`html` is the scroller, no inner scroll container). The bar is `position: fixed` (top, left and right 0, `z-index` 1100), so scrolling never moves it, and `#app` has `padding-top: var(--title-bar-height)` so the content starts below it. `html` has `scroll-padding-top: var(--title-bar-height)`, so keyboard focus, find-in-page and `scrollIntoView` stop short of the bar. The loading, setup and startup-error screens use `min-height: calc(100vh - var(--title-bar-height))`, so together with the padding they fill exactly one window. The native document scrollbar is hidden (`html::-webkit-scrollbar { width: 0; height: 0 }` in `style.css`), so the content keeps the full window width, and `ScrollBar.svelte` draws the bar instead, starting below the title bar.
 
@@ -260,10 +260,10 @@ Visual and drag checks on WebView2 and WebKitGTK are manual ([testing.md](testin
 - No blurred state for the bar (optional item; skipped).
 - Viewport height: `window.innerHeight` stays for `viewportBatch` and `positionGameMenu` (the document scrolls, so it is the viewport height).
 - Scroll position across views: kept, as it was before the title bar. The browser clamps it when a shorter list replaces the old one.
-- Background colours: the page keeps `#0b141f` (`style.css`), and the window keeps `RGB(27, 38, 54)` (`main.go`). The bar uses the page colour so the active tab reads as part of the page.
-- Linux window border: unchanged; it belongs with the window-setup change.
+- Background colours: the page keeps `#0b141f` (`style.css`), and the window keeps `RGB(27, 38, 54)` (`window.go`). The bar uses the page colour so the active tab reads as part of the page.
+- Linux window border: none added; the window keeps what GTK and the compositor give a frameless window.
 
-**Not in this change.** `main.go` still creates a decorated window: the frameless creation step (issue #31, section 5.1 step 1) waits for the spike. Until it lands, the native title bar is drawn above this one, and the controls here duplicate the native ones. Window options are described in [app-service.md](app-service.md).
+**Window creation.** The window is frameless, so this bar is the only title bar and its controls are the window's only on-screen controls. Creation is in `window.go` and is described in [app-service.md](app-service.md). If the frontend fails to load, the window has no controls; only window-manager shortcuts remain (no native fallback). On Linux the window is still shown in that case, because it is shown on `WindowLoadFinished`.
 
 ## Styling
 

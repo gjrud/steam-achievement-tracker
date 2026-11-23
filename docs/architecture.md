@@ -2,7 +2,7 @@
 
 This document explains the Steam Achievement Tracker's architecture: its layers, startup and shutdown sequence, frontend-to-backend communication, and handling of errors, secrets, and concurrency. It describes the code as of writing. The user guide, [../README.md](../README.md), covers user-facing behavior; the code remains the source of truth.
 
-The app is a Wails v3 desktop application for Linux and Windows 10+ (amd64). The Go backend lives at the repository root (`main.go`, `app.go`, `covers.go`, `wailslog.go`) and in `internal/`. The Svelte 5 frontend lives in `frontend/` and is embedded into the binary from `frontend/dist`.
+The app is a Wails v3 desktop application for Linux and Windows 10+ (amd64). The Go backend lives at the repository root (`main.go`, `window.go`, `app.go`, `covers.go`, `wailslog.go`) and in `internal/`. The Svelte 5 frontend lives in `frontend/` and is embedded into the binary from `frontend/dist`.
 
 ## Stack
 
@@ -23,7 +23,7 @@ Build steps and the release workflow are in [build-and-release.md](build-and-rel
 
 | Layer | Where | Role |
 | --- | --- | --- |
-| Wails shell | `main.go`, `wailslog.go` | Creates the `application.New` app, registers services, embeds assets, opens the window, bridges the Wails logger to `app.log`, emits the sync event. |
+| Wails shell | `main.go`, `window.go`, `wailslog.go` | Creates the `application.New` app, registers services, embeds assets, opens the window, bridges the Wails logger to `app.log`, emits the sync event. |
 | App service | `app.go` (`App`) | Bound to the frontend. Owns the lifetime context, the cached API key state, the sync goroutine, and the init sequence. Orchestrates every user action. |
 | Cover service | `covers.go` (`CoverService`) | Plain `http.Handler` mounted at `/game-covers`. Serves cached cover images from disk. Not bound to the frontend. |
 | Domain and infrastructure | `internal/*` | Paths, database, repository (SQL), Steam client, syncer, image cache, keyring, logging, updater and version stamp. Only `internal/update` imports a Wails package (`pkg/updater`), and never the application shell. |
@@ -41,7 +41,7 @@ flowchart TB
     Runtime["@wailsio/runtime (Events.On)"]
   end
 
-  subgraph Shell["Wails shell (main.go)"]
+  subgraph Shell["Wails shell (main.go, window.go)"]
     Assets["Embedded assets (frontend/dist)"]
     Route["/game-covers route"]
     Bus["app.Event.Emit"]
@@ -103,7 +103,7 @@ Arrows indicate call direction. `Syncer` reports state changes to `App` through 
 2. On Windows only, the WebView2 profile folder (`<cache>/webview`) is created before the window. If that fails, the profile path is left empty so Wails uses its default. Linux does not use a WebView2 profile.
 3. `application.New` is called with the Wails logger (`newWailsLogger(logWriter{})`), the icon, the platform options (WebView2 profile path, GTK application id), and two services: `App` (no route) and `CoverService` (route `/game-covers`, name `covers`).
 4. `backend.setEventEmitter` hands the app's event bus to `App`. The emitter is set before `Run`, so events from the first sync are delivered.
-5. The main window is created (1280x980, minimum 900x650) with `app.Window.NewWithOptions`. It still has the native frame; the frameless step is pending (see [app-service.md](app-service.md)). The app's title bar is part of the frontend.
+5. The main window is created (1280x980, minimum 900x650) by `setupMainWindow` (`window.go`). The window is frameless: Windows creates it frameless, Linux creates it hidden and decorated and makes it frameless and shows it when the page has loaded (see [app-service.md](app-service.md)). The app's title bar is part of the frontend.
 6. `app.Run()` starts the services. Wails v3.1.0 starts services inside `Run` before pending windows are run, and it attaches each service's `Route` to the asset server at that point.
 
 `ServiceStartup` on `App` then runs the initialization sequence (`ensureInitialized`, in `app.go`):
@@ -238,7 +238,8 @@ Nothing else is contacted. The "Get a Steam Web API key" link and the update ban
 
 | Package or file | Responsibility | Doc |
 | --- | --- | --- |
-| `main.go` | Wails application setup, embedded assets, window, service registration, event emitter and updater wiring | [app-service.md](app-service.md) |
+| `main.go` | Wails application setup, embedded assets, service registration, event emitter and updater wiring | [app-service.md](app-service.md) |
+| `window.go` | Main window options and frameless window setup | [app-service.md](app-service.md) |
 | `app.go` | `App` service: bound API, init, sync orchestration, state assembly, API key cache | [app-service.md](app-service.md) |
 | `app_update.go` | Glue between `App` and the updater: the six update bindings and the toggle | [app-service.md](app-service.md), [updater.md](updater.md) |
 | `internal/update` | In-app updater: GitHub provider, install gate, phase state machine, errors, staging cleanup | [updater.md](updater.md) |

@@ -52,7 +52,7 @@ I built this app for personal use, entirely through vibecoding. I have entry-lev
 
 Download a package for your distribution (deb, rpm, or Arch `pkg.tar.zst`) or the AppImage from the [GitHub Releases](https://github.com/gjrud/steam-achievement-tracker/releases) page. Each release lists `SHA256SUMS` for its files.
 
-The packages install the program, a menu entry, and app icons. The window and taskbar use the icon from that menu entry. The AppImage cannot install the menu entry itself, so on KDE its window title bar may show a generic icon. The title bar inside the app always shows the app's own icon.
+The packages install the program, a menu entry, and app icons. The window and taskbar use the icon from that menu entry. The title bar inside the app always shows the app's own icon.
 
 Removing the package removes only the program files. Your data, cache, logs, and saved API key stay (see [Data and privacy](#data-and-privacy)).
 

@@ -50,6 +50,7 @@ No Go test calls `t.Parallel`. Tests that modify process environment (XDG variab
 | `covers_test.go` | `CoverService` routing: prefix stripping, rejection of non-positive app ids, paths without a leading slash, invalid cover routes, serving of each cover kind, and a race test that reads app paths while `ensureInitialized` runs. |
 | `service_lifecycle_test.go` | `ServiceStartup` init failure (returns nil, reports the error), `ServiceShutdown` cancels the lifetime context, and `startSync` after shutdown returns `errShuttingDown`. A zero-value `App` has a background context that `ServiceShutdown` does not cancel (`TestAppLiteralContextIsBackground`). |
 | `wailslog_test.go` | Forwarding of Wails' `slog` output to the app log, and that Debug is disabled. |
+| `window_test.go` | `mainWindowOptions`: frameless from creation on Windows (default decorations kept), hidden and decorated at creation on Linux, and the shared title, size, minimum size and opaque background. |
 
 Helpers in this package: `openTestApp` (isolates directories, registers `logging.Fallback` and service shutdown in cleanup, and runs `ensureInitialized`), `newTestApp` (mocks the keyring, then calls `openTestApp`), `newTestAppWithKey` (same, with a key already stored), `newSteamStub` (an `httptest` server that records requests). Tests also set the `steamBaseURL` field of `App` (tests only) to point sync and validation at the stub.
 
@@ -214,9 +215,9 @@ Rules when writing frontend tests:
 
 Vitest covers the bar's DOM, ARIA, keyboard order, the maximise state from the events, the window calls, the modal's disabled tabs and gear, and the custom scrollbar's math. Jsdom loads no CSS and does no layout or window management, so the items below are manual. Run them on a production build (`wails3 build`, not `wails3 dev`: debug builds always show the native context menu) on KDE Wayland and on Windows 11. Record results in the PR.
 
-Window setup first: the frameless creation step (issue #31, section 5.1 step 1) is pending the spike. Until `main.go` creates the window frameless, the native title bar is still drawn, so the frameless items below wait for it.
+Go tests (`window_test.go`) cover only the window options per OS. The window itself (`window.go`) is manual, on both OSes, including the Windows frameless creation and, on Linux, the hidden-then-frameless sequence: also check that the window title shows in the taskbar, task switcher and overview, and note any native-frame flash at startup.
 
-- Frameless window (after window setup lands): no native title bar; the window is opaque with no app-drawn corner radius, transparency or shadow; platform default decorations. Windows 11 shows the Wails default frameless decorations. If they are missing, record it; the owner decides.
+- Frameless window: no native title bar; the window is opaque with no app-drawn corner radius, transparency or shadow; platform default decorations. Windows 11 shows the Wails default frameless decorations. If they are missing, record it; the owner decides.
 - Bar on every screen (loading, startup error, missing key, profile setup, dashboard): 48 px high, in the order icon, four tabs, gear, controls on the dashboard; icon and controls only on the other screens; no tab row in the dashboard body.
 - Hover, pressed and keyboard focus (`:focus-visible`) are visible on tabs, the gear and the controls, and the focus ring is not clipped at the bar's edges.
 - Maximize state after each of: Windows: Win+Up, Win+Down, snap, the maximize button, drag-restore, startup. KDE: the KWin maximize shortcut, the maximize button, drag-restore, startup. The glyph and the label must match the window.

@@ -141,7 +141,7 @@ The header of `build/config.yml` warns against running `common:update:build-asse
 
 The Wails CLI names the AppImage `steam-achievement-tracker-x86_64.AppImage` in `bin/` (for amd64). The release job renames it to `steam-achievement-tracker-linux-x86_64.AppImage`, the name the in-app updater matches (`internal/update/match.go`). Package files keep their names. The rename happens only in the release, so a local AppImage has the CLI name.
 
-An AppImage cannot install the desktop entry and icons that the window uses. AppImageLauncher renames the entry, so on KDE the taskbar and menu icons are right but the window's native title bar may show a generic icon. The app's own title bar (drawn in the frontend) always shows its built-in icon. The packages install the entry and icons directly, and the user guide notes the difference.
+An AppImage cannot install the desktop entry and icons that the window uses. AppImageLauncher renames the entry, so on KDE the taskbar and menu icons are right. The window has no native title bar, so there is no title-bar icon to get wrong; the app's own title bar (drawn in the frontend) always shows its built-in icon. The packages install the entry and icons directly.
 
 ## Docker cross-compile image (build/docker/Dockerfile.cross)
 
