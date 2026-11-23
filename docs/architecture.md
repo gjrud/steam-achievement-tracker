@@ -1,6 +1,6 @@
 # Architecture
 
-This document explains the Steam Achievement Tracker's architecture: its layers, startup and shutdown sequence, frontend-to-backend communication, and handling of errors, secrets, and concurrency. It describes the code as of writing. The user guide, [../README.md](../README.md), covers user-facing behavior; the code remains the source of truth.
+This document explains the Steam Achievement Tracker's architecture: its layers, startup and shutdown sequence, frontend-to-backend communication, and handling of errors, secrets, and concurrency. It describes the code as of writing. The [README](../README.md) covers user-facing behavior; the code remains the source of truth.
 
 The app is a Wails v3 desktop application for Linux and Windows 10+ (amd64). The Go backend lives at the repository root (`main.go`, `window.go`, `window_csd_gtk4.go`, `window_csd_other.go`, `app.go`, `covers.go`, `wailslog.go`) and in `internal/`. The Svelte 5 frontend lives in `frontend/` and is embedded into the binary from `frontend/dist`.
 

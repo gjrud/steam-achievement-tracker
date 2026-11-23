@@ -195,7 +195,7 @@ The `update.Snapshot` JSON fields are `unavailable`, `currentVersion`, `checksEn
 
 Input is trimmed first. An empty input is an error. `GetPlayerSummary` then fetches the display name and avatar (`avatarfull`, falling back to `avatarmedium`). No profile row is written by validation.
 
-The code treats a URL without a scheme, such as `steamcommunity.com/id/name`, as a vanity name, so the whole string goes to the vanity lookup and fails. The user guide asks for URLs with a scheme (`https://`). Any URL with a host is parsed (an error if no `/profiles/` or `/id/` segment matches), and anything else goes to the vanity lookup.
+The code treats a URL without a scheme, such as `steamcommunity.com/id/name`, as a vanity name, so the whole string goes to the vanity lookup and fails. The README asks for URLs with a scheme (`https://`). Any URL with a host is parsed (an error if no `/profiles/` or `/id/` segment matches), and anything else goes to the vanity lookup.
 
 `SaveProfile` takes the preview as given. It checks only that `steamId64` is not empty. It does not check the format and does not call Steam. The frontend passes back the object returned by `ValidateProfile`.
 
@@ -232,7 +232,7 @@ The sync client uses the profile's library settings: `SkipUnvettedApps = !includ
 6. Otherwise: `repo.ClearProfileData(profile.ID)` returns the image app ids that no remaining profile shows. Then `removeCachedGameImages` removes each `<GameImages>/<appid>` directory (`fsretry.RemoveAll`). Non-positive ids are skipped. A removal error is logged through `redact.Paths`; the bound method returns the generic sentence from the error boundary, so the cache root does not reach the UI.
 7. Returns `GetAppState`.
 
-Failures after step 4 leave the key deleted. Failures in image removal after the database commit leave some cached files behind. Log files are not removed by this action (see README "Log files").
+Failures after step 4 leave the key deleted. Failures in image removal after the database commit leave some cached files behind. Log files are not removed by this action (see the README "Remove the profile" section).
 
 ## API key save and retry
 
@@ -243,7 +243,7 @@ Failures after step 4 leave the key deleted. Failures in image removal after the
 - `requireAPIKey` calls `refreshAPIKey`, then returns the cached key, or `keyring.ErrMissing` when it is empty. `ValidateProfile` and `SyncNow` use it, so both always check the keyring first.
 - `startSync` uses the cached key without a re-read.
 
-Settings cannot change the key. A key can be replaced from the setup screen (`SaveAPIKey`). The user guide describes the screens.
+Settings cannot change the key. A key can be replaced from the setup screen (`SaveAPIKey`). The README describes the key setup steps.
 
 ## Flag and disable actions
 
@@ -330,7 +330,7 @@ Steps for a change to an exported method:
 
 ## Behavior notes
 
-These are behaviors that the code shows and that the user guide does not describe in detail:
+These are behaviors that the code shows and that the README does not describe:
 
 - A failed init is retried on every call: `ensureInitialized` returns the redacted error and leaves `initialized` false, so the next call runs the init steps again.
 - `SaveProfile` does not cancel a running sync. If one is running, the new profile's sync is not started (the error is dropped), and the running sync keeps going for the old profile. The frontend only shows the setup screen when no profile is active, so this needs a second profile to be saved while a sync runs.

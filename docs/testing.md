@@ -1,6 +1,6 @@
 # Testing
 
-This document describes the test strategy, layout, helpers and commands. The user guide ([../README.md](../README.md)) has no testing section. Suite coverage and guidance for adding tests are listed here.
+This document describes the test strategy, layout, helpers and commands. The [README](../README.md) lists only the basic test commands. Suite coverage and guidance for adding tests are listed here.
 
 In brief: Go tests exercise package APIs against real SQLite databases and a real on-disk image cache, while faking only the Steam and GitHub HTTP endpoints. Tests isolate state with temporary directories rather than filesystem mocks. Frontend tests run in jsdom against a mocked Wails binding layer and a mocked runtime; drift checks keep those mocks in step with the Go backend. Mutation testing (gremlins) is a local diagnostic, not a gate.
 

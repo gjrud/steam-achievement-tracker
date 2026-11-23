@@ -112,7 +112,7 @@ These modules contain pure functions and import only from one another, except `u
 
 ### Sync band wording
 
-`syncBand` (`lib/sync.js`) builds the profile card's band from the latest run. The user guide describes these states in plain language; the table lists the strings produced by the code:
+`syncBand` (`lib/sync.js`) builds the profile card's band from the latest run. The table lists the strings produced by the code:
 
 | Run state | Icon | Headline | Second line |
 | --- | --- | --- | --- |

@@ -1,6 +1,6 @@
 # In-app updater
 
-This document describes the in-app updater: how it finds a release, how a user-approved update is downloaded, verified, staged and applied, and what can go wrong. The user-facing rules are in the [user guide](../README.md#updates). The Go code is `internal/update` (the service, the GitHub provider setup, the phase rules, the errors), `internal/version` (the version stamp), and `app_update.go` (the bound methods). The frontend is covered in [frontend.md](frontend.md#update-banner-and-settings).
+This document describes the in-app updater: how it finds a release, how a user-approved update is downloaded, verified, staged and applied, and what can go wrong. The user-facing rules are in the [README](../README.md#updates). The Go code is `internal/update` (the service, the GitHub provider setup, the phase rules, the errors), `internal/version` (the version stamp), and `app_update.go` (the bound methods). The frontend is covered in [frontend.md](frontend.md#update-banner-and-settings).
 
 The updater wraps the framework updater from Wails v3.1.0 (`pkg/updater`, provider `github`). The service never uses the framework's `CheckAndInstall` or `CheckInterval`, because they download without asking. The framework's own UI is off (`updater.WindowNone`). The frontend never subscribes to the framework's `wails:updater:*` events: Go listens to three of them, and the frontend hears only the app's own `update:changed` event.
 

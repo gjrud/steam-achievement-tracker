@@ -1,6 +1,6 @@
 # Developer documentation
 
-These docs are for readers who want to understand the app's internals, change the code, build the app, or cut a release. The user guide, [../README.md](../README.md), covers installing, using and removing the app, and where its data lives. User-facing information belongs there; information about the code, build, or release belongs here.
+These docs are for developers: readers who want to understand the app's internals, change the code, build the app, or cut a release. Nothing here is needed to use the app; end users only need the [root README](../README.md). Information about the code, build, or release belongs here.
 
 ## Index
 
@@ -31,7 +31,7 @@ These docs are for readers who want to understand the app's internals, change th
 ## Conventions
 
 - These docs describe the code as it was when they were written. If a doc and the code disagree, the code is authoritative; update the doc in the same change.
-- The user guide, [../README.md](../README.md), is for end users. It describes user-visible behavior, install steps, requirements, data locations, privacy and troubleshooting. It has no developer internals. Developer docs link to it for user-facing behavior instead of repeating it. When a change alters what users see, update the guide and the matching doc here in the same change.
+- The root [README.md](../README.md) is the only user-facing document: overview, requirements, install, usage, updates, data and privacy, troubleshooting. Nothing under `docs/` is for end users, and the README has no developer internals beyond a short development overview. Developer docs link to the README for user-facing behavior instead of repeating it. When a change alters what users see, update the README and the matching doc here in the same change.
 - The code is the source of truth. Function, type, file and constant names are cited without line numbers, because line numbers drift.
 - Generated files (`frontend/bindings/`, `frontend/dist/`) are not documented line by line. Regenerate them rather than editing them.
 - Secrets never appear in examples. The Steam Web API key is written as `<key>` or described by name only.

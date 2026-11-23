@@ -1,6 +1,6 @@
 # Build, packaging and release
 
-This document covers how the app is built, packaged and released: prerequisites, local build commands, packaging files, the CI and release workflows, and the release procedure ([Cutting a release](#cutting-a-release)). The user-facing install steps are in the [user guide](../README.md#install). The authoritative [clean-checkout verification sequence](testing.md#clean-checkout-full-verification) is in testing.md; frontend build details are in [frontend.md](frontend.md).
+This document covers how the app is built, packaged and released: prerequisites, local build commands, packaging files, the CI and release workflows, and the release procedure ([Cutting a release](#cutting-a-release)). The user-facing install steps are in the [README](../README.md#install). The authoritative [clean-checkout verification sequence](testing.md#clean-checkout-full-verification) is in testing.md; frontend build details are in [frontend.md](frontend.md).
 
 ## Prerequisites
 
@@ -134,7 +134,7 @@ The header of `build/config.yml` warns against running `common:update:build-asse
   - `./build/linux/io.github.gjrud.steam-achievement-tracker.desktop` -> `/usr/share/applications/`
 - Dependencies: `libgtk-4-1`, `libwebkitgtk-6.0-4` (Debian names). `overrides` give the RPM names (`gtk4`, `webkitgtk6.0`) and the Arch names (`gtk4`, `webkitgtk-6.0`).
 - `scripts.postinstall`: `build/linux/nfpm/scripts/postinstall.sh`. It refreshes the desktop database, the hicolor icon cache, and the MIME database. The MIME step refers to `x-scheme-handler` custom URL schemes, but the app registers none (see Surprises below).
-- There is no pre-remove or post-remove script. Removing a package deletes only the installed files. The app's data, cache, state folders and the keyring item stay, which matches the user guide.
+- There is no pre-remove or post-remove script. Removing a package deletes only the installed files. The app's data, cache, state folders and the keyring item stay, which matches the README.
 
 ### AppImage (build/linux/appimage)
 

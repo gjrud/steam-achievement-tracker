@@ -291,7 +291,7 @@ Maintainers should know about these quirks in the current implementation.
 - **`partial` covers total failure.** A run where every game failed is `partial`, not `failed`. Only run-level errors make it `failed`.
 - **Counts appear late.** `games_total` is written with the first progress write, so the first game's progress is the first time the run shows a total.
 - **Two copies of the score formula.** `syncer.suggestionScore` and `repository.suggestionScoreOrFallback` both use `0.5/0.5`. Change both together.
-- **`In progress` depends on playtime.** The tag uses `playtime_forever > 0`. A game with playtime and no unlocked achievements is `in_progress`. The user guide describes the tag in the same terms, "the game has playtime", so the two agree; the tag is not based on unlocked achievements.
+- **`In progress` depends on playtime.** The tag uses `playtime_forever > 0`. A game with playtime and no unlocked achievements is `in_progress`. The README describes the tag in the same terms, "the game has playtime", so the two agree; the tag is not based on unlocked achievements.
 
 ## Tests
 
