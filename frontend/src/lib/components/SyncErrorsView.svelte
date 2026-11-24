@@ -1,20 +1,22 @@
 <script>
   import {formatDateTime} from '../format.js'
   import {gameTags} from '../tag.js'
-  export let games = []
-  export let viewSearch = ''
-  export let tagLabel
-  export let toneClass
-  export let tagTone
-  export let gameTitle
-  export let gameWarning
-  export let hasAchievements
-  export let shouldShowSyncErrorMessage
-  export let completionLabel
-  export let pct
-  export let gameActionLoading = false
-  export let onOpenGameMenu
-  export let onRunGameAction
+  let {
+    games = [],
+    viewSearch = '',
+    tagLabel,
+    toneClass,
+    tagTone,
+    gameTitle,
+    gameWarning,
+    hasAchievements,
+    shouldShowSyncErrorMessage,
+    completionLabel,
+    pct,
+    gameActionLoading = false,
+    onOpenGameMenu,
+    onRunGameAction
+  } = $props()
 </script>
 
 <section class="section-block">
@@ -22,13 +24,16 @@
   {#if games.length}
     <div class="sync-error-list">
       {#each games as game (game.entryKey)}
-        <article class="sync-error-row" title={gameWarning(game) || gameTitle(game)} on:contextmenu|preventDefault={(event) => onOpenGameMenu(event, game)}>
+        <article class="sync-error-row" title={gameWarning(game) || gameTitle(game)} oncontextmenu={(event) => {
+          event.preventDefault()
+          onOpenGameMenu(event, game)
+        }}>
           <div class="sync-error-main">
             <div class="sync-error-title"><span class="warning small" title={gameWarning(game)} aria-label={gameWarning(game)}>⚠</span><h3>{gameTitle(game)}</h3></div>
             <div class="sync-error-meta">{#each gameTags(game) as tag}<span class={`tag ${toneClass(tagTone(tag))}`}>{tagLabel(tag)}</span>{/each}{#if hasAchievements(game) || shouldShowSyncErrorMessage(game)}<span>{completionLabel(game)}</span>{/if}{#if hasAchievements(game)}<span>{pct(game.completionPercent)}</span>{/if}{#if game.lastSyncedAt}<span>Showing data from {formatDateTime(game.lastSyncedAt)}</span>{:else}<span>No previous sync data</span>{/if}{#if game.lastErrorAt}<span>Failed {formatDateTime(game.lastErrorAt)}</span>{/if}</div>
             {#if game.lastError}<p class="sync-error-detail">{game.lastError}</p>{/if}
           </div>
-          <button class="secondary" on:click={() => onRunGameAction('disable', game)} disabled={gameActionLoading}>Disable</button>
+          <button class="secondary" onclick={() => onRunGameAction('disable', game)} disabled={gameActionLoading}>Disable</button>
         </article>
       {/each}
     </div>

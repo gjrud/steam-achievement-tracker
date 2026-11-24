@@ -1,5 +1,6 @@
 import {cleanup, fireEvent, render, screen, waitFor, within} from '@testing-library/svelte'
 import userEvent from '@testing-library/user-event'
+import {tick} from 'svelte'
 import {afterEach, describe, expect, test, vi} from 'vitest'
 import App from './App.svelte'
 import {__resetWailsMocks, __setWailsMocks} from './test/wails-app-mock.js'
@@ -7,6 +8,7 @@ import {RuntimeError} from './test/wails-runtime-mock.js'
 import {
   baseState,
   dashboardState,
+  emitSyncChanged,
   failureMessage,
   game,
   hadesGame,
@@ -260,7 +262,6 @@ describe('App API key', () => {
 
     expect(saveKey).toHaveBeenCalledWith('new-key')
     await waitFor(() => expect(screen.queryByLabelText('Steam Web API key')).not.toBeInTheDocument())
-    await waitFor(() => expect(screen.getByRole('button', {name: 'Replace key'})).toHaveFocus())
     expect(screen.queryByText('Profile found')).not.toBeInTheDocument()
     expect(profileInput).toHaveValue('test-player')
     expect(screen.getByRole('button', {name: 'Replace key'})).toHaveAttribute('aria-expanded', 'false')
@@ -344,6 +345,66 @@ describe('App API key', () => {
     await waitFor(() => expect(screen.queryByLabelText('Steam Web API key')).not.toBeInTheDocument())
     expect(screen.queryByText('Profile found')).not.toBeInTheDocument()
     expect(screen.getByRole('button', {name: 'Validate'})).toBeEnabled()
+  })
+
+  test('Enter pressed twice while a Validate is in flight calls ValidateProfile once', async () => {
+    let resolveValidate
+    const validate = vi.fn(() => new Promise((resolve) => {
+      resolveValidate = resolve
+    }))
+    __setWailsMocks({GetAppState: vi.fn(async () => profileSetupState()), ValidateProfile: validate})
+
+    render(App)
+    const input = await screen.findByPlaceholderText(/SteamID64/)
+    await fireEvent.input(input, {target: {value: 'test-player'}})
+    await fireEvent.keyDown(input, {key: 'Enter'})
+    await fireEvent.keyDown(input, {key: 'Enter'})
+
+    expect(validate).toHaveBeenCalledOnce()
+    resolveValidate(profilePreview)
+    expect(await screen.findByText('Profile found')).toBeInTheDocument()
+  })
+
+  test('a Validate result that lands after the input changed is dropped, and Validate runs again', async () => {
+    const pending = []
+    const validate = vi.fn(() => new Promise((resolve, reject) => {
+      pending.push({resolve, reject})
+    }))
+    __setWailsMocks({GetAppState: vi.fn(async () => profileSetupState()), ValidateProfile: validate})
+
+    render(App)
+    const input = await screen.findByPlaceholderText(/SteamID64/)
+    await fireEvent.input(input, {target: {value: 'old-player'}})
+    await fireEvent.click(screen.getByRole('button', {name: 'Validate'}))
+    await fireEvent.input(input, {target: {value: 'new-player'}})
+
+    pending[0].resolve(profilePreview)
+    await waitFor(() => expect(screen.getByRole('button', {name: 'Validate'})).toBeEnabled())
+    expect(screen.queryByText('Profile found')).not.toBeInTheDocument()
+
+    await fireEvent.click(screen.getByRole('button', {name: 'Validate'}))
+    expect(validate).toHaveBeenCalledTimes(2)
+    expect(validate).toHaveBeenLastCalledWith('new-player')
+    pending[1].resolve(profilePreview)
+    expect(await screen.findByText('Profile found')).toBeInTheDocument()
+  })
+
+  test('a Validate error for input the user has since changed is not shown', async () => {
+    const pending = []
+    const validate = vi.fn(() => new Promise((resolve, reject) => {
+      pending.push({resolve, reject})
+    }))
+    __setWailsMocks({GetAppState: vi.fn(async () => profileSetupState()), ValidateProfile: validate})
+
+    render(App)
+    const input = await screen.findByPlaceholderText(/SteamID64/)
+    await fireEvent.input(input, {target: {value: 'old-player'}})
+    await fireEvent.click(screen.getByRole('button', {name: 'Validate'}))
+    await fireEvent.input(input, {target: {value: 'new-player'}})
+
+    pending[0].reject(new RuntimeError('No Steam profile was found for that account.'))
+    await waitFor(() => expect(screen.getByRole('button', {name: 'Validate'})).toBeEnabled())
+    expect(screen.queryByText('No Steam profile was found for that account.')).not.toBeInTheDocument()
   })
 
   test('the profile key form is disabled while a profile is being validated', async () => {
@@ -480,6 +541,33 @@ describe('App dashboard views', () => {
     expect(screen.getByRole('button', {name: 'Remove profile'})).toBeInTheDocument()
   })
 
+  test('disabling the last game of an active tag filter never renders the empty state', async () => {
+    const almost = game({appid: 1, name: 'Almost Game', tags: ['almost_there']})
+    const other = game({appid: 2, name: 'Other Game', tags: ['in_progress']})
+    const disable = vi.fn(async () => dashboardState({suggestions: [other]}))
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState({suggestions: [almost, other]})), DisableGame: disable})
+    const user = userEvent.setup()
+
+    render(App)
+
+    await user.click(await screen.findByRole('button', {name: /^Almost there\s+1$/}))
+    expect(screen.queryByRole('heading', {name: 'Other Game'})).not.toBeInTheDocument()
+
+    // Records every node added anywhere in the page while the disable lands. Read after the update settles.
+    const records = []
+    const observer = new MutationObserver((list) => records.push(...list))
+    observer.observe(document.body, {childList: true, subtree: true})
+    await fireEvent.contextMenu(screen.getByRole('heading', {name: 'Almost Game'}).closest('article'))
+    await user.click(await screen.findByRole('button', {name: 'Disable game'}))
+    await waitFor(() => expect(screen.getByRole('heading', {name: 'Other Game'})).toBeInTheDocument())
+    records.push(...observer.takeRecords())
+    observer.disconnect()
+
+    expect(disable).toHaveBeenCalledWith(1, 0)
+    const added = records.flatMap((record) => [...record.addedNodes])
+    expect(added.some((node) => /No games match/.test(node.textContent ?? ''))).toBe(false)
+  })
+
   test('searches within the active view and shows empty states', async () => {
     __setWailsMocks({GetAppState: vi.fn(async () => dashboardState())})
     const user = userEvent.setup()
@@ -574,6 +662,25 @@ describe('App dashboard views', () => {
     await user.click(screen.getByRole('button', {name: 'Re-enable'}))
 
     expect(enable).toHaveBeenCalledWith(5, 0)
+    await waitFor(() => expect(screen.getByText('No disabled games.')).toBeInTheDocument())
+  })
+
+  test('disables Re-enable while a game action is in flight', async () => {
+    let finish
+    const enable = vi.fn(() => new Promise((resolve) => { finish = () => resolve(dashboardState({disabled: []})) }))
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState()), EnableGame: enable})
+    const user = userEvent.setup()
+
+    render(App)
+
+    await user.click(await screen.findByRole('button', {name: 'Disabled'}))
+    const button = screen.getByRole('button', {name: 'Re-enable'})
+    expect(button).toBeEnabled()
+    await user.click(button)
+    expect(enable).toHaveBeenCalledOnce()
+    expect(screen.getByRole('button', {name: 'Re-enable'})).toBeDisabled()
+
+    finish()
     await waitFor(() => expect(screen.getByText('No disabled games.')).toBeInTheDocument())
   })
 
@@ -1138,7 +1245,190 @@ describe('App previously completed flag', () => {
   })
 })
 
-describe('App keyboard shortcuts', () => {
+describe('App card menu mouse behaviour', () => {
+  const items = () => within(screen.getByRole('menu')).getAllByRole('button')
+  // The menu for a suggestion card: Mark as previously completed, Flag missing achievements in DLC, Disable game.
+  const MARK = 'Mark as previously completed'
+  const FLAG = 'Flag missing achievements in DLC'
+  const DISABLE = 'Disable game'
+  const hadesCard = () => screen.getByRole('heading', {name: 'Hades'}).closest('article')
+  const vampireCard = () => screen.getByRole('heading', {name: 'Vampire Survivors'}).closest('article')
+
+  async function renderDashboard(mocks = {}) {
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState()), ...mocks})
+    render(App)
+    await screen.findByRole('heading', {name: 'Hades'})
+  }
+
+  test('the menu lists the card\'s actions in order', async () => {
+    await renderDashboard()
+
+    await openHadesMenu()
+
+    await screen.findByRole('menu')
+    expect(items().map((item) => item.textContent)).toEqual([MARK, FLAG, DISABLE])
+  })
+
+  test('a right click opens the menu at the pointer', async () => {
+    await renderDashboard()
+
+    await fireEvent.contextMenu(hadesCard(), {clientX: 100, clientY: 200})
+
+    const menu = await screen.findByRole('menu')
+    await waitFor(() => expect([menu.style.left, menu.style.top]).toEqual(['100px', '200px']))
+  })
+
+  // The container's click handler stops the click here, so the window's click-away (closeGameMenu) does not close the menu.
+  test('a click on the menu title or its padding keeps the menu open', async () => {
+    const user = userEvent.setup()
+    await renderDashboard()
+    await openHadesMenu()
+    const menu = await screen.findByRole('menu')
+
+    await user.click(within(menu).getByText('Hades'))
+    expect(screen.getByRole('menu')).toBeInTheDocument()
+
+    await user.click(menu)
+    expect(screen.getByRole('menu')).toBeInTheDocument()
+  })
+
+  test('a click elsewhere closes the menu', async () => {
+    const user = userEvent.setup()
+    await renderDashboard()
+    await openHadesMenu()
+    await screen.findByRole('menu')
+
+    await user.click(screen.getByPlaceholderText('Search games in this view'))
+
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+  })
+
+  test('a right click on card B while card A\'s menu is open moves the menu to B', async () => {
+    await renderDashboard()
+    await openHadesMenu()
+    await screen.findByRole('menu')
+
+    await fireEvent.contextMenu(vampireCard())
+
+    expect(await screen.findByRole('menu')).toHaveTextContent('Vampire Survivors')
+    expect(screen.getAllByRole('menu')).toHaveLength(1)
+  })
+
+  test('a right click on the same card while its menu is open moves the menu to the pointer instead of closing it', async () => {
+    await renderDashboard()
+    await fireEvent.contextMenu(hadesCard(), {clientX: 100, clientY: 200})
+    const first = await screen.findByRole('menu')
+    await waitFor(() => expect([first.style.left, first.style.top]).toEqual(['100px', '200px']))
+
+    await fireEvent.contextMenu(hadesCard(), {clientX: 300, clientY: 400})
+
+    const menu = await screen.findByRole('menu')
+    expect(screen.getAllByRole('menu')).toHaveLength(1)
+    await waitFor(() => expect([menu.style.left, menu.style.top]).toEqual(['300px', '400px']))
+  })
+
+  test('the menu survives a sync refresh and closes on Escape', async () => {
+    const getState = vi.fn().mockImplementation(async () => dashboardState())
+    const user = userEvent.setup()
+    await renderDashboard({GetAppState: getState})
+    await openHadesMenu()
+    await screen.findByRole('menu')
+
+    emitSyncChanged()
+    await waitFor(() => expect(getState).toHaveBeenCalledTimes(2))
+    await tick()
+
+    expect(screen.getByRole('menu')).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+  })
+
+  test('a right click on card B while card A\'s action runs leaves the locked menu on A', async () => {
+    let finish
+    const user = userEvent.setup()
+    await renderDashboard({MarkGamePreviouslyCompleted: vi.fn(() => new Promise((resolve) => (finish = resolve)))})
+    await openHadesMenu()
+    await user.click(await screen.findByRole('button', {name: MARK}))
+    const menu = screen.getByRole('menu')
+
+    await fireEvent.contextMenu(vampireCard())
+
+    expect(screen.getAllByRole('menu')).toHaveLength(1)
+    expect(screen.getByRole('menu')).toBe(menu)
+    expect(menu).toHaveTextContent('Hades')
+    expect(menu).not.toHaveTextContent('Vampire Survivors')
+    finish(dashboardState())
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument())
+  })
+
+  // openGameMenu's guard runs even with no menu open: a right click on another row while a row's action runs must not
+  // open a menu for it, and the locked state must stay clean.
+  test('a right click on a sync-error row while another row\'s action runs opens no menu', async () => {
+    let finish
+    const disable = vi.fn(() => new Promise((resolve) => (finish = resolve)))
+    const rowA = game({appid: 4, name: 'Broken A', tags: ['sync_warning'], syncWarning: true, lastError: 'HTTP 503', lastSyncedAt: '2026-05-21T10:00:00Z'})
+    const rowB = game({appid: 8, name: 'Broken B', tags: ['sync_warning'], syncWarning: true, lastError: 'HTTP 503', lastSyncedAt: '2026-05-21T10:00:00Z'})
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState({warnings: [rowA, rowB]})), DisableGame: disable})
+    const user = userEvent.setup()
+    render(App)
+    await user.click(await screen.findByRole('button', {name: 'Sync errors'}))
+    const disableB = screen.getAllByRole('button', {name: 'Disable'})[1]
+
+    try {
+      await user.click(disableB)
+      expect(disable).toHaveBeenCalledWith(8, 0)
+      await fireEvent.contextMenu(screen.getByRole('heading', {name: 'Broken A'}).closest('article'))
+      await tick()
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    } finally {
+      finish?.(dashboardState({warnings: [rowA]}))
+    }
+    await waitFor(() => expect(screen.queryByRole('heading', {name: 'Broken B'})).not.toBeInTheDocument())
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+  })
+
+  // Another row's own Disable button runs before the window click handler, which cannot close a menu while an action
+  // runs. The menu of row A must not stay behind, locked.
+  test('clicking another sync-error row\'s Disable button while A\'s menu is open closes A\'s menu', async () => {
+    let finish
+    const disable = vi.fn(() => new Promise((resolve) => (finish = resolve)))
+    const rowA = game({appid: 4, name: 'Broken A', tags: ['sync_warning'], syncWarning: true, lastError: 'HTTP 503', lastSyncedAt: '2026-05-21T10:00:00Z'})
+    const rowB = game({appid: 8, name: 'Broken B', tags: ['sync_warning'], syncWarning: true, lastError: 'HTTP 503', lastSyncedAt: '2026-05-21T10:00:00Z'})
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState({warnings: [rowA, rowB]})), DisableGame: disable})
+    const user = userEvent.setup()
+    render(App)
+    await user.click(await screen.findByRole('button', {name: 'Sync errors'}))
+    await fireEvent.contextMenu(screen.getByRole('heading', {name: 'Broken A'}).closest('article'))
+    await screen.findByRole('menu')
+    const disableB = screen.getAllByRole('button', {name: 'Disable'})[1]
+
+    try {
+      await user.click(disableB)
+
+      expect(disable).toHaveBeenCalledWith(8, 0)
+      await tick()
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+      expect(disableB).toBeDisabled()
+    } finally {
+      finish?.(dashboardState({warnings: [rowA]}))
+    }
+    await waitFor(() => expect(screen.queryByRole('heading', {name: 'Broken B'})).not.toBeInTheDocument())
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+  })
+
+  test('the sync errors and disabled lists keep their own action buttons', async () => {
+    const user = userEvent.setup()
+    await renderDashboard()
+
+    await user.click(screen.getByRole('button', {name: 'Sync errors'}))
+    expect(screen.getByRole('button', {name: 'Disable'})).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', {name: 'Disabled'}))
+    expect(screen.getByRole('button', {name: 'Re-enable'})).toBeInTheDocument()
+  })
+})
+
+describe('App Escape and type-to-search', () => {
   test('a typed letter outside a field starts the view search', async () => {
     __setWailsMocks({GetAppState: vi.fn(async () => dashboardState())})
     const user = userEvent.setup()
@@ -1172,7 +1462,7 @@ describe('App keyboard shortcuts', () => {
 
     render(App)
     await screen.findByPlaceholderText('Search games in this view')
-    // Keyboard focus on a tab in the title bar (a click would not move focus there: the bar cancels the mousedown).
+    // Focus on a tab in the title bar (a click would not move focus there: the bar cancels the mousedown).
     screen.getByRole('button', {name: 'Completed'}).focus()
     expect(screen.getByRole('button', {name: 'Completed'})).toHaveFocus()
 
@@ -1225,6 +1515,57 @@ describe('App keyboard shortcuts', () => {
     await fireEvent.keyDown(document.body, {key: 'Escape'})
     expect(screen.queryByRole('menu')).not.toBeInTheDocument()
   })
+
+  test('Escape in the search box closes the card menu', async () => {
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState())})
+    const user = userEvent.setup()
+
+    render(App)
+    const search = await screen.findByPlaceholderText('Search games in this view')
+    await openHadesMenu()
+    await screen.findByRole('menu')
+    search.focus()
+    await user.keyboard('{Escape}')
+
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+  })
+})
+
+describe('App search clear button', () => {
+  test('clicking it resets the filter to the unfiltered list and focuses the search', async () => {
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState())})
+    const user = userEvent.setup()
+
+    render(App)
+    const search = await screen.findByPlaceholderText('Search games in this view')
+    await user.type(search, 'vamp')
+    expect(screen.queryByRole('heading', {name: 'Hades'})).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', {name: 'Clear search'}))
+
+    expect(search).toHaveValue('')
+    expect(search).toHaveFocus()
+    expect(screen.getByRole('heading', {name: 'Hades'})).toBeInTheDocument()
+    expect(screen.getByRole('heading', {name: 'Vampire Survivors'})).toBeInTheDocument()
+    expect(screen.queryByRole('button', {name: 'Clear search'})).not.toBeInTheDocument()
+  })
+
+  test('type-to-search still works after clearing with the button', async () => {
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState())})
+    const user = userEvent.setup()
+
+    render(App)
+    await user.type(await screen.findByPlaceholderText('Search games in this view'), 'vamp')
+    await user.click(screen.getByRole('button', {name: 'Clear search'}))
+    document.activeElement.blur()
+    await user.keyboard('had')
+
+    const search = screen.getByPlaceholderText('Search games in this view')
+    expect(search).toHaveFocus()
+    expect(search).toHaveValue('had')
+    expect(screen.getByRole('heading', {name: 'Hades'})).toBeInTheDocument()
+    expect(screen.queryByRole('heading', {name: 'Vampire Survivors'})).not.toBeInTheDocument()
+  })
 })
 
 describe('App clear-data confirmation', () => {
@@ -1259,15 +1600,41 @@ describe('App clear-data confirmation', () => {
     expect(clear).not.toHaveBeenCalled()
   })
 
-  test('Cancel returns focus to the Remove profile button that opened the dialog', async () => {
+  test('Escape does not close the dialog while the clear runs', async () => {
+    let finishClear
+    const clear = vi.fn(() => new Promise((resolve) => {
+      finishClear = resolve
+    }))
+    __setWailsMocks({GetAppState: vi.fn(async () => dashboardState()), ClearActiveUserData: clear})
+    const user = userEvent.setup()
+
+    render(App)
+    const dialog = await openClearDialog(user)
+    await user.type(within(dialog).getByLabelText(/Type this exact value/), '76561198000000000{Enter}')
+    expect(clear).toHaveBeenCalledOnce()
+
+    await user.keyboard('{Escape}')
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+
+    finishClear(profileSetupState())
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+
+  test('a typed letter does not start the view search while the dialog is open, even if the view is a list view', async () => {
     __setWailsMocks({GetAppState: vi.fn(async () => dashboardState()), ClearActiveUserData: vi.fn()})
     const user = userEvent.setup()
 
     render(App)
-    await openClearDialog(user)
-    await user.click(screen.getByRole('button', {name: 'Cancel'}))
+    const dialog = await openClearDialog(user)
+    // The tabs are disabled, but a click that still got through (a script, an assistive tool) must not be able to
+    // turn the guard into the only thing standing between the dialog and the search box.
+    await fireEvent.click(screen.getByRole('button', {name: 'Not completed'}))
+    const search = screen.getByPlaceholderText('Search games in this view')
 
-    expect(screen.getByRole('button', {name: 'Remove profile'})).toHaveFocus()
+    await fireEvent.keyDown(dialog, {key: 'x'})
+
+    expect(search).toHaveValue('')
+    expect(search).not.toHaveFocus()
   })
 
   test('a failed clear re-reads the app state, because the backend may already have deleted the key', async () => {

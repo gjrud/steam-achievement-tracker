@@ -1,6 +1,5 @@
 <script>
-  export let summary = {}
-  export let integer = (value) => String(value)
+  let {summary = {}, integer = (value) => String(value)} = $props()
 
   // A counter shows "vetted (total)" only when at least one counted entry is unvetted (vetted < total).
   // A missing vetted field means every entry is vetted, so the plain total shows.
@@ -13,8 +12,8 @@
   }
 
   // The hover hint (title) spells out the vetted count; the screen-reader text comes from the sr-only span in the counter.
-  $: completedGamesLabel = vettedLabel(summary.completedGamesCount, summary.completedGamesVettedCount)
-  $: completedSetsLabel = vettedLabel(summary.completedSetsCount, summary.completedSetsVettedCount)
+  let completedGamesLabel = $derived(vettedLabel(summary.completedGamesCount, summary.completedGamesVettedCount))
+  let completedSetsLabel = $derived(vettedLabel(summary.completedSetsCount, summary.completedSetsVettedCount))
 </script>
 
 {#snippet counter(total, vetted)}

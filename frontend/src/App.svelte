@@ -27,6 +27,7 @@
   import TitleBar from './lib/components/TitleBar.svelte'
   import ScrollBar from './lib/components/ScrollBar.svelte'
   import {AppMessage, formatMessage, formatPlaytime, integer, pct} from './lib/format.js'
+  import {isSyncAlreadyRunningError} from './lib/sync.js'
   import {createUpdateStore} from './lib/update.js'
   import {
     cardProgress,
@@ -41,24 +42,37 @@
   import {gameTags, suggestionTagOptions, tagLabel, tagTone, toneClass, tagCountsFromGames} from './lib/tag.js'
   import {showDisabledReasonLabel} from './lib/disabled.js'
 
-  let state = null
-  let loading = true
-  let error = ''
+  // Replaced whole, never mutated: $state.raw skips the deep proxy.
+  let appState = $state.raw(null)
+  let loading = $state(true)
+  let error = $state('')
   // refreshError is true only while `error` holds a failed state refresh. Refreshes clear only that, so an action's
   // error survives the refreshes that run while a sync is in progress.
   let refreshError = false
-  let profileInput = ''
-  let preview = null
-  let validating = false
-  let saving = false
-  // savingKey covers a SaveAPIKey call. It lives here (not in the form) so a remounted form still sees it. It is not
-  // a beginAction: the key form only shows on screens where no sync is live, so there are no reads to hold, and a
-  // failed save must leave the banner alone (the form shows its own error).
-  let savingKey = false
-  let activeView = 'suggestions'
-  let viewSearch = ''
-  let activeTagFilter = ''
-  let viewSearchInput = null
+  let profileInput = $state('')
+  // Replaced whole and passed back to SaveProfile unchanged: $state.raw.
+  let preview = $state.raw(null)
+  let validating = $state(false)
+  let saving = $state(false)
+  // savingKey covers a SaveAPIKey call. It lives here so a remounted form still sees it. Not a beginAction: the key form
+  // only shows in SetupView missing-key/profile modes when no sync is live, so there are no reads to hold, and a failed
+  // save must leave the banner alone (the form shows its own error).
+  let savingKey = $state(false)
+  // validateToken is bumped when a Validate result is no longer wanted (the input or key changed). A result that
+  // arrives with an older token is dropped.
+  let validateToken = 0
+  // syncStarting covers a SyncNow call from start to finish. It blocks a second call and shows the sync as running
+  // before the backend's state does.
+  let syncStarting = $state(false)
+  // syncEventCooldown is the timer that spaces event-driven reads (see onSyncChanged). syncEventPending records an
+  // event that arrived during the cooldown and is owed one read when it ends.
+  let syncEventCooldown = null
+  let syncEventPending = false
+  let activeView = $state('suggestions')
+  let viewSearch = $state('')
+  let activeTagFilter = $state('')
+  // DOM refs the template binds in a block or passes as props are $state(null) (non_reactive_update otherwise); elements are never proxied.
+  let viewSearchInput = $state(null)
   let unsubscribeSyncEvents = null
   let retryHandle = null
   // refreshing: a GetAppState read is in flight. refreshQueued: a fresh read is owed; events set it, so a burst
@@ -68,21 +82,21 @@
   let busyActions = 0
   let mounted = false
   let stateRequestToken = 0
-  let contextMenu = null
-  let contextMenuEl = null
-  let gameActionLoading = false
-  let clearingData = false
-  let savingSettings = false
-  let clearConfirmOpen = false
-  let clearConfirmInput = ''
+  // Replaced whole on each change; $state.raw keeps `game` the app's own object (no proxy copy, so identity checks hold).
+  let contextMenu = $state.raw(null)
+  let contextMenuEl = $state(null)
+  let gameActionLoading = $state(false)
+  let clearingData = $state(false)
+  let savingSettings = $state(false)
+  let clearConfirmOpen = $state(false)
+  let clearConfirmInput = $state('')
   const menuMargin = 12
-  // Wails event the Go backend emits (no payload) on sync start, after each progress write (the first game's write is
-  // immediate, later ones at most one per 500 ms, and a trailing flush follows the last game if an update was skipped), after the final status
-  // write, and once more after the sync flag clears.
+  // Payload-less Wails event from the Go backend: sync start, progress writes (at most one per 500 ms), the end of the run.
   const syncChangedEvent = 'sync:changed'
+  // Timed from each requestRefresh call, not from when the read starts (a queued read can start later).
+  const syncEventGapMs = 300
   const refreshRetryDelayMs = 2000
-  // The update state is separate from the app state: it follows update:changed and has its own reads. The banner shows
-  // only on the dashboard (never on the setup or init-error screens); the Settings view shows its section.
+  // Update state is separate: it follows update:changed. The banner shows only on the dashboard.
   const updates = createUpdateStore({
     getState: () => GetUpdateState(),
     check: () => CheckForUpdates(),
@@ -95,7 +109,7 @@
   onMount(() => {
     mounted = true
     // Subscribe before the first read so a sync:changed emitted during that read is not missed.
-    unsubscribeSyncEvents = Events.On(syncChangedEvent, requestRefresh)
+    unsubscribeSyncEvents = Events.On(syncChangedEvent, onSyncChanged)
     requestRefresh()
     const stopUpdates = updates.start()
     return () => {
@@ -104,6 +118,7 @@
       unsubscribeSyncEvents?.()
       unsubscribeSyncEvents = null
       clearRetry()
+      clearSyncEventCooldown()
     }
   })
 
@@ -122,6 +137,32 @@
     refresh()
   }
 
+  // sync:changed: read at once unless a read happened within syncEventGapMs; then read once when the gap ends.
+  // Action-driven reads (requestRefresh) never wait.
+  function onSyncChanged() {
+    if (!mounted) return
+    if (syncEventCooldown) {
+      syncEventPending = true
+      return
+    }
+    startSyncEventRead()
+  }
+
+  function startSyncEventRead() {
+    syncEventPending = false
+    requestRefresh()
+    syncEventCooldown = setTimeout(() => {
+      syncEventCooldown = null
+      if (syncEventPending) startSyncEventRead()
+    }, syncEventGapMs)
+  }
+
+  function clearSyncEventCooldown() {
+    if (syncEventCooldown) clearTimeout(syncEventCooldown)
+    syncEventCooldown = null
+    syncEventPending = false
+  }
+
   // refresh reads the app state once. A read that an action overtook is dropped and re-queued, so the state shown
   // always comes from the newest read that finished.
   async function refresh() {
@@ -134,7 +175,7 @@
         refreshQueued = true
         return
       }
-      state = nextState
+      appState = nextState
       clearRetry()
       if (refreshError) {
         error = ''
@@ -148,7 +189,7 @@
       error = formatMessage(err)
       refreshError = true
       // A failed read while a sync runs would otherwise leave the button on Syncing… with no event left to fix it.
-      retry = isSyncing(state)
+      retry = isSyncing(appState)
     } finally {
       refreshing = false
       if (token === stateRequestToken) loading = false
@@ -172,9 +213,8 @@
     retryHandle = null
   }
 
-  // beginAction takes over the request token (so an in-flight read is dropped), clears the banner, and holds reads
-  // until endAction. Every action must pair beginAction with endAction in finally. A pending failed-read retry is left
-  // armed: if the action fails, that retry still recovers the sync view.
+  // beginAction takes the request token (dropping any in-flight read), clears the banner and holds reads until
+  // endAction, which must run in finally. A pending failed-read retry stays armed.
   function beginAction() {
     busyActions++
     error = ''
@@ -186,7 +226,7 @@
   // failed read's pending retry, so the retry is cancelled. Returns whether the state was applied.
   function applyActionState(token, nextState) {
     if (token !== stateRequestToken) return false
-    state = nextState
+    appState = nextState
     clearRetry()
     return true
   }
@@ -213,18 +253,27 @@
     }
   }
 
+  // changeProfileInput stores the typed profile. A Validate still in flight is for the old text, so its result is
+  // dropped.
+  function changeProfileInput(value) {
+    profileInput = value
+    validateToken++
+  }
+
   async function validateProfile() {
     const input = profileInput.trim()
-    // The Enter key in the profile input calls this directly, so the save guard lives here too, not only on the button.
-    if (!input || savingKey) return
+    // The Enter key in the profile input calls this directly, so the guards live here too, not only on the button.
+    if (!input || savingKey || validating) return
+    const token = ++validateToken
     validating = true
     preview = null
     error = ''
     refreshError = false
     try {
-      preview = await ValidateProfile(input)
+      const result = await ValidateProfile(input)
+      if (token === validateToken) preview = result
     } catch (err) {
-      error = formatMessage(err)
+      if (token === validateToken) error = formatMessage(err)
     } finally {
       validating = false
     }
@@ -253,6 +302,8 @@
     savingKey = true
     try {
       await SaveAPIKey(key)
+      // A Validate still in flight ran with the old key, so its result is dropped with the preview.
+      validateToken++
       preview = null
       error = ''
       refreshError = false
@@ -263,13 +314,25 @@
   }
 
   async function syncNow() {
+    // A second click while the first call is in flight must not start another sync. A clear in flight must not be
+    // overtaken either: its SyncNow would take the request token, so the clear's result would be dropped.
+    if (syncStarting || clearingData) return
+    syncStarting = true
     const token = beginAction()
     try {
       const nextState = await SyncNow()
       applyActionState(token, nextState)
     } catch (err) {
-      if (token === stateRequestToken) error = formatMessage(err)
+      // "Already running" (also returned while a clear runs) is not a failure: a quiet read shows the run.
+      if (isSyncAlreadyRunningError(err)) {
+        // Hold the sync flag until the read lands, or the button would re-enable for that read.
+        if (appState && token === stateRequestToken) appState = {...appState, syncInProgress: true}
+        requestRefresh()
+      } else if (token === stateRequestToken) {
+        error = formatMessage(err)
+      }
     } finally {
+      syncStarting = false
       endAction()
     }
   }
@@ -292,15 +355,14 @@
 
   function changeView(value) {
     if (value === activeView) return
-    // The document is the scroller, so a new view would open at the old view's scroll position. Reset it before the view
-    // swaps: Svelte updates the DOM in a microtask, so the new view is first painted already at the top.
+    // The document is the scroller: reset before the swap, so the new view is never painted at the old scroll position.
     window.scrollTo({top: 0, behavior: 'instant'})
     activeView = value
     activeTagFilter = ''
   }
 
   function requestClearActiveUserData() {
-    if (clearingData || !state?.profile) return
+    if (clearingData || !appState?.profile) return
     clearConfirmInput = ''
     clearConfirmOpen = true
   }
@@ -314,7 +376,7 @@
   // options comes from the modal: {deleteProfileData, deleteAPIKey}. Deleting the key leaves the returned state without
   // a key, so the missing-key screen takes over and the modal closes with the dashboard.
   async function confirmClearActiveUserData(options) {
-    if (clearingData || !state?.profile) return
+    if (clearingData || !appState?.profile) return
     if (clearConfirmInput !== clearConfirmText) return
     clearingData = true
     const token = beginAction()
@@ -324,6 +386,7 @@
         activeView = 'suggestions'
         activeTagFilter = ''
         profileInput = ''
+        validateToken++
         preview = null
         clearConfirmOpen = false
         clearConfirmInput = ''
@@ -342,7 +405,9 @@
     }
   }
 
+  // A running action locks the menu: nothing may open it or move it.
   async function openGameMenu(event, game) {
+    if (gameActionLoading) return
     contextMenu = {game, x: event.clientX, y: event.clientY, left: event.clientX, top: event.clientY, ready: false}
     await tick()
     positionGameMenu()
@@ -365,6 +430,8 @@
   }
 
   function shouldFocusSearch(event) {
+    // Nothing typed while the clear dialog is open may reach the page behind it.
+    if (clearConfirmOpen) return false
     if (!['suggestions', 'completed', 'warnings', 'disabled'].includes(activeView)) return false
     if (event.metaKey || event.ctrlKey || event.altKey) return false
     if (event.key.length !== 1) return false
@@ -397,6 +464,8 @@
   async function runGameAction(action, selectedGame = contextMenu?.game) {
     if (!selectedGame || gameActionLoading) return
     const game = selectedGame
+    // A button outside the menu (a sync-error row's Disable) closes another game's open menu instead of leaving it locked.
+    if (contextMenu && contextMenu.game.entryKey !== game.entryKey) contextMenu = null
     gameActionLoading = true
     const token = beginAction()
     try {
@@ -415,31 +484,37 @@
     }
   }
 
-  $: dashboard = state?.dashboard || null
-  $: latestSyncRun = dashboard?.latestSyncRun || null
-  $: syncIsRunning = isSyncing(state)
-  $: summary = dashboard?.summary || {}
-  $: suggestions = dashboard?.suggestions || []
-  $: completed = sortByTitle(dashboard?.completed || [])
-  $: disabled = sortByTitle(dashboard?.disabled || [])
-  $: normalizedViewSearch = viewSearch.trim().toLowerCase()
-  $: warningGames = (dashboard?.warnings || []).filter((game) => game.syncWarning)
+  const dashboard = $derived(appState?.dashboard || null)
+  const latestSyncRun = $derived(dashboard?.latestSyncRun || null)
+  const syncIsRunning = $derived(isSyncing(appState) || syncStarting)
+  // While SyncNow is starting, the shell's state carries syncInProgress so the Sync button shows Syncing….
+  const shellState = $derived(syncStarting && appState && !appState.syncInProgress ? {...appState, syncInProgress: true} : appState)
+  const summary = $derived(dashboard?.summary || {})
+  const suggestions = $derived(dashboard?.suggestions || [])
+  const completed = $derived(sortByTitle(dashboard?.completed || []))
+  const disabled = $derived(sortByTitle(dashboard?.disabled || []))
+  const normalizedViewSearch = $derived(viewSearch.trim().toLowerCase())
+  const warningGames = $derived((dashboard?.warnings || []).filter((game) => game.syncWarning))
   // Tag filter chips follow the active view's list; views without a tag filter get no games and no chips.
-  $: tagFilterGames = activeView === 'completed' ? completed : activeView === 'suggestions' ? suggestions : []
-  $: tagFilterCounts = tagCountsFromGames(tagFilterGames)
-  $: visibleTagFilterOptions = suggestionTagOptions.filter((tag) => tagFilterCounts[tag] > 0)
-  $: if (activeTagFilter && !tagFilterCounts[activeTagFilter]) activeTagFilter = ''
-  $: filteredSuggestions = suggestions.filter((game) => matchesViewFilters(game, normalizedViewSearch, activeTagFilter))
-  $: filteredCompleted = completed.filter((game) => matchesViewFilters(game, normalizedViewSearch, activeTagFilter))
-  $: filteredWarnings = warningGames.filter((game) => matchesSearchQuery(game, normalizedViewSearch))
-  $: filteredDisabled = disabled.filter((game) => matchesSearchQuery(game, normalizedViewSearch))
-  $: viewFiltered = Boolean(viewSearch.trim() || activeTagFilter)
-  $: clearConfirmText = state?.profile ? state.profile.steamId64 || state.profile.displayName : ''
+  const tagFilterGames = $derived(activeView === 'completed' ? completed : activeView === 'suggestions' ? suggestions : [])
+  const tagFilterCounts = $derived(tagCountsFromGames(tagFilterGames))
+  const visibleTagFilterOptions = $derived(suggestionTagOptions.filter((tag) => tagFilterCounts[tag] > 0))
+  // Drops a tag filter the view no longer offers. $effect.pre: runs before the DOM update, so child effects (the grid reset) never see the stale list.
+  $effect.pre(() => {
+    // It terminates: the write sets activeTagFilter to '', so the rerun stops at the activeTagFilter check and writes nothing.
+    if (activeTagFilter && !tagFilterCounts[activeTagFilter]) activeTagFilter = ''
+  })
+  const filteredSuggestions = $derived(suggestions.filter((game) => matchesViewFilters(game, normalizedViewSearch, activeTagFilter)))
+  const filteredCompleted = $derived(completed.filter((game) => matchesViewFilters(game, normalizedViewSearch, activeTagFilter)))
+  const filteredWarnings = $derived(warningGames.filter((game) => matchesSearchQuery(game, normalizedViewSearch)))
+  const filteredDisabled = $derived(disabled.filter((game) => matchesSearchQuery(game, normalizedViewSearch)))
+  const viewFiltered = $derived(Boolean(viewSearch.trim() || activeTagFilter))
+  const clearConfirmText = $derived(appState?.profile ? appState.profile.steamId64 || appState.profile.displayName : '')
   // Same order as the screen switch below: the dashboard is the last branch.
-  $: dashboardShown = !loading && !state?.initError && Boolean(state?.apiKeyPresent) && Boolean(state?.profileExists)
+  const dashboardShown = $derived(!loading && !appState?.initError && Boolean(appState?.apiKeyPresent) && Boolean(appState?.profileExists))
 </script>
 
-<svelte:window on:click={closeGameMenu} on:keydown={handleGlobalKeydown} />
+<svelte:window onclick={closeGameMenu} onkeydown={handleGlobalKeydown} />
 
 <TitleBar
   dashboard={dashboardShown}
@@ -455,14 +530,14 @@
     <div class="loader"></div>
     <p>Loading tracker…</p>
   </main>
-{:else if state?.initError}
-  <SetupView mode="startup-error" state={state} error={error} onRetry={retryKey} />
-{:else if !state?.apiKeyPresent}
-  <SetupView mode="missing-key" state={state} error={error} onRetry={retryKey} savingKey={savingKey} onSaveKey={saveApiKey} />
-{:else if !state?.profileExists}
+{:else if appState?.initError}
+  <SetupView mode="startup-error" state={appState} error={error} onRetry={retryKey} />
+{:else if !appState?.apiKeyPresent}
+  <SetupView mode="missing-key" state={appState} error={error} onRetry={retryKey} savingKey={savingKey} onSaveKey={saveApiKey} />
+{:else if !appState?.profileExists}
   <SetupView
     mode="profile"
-    state={state}
+    state={appState}
     error={error}
     profileInput={profileInput}
     preview={preview}
@@ -472,11 +547,11 @@
     onValidate={validateProfile}
     onSave={saveProfile}
     onSaveKey={saveApiKey}
-    onProfileInput={(value) => (profileInput = value)}
+    onProfileInput={changeProfileInput}
   />
 {:else}
   <DashboardShell
-    {state}
+    state={shellState}
     {updates}
     {error}
     {summary}
@@ -532,16 +607,17 @@
 {/if}
 
 {#if contextMenu}
-  <div bind:this={contextMenuEl} class="context-menu" role="menu" tabindex="-1" style={`left: ${contextMenu.left}px; top: ${contextMenu.top}px; visibility: ${contextMenu.ready ? 'visible' : 'hidden'};`} on:click|stopPropagation on:keydown|stopPropagation={(event) => event.key === 'Escape' && closeGameMenu()}>
+  <!-- Clicks inside the menu stop here, so the window click-away handler never closes it. -->
+  <div bind:this={contextMenuEl} class="context-menu" role="menu" tabindex="-1" style={`left: ${contextMenu.left}px; top: ${contextMenu.top}px; visibility: ${contextMenu.ready ? 'visible' : 'hidden'};`} onclick={(event) => event.stopPropagation()} onkeydown={(event) => { event.stopPropagation(); if (event.key === 'Escape') closeGameMenu() }}>
     <p>{gameTitle(contextMenu.game)}</p>
     {#if activeView === 'suggestions'}
-      <button on:click={() => runGameAction('previously-completed')} disabled={gameActionLoading}>{contextMenu.game.manualWasCompleted ? 'Clear previously completed flag' : 'Mark as previously completed'}</button>
-      <button on:click={() => runGameAction('toggle-dlc')} disabled={gameActionLoading}>{contextMenu.game.missingAchievementsInDLC ? 'Clear DLC-missing flag' : 'Flag missing achievements in DLC'}</button>
+      <button type="button" onclick={() => runGameAction('previously-completed')} disabled={gameActionLoading}>{contextMenu.game.manualWasCompleted ? 'Clear previously completed flag' : 'Mark as previously completed'}</button>
+      <button type="button" onclick={() => runGameAction('toggle-dlc')} disabled={gameActionLoading}>{contextMenu.game.missingAchievementsInDLC ? 'Clear DLC-missing flag' : 'Flag missing achievements in DLC'}</button>
     {/if}
     {#if contextMenu.game.disabled}
-      <button on:click={() => runGameAction('enable')} disabled={gameActionLoading}>{contextMenu.game.isSet ? 'Re-enable set' : 'Re-enable game'}</button>
+      <button type="button" onclick={() => runGameAction('enable')} disabled={gameActionLoading}>{contextMenu.game.isSet ? 'Re-enable set' : 'Re-enable game'}</button>
     {:else}
-      <button class="danger" on:click={() => runGameAction('disable')} disabled={gameActionLoading}>{contextMenu.game.isSet ? 'Disable set' : 'Disable game'}</button>
+      <button type="button" class="danger" onclick={() => runGameAction('disable')} disabled={gameActionLoading}>{contextMenu.game.isSet ? 'Disable set' : 'Disable game'}</button>
     {/if}
   </div>
 {/if}

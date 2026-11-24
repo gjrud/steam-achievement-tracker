@@ -1,13 +1,11 @@
 <script>
   import {onMount} from 'svelte'
   import {syncBand} from '../sync.js'
-  export let state
-  export let latestSyncRun = null
-  export let syncIsRunning = false
-  export let onSyncNow = () => {}
+  // Prop `state` is renamed locally: a binding named `state` would shadow the `$state` rune.
+  let {state: appState, latestSyncRun = null, syncIsRunning = false, onSyncNow = () => {}} = $props()
 
   // now is refreshed every 30 seconds so relative times ("2 hours ago") stay current.
-  let now = Date.now()
+  let now = $state(Date.now())
   onMount(() => {
     const clock = setInterval(() => {
       now = Date.now()
@@ -15,13 +13,13 @@
     return () => clearInterval(clock)
   })
 
-  $: band = syncBand(latestSyncRun, syncIsRunning, now)
+  let band = $derived(syncBand(latestSyncRun, syncIsRunning, now))
 </script>
 
 <div class={`profile-card tone-${band.tone}`}>
-  <div class="profile-avatar">{#if state.profile?.avatarUrl}<img src={state.profile.avatarUrl} alt="" />{:else}{(state.profile?.displayName || 'S').slice(0, 1).toUpperCase()}{/if}</div>
-  <p class="profile-name">{state.profile?.displayName}</p>
-  <button class="primary" on:click={onSyncNow} disabled={state.syncInProgress}>{state.syncInProgress ? 'Syncing…' : 'Sync now'}</button>
+  <div class="profile-avatar">{#if appState.profile?.avatarUrl}<img src={appState.profile.avatarUrl} alt="" />{:else}{(appState.profile?.displayName || 'S').slice(0, 1).toUpperCase()}{/if}</div>
+  <p class="profile-name">{appState.profile?.displayName}</p>
+  <button class="primary" onclick={onSyncNow} disabled={appState.syncInProgress}>{appState.syncInProgress ? 'Syncing…' : 'Sync now'}</button>
   <div class="sync-band">
     <p class="sync-headline">
       {#if band.icon === 'check'}

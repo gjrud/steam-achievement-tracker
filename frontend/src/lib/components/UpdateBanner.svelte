@@ -1,50 +1,39 @@
 <script>
-  import {tick} from 'svelte'
   import {Browser} from '@wailsio/runtime'
   import {bannerVisible, downloadFraction, formatBytes, readyLine, retryKind, updateError} from '../update.js'
   // updates is the store from createUpdateStore (update.js). Without one the banner renders nothing.
-  export let updates = null
+  let {updates = null} = $props()
 
-  let linkError = ''
-  // host is the focus target when the banner's own controls go away. It stays mounted while the banner is hidden.
-  let host = null
-  let titleEl = null
-  let focusPending = false
+  let linkError = $state('')
 
-  $: view = updates ? $updates : null
-  $: show = view ? bannerVisible(view) : false
-  $: snap = view?.snapshot
-  $: phase = snap?.phase
-  $: latest = snap?.latest
-  $: version = latest?.version || ''
-  $: error = view ? updateError(view) : ''
-  $: acting = view?.acting || ''
-  $: canceling = Boolean(view?.canceling)
-  $: retry = view ? retryKind(view) : 'check'
-  $: fraction = phase === 'downloading' ? downloadFraction(snap.progress) : null
-  $: percent = fraction === null ? 0 : Math.round(fraction * 100)
+  let view = $derived(updates ? $updates : null)
+  let show = $derived(view ? bannerVisible(view) : false)
+  let snap = $derived(view?.snapshot)
+  let phase = $derived(snap?.phase)
+  let latest = $derived(snap?.latest)
+  let version = $derived(latest?.version || '')
+  let error = $derived(view ? updateError(view) : '')
+  let acting = $derived(view?.acting || '')
+  let canceling = $derived(Boolean(view?.canceling))
+  let retry = $derived(view ? retryKind(view) : 'check')
+  let fraction = $derived(phase === 'downloading' ? downloadFraction(snap.progress) : null)
+  let percent = $derived(fraction === null ? 0 : Math.round(fraction * 100))
   // The error phase and a refusal note keep the banner's colour; ready is the good-news colour.
-  $: tone = phase === 'error' || (error && phase !== 'ready') ? 'is-error' : phase === 'ready' ? 'is-ready' : ''
-  $: meter = phase === 'downloading' || phase === 'verifying' || phase === 'installing' || phase === 'restarting'
-  $: determinate = phase === 'downloading' && fraction !== null
-  $: releaseLabel = phase === 'error' || snap?.notifyOnly ? 'Release page' : 'Release notes'
+  let tone = $derived(phase === 'error' || (error && phase !== 'ready') ? 'is-error' : phase === 'ready' ? 'is-ready' : '')
+  let meter = $derived(phase === 'downloading' || phase === 'verifying' || phase === 'installing' || phase === 'restarting')
+  let determinate = $derived(phase === 'downloading' && fraction !== null)
+  let releaseLabel = $derived(phase === 'error' || snap?.notifyOnly ? 'Release page' : 'Release notes')
   // The release link: an available release always; an error only when a retry installs that release or the build is
   // notify-only. A failed check does not point at a release it did not find.
-  $: releaseLink = Boolean(latest) && (phase === 'available' || (phase === 'error' && (retry === 'install' || Boolean(snap?.notifyOnly))))
+  let releaseLink = $derived(Boolean(latest) && (phase === 'available' || (phase === 'error' && (retry === 'install' || Boolean(snap?.notifyOnly)))))
 
-  $: title = titleFor(phase, version, retry)
-  $: detail = detailFor(phase, snap)
-  $: progressText = phase === 'downloading' ? downloadText(snap.progress, fraction, percent) : ''
-  // notifyNote is the reason a notify-only build offers no Install. It is the message of that phase, so it is announced
-  // with the title.
-  $: notifyNote = phase === 'available' && snap?.notifyOnly ? detail : ''
-  // The one live announcement. Its text covers the title, the notify reason, the error, the note and the link error; the
-  // progress line is left out, and the title does not change during a download, so progress never reaches a screen reader.
-  $: announcement = show ? [title, notifyNote, error, view?.notice, linkError].filter(Boolean).map(sentence).join(' ') : ''
-  // A click disables or removes the button it came from, and that drops keyboard focus to the body. Each change that
-  // follows a click (the call starting, the download replacing the button, Later hiding the banner) settles focus.
-  $: settleFocus(phase, acting, canceling, show)
-  $: leaveBanner(show)
+  let title = $derived(titleFor(phase, version, retry))
+  let detail = $derived(detailFor(phase, snap))
+  let progressText = $derived(phase === 'downloading' ? downloadText(snap.progress, fraction, percent) : '')
+  // Why a notify-only build offers no Install; announced with the title.
+  let notifyNote = $derived(phase === 'available' && snap?.notifyOnly ? detail : '')
+  // The one live announcement. Progress is left out, so a screen reader never hears each download tick.
+  let announcement = $derived(show ? [title, notifyNote, error, view?.notice, linkError].filter(Boolean).map(sentence).join(' ') : '')
 
   function titleFor(p, v, kind) {
     switch (p) {
@@ -91,36 +80,6 @@
     return /[.!?…]$/.test(text) ? text : `${text}.`
   }
 
-  // act marks that a click started the change, so focus is settled once the change shows.
-  function act(run) {
-    focusPending = true
-    return run()
-  }
-
-  // leaveBanner runs as the banner goes. Its DOM is removed right after, so a focused control or title inside it would
-  // drop focus to the body; focus moves to the host first.
-  function leaveBanner(visible) {
-    if (visible || !host) return
-    const active = document.activeElement
-    if (active && active !== host && host.contains(active)) host.focus()
-  }
-
-  // settleFocus runs after a change that followed a click. Once the DOM has caught up, focus that is still on an enabled
-  // control in the banner stays put; otherwise it moves to the title, or to the host when the banner is gone.
-  async function settleFocus() {
-    if (!focusPending) return
-    await tick()
-    if (!host) return
-    const active = document.activeElement
-    if (active && active !== document.body && host.contains(active) && !active.disabled) {
-      focusPending = false
-      return
-    }
-    focusPending = false
-    if (show && titleEl) titleEl.focus()
-    else host.focus()
-  }
-
   // A plain <a href> would navigate the webview itself, so clicks go to the system browser (as in ApiKeyForm); the real
   // href stays for accessibility and copy/paste. A failed open is shown inline.
   async function openRelease(url) {
@@ -133,11 +92,11 @@
   }
 </script>
 
-<div class="update-host" bind:this={host} tabindex="-1">
+<div class="update-host">
   {#if show}
     <section class={`update-banner ${tone}`} aria-label="Application update">
       <div class="update-copy">
-        <p class="update-title" tabindex="-1" bind:this={titleEl}>{title}</p>
+        <p class="update-title">{title}</p>
         {#if detail}<p id="update-detail" class="update-detail">{detail}</p>{/if}
         {#if phase === 'downloading'}
           <p class="update-progress-text" aria-live="off">{progressText}</p>
@@ -160,19 +119,22 @@
       </div>
       <div class="update-actions">
         {#if releaseLink}
-          <a class="update-link" href={latest.releaseURL} rel="noopener noreferrer" on:click|preventDefault={() => openRelease(latest.releaseURL)}>{releaseLabel}</a>
+          <a class="update-link" href={latest.releaseURL} rel="noopener noreferrer" onclick={(event) => {
+              event.preventDefault()
+              openRelease(latest.releaseURL)
+            }}>{releaseLabel}</a>
         {/if}
         {#if phase === 'available'}
           {#if !snap.notifyOnly}
-            <button class="primary" disabled={Boolean(acting)} on:click={() => act(() => updates.install(version))}>Install</button>
+            <button class="primary" disabled={Boolean(acting)} onclick={() => updates.install(version)}>Install</button>
           {/if}
-          <button class="secondary" on:click={() => act(() => updates.later())}>Later</button>
+          <button class="secondary" onclick={() => updates.later()}>Later</button>
         {:else if phase === 'downloading'}
-          <button class="secondary" disabled={canceling} on:click={() => act(() => updates.cancel())}>{canceling ? 'Canceling…' : 'Cancel'}</button>
+          <button class="secondary" disabled={canceling} onclick={() => updates.cancel()}>{canceling ? 'Canceling…' : 'Cancel'}</button>
         {:else if phase === 'ready'}
-          <button class="primary" disabled={Boolean(acting)} aria-describedby="update-detail" on:click={() => act(() => updates.restart())}>Restart now</button>
+          <button class="primary" disabled={Boolean(acting)} aria-describedby="update-detail" onclick={() => updates.restart()}>Restart now</button>
         {:else if phase === 'error'}
-          <button class="primary" disabled={Boolean(acting)} on:click={() => act(() => (retry === 'install' ? updates.install(version) : updates.check()))}>Try again</button>
+          <button class="primary" disabled={Boolean(acting)} onclick={() => (retry === 'install' ? updates.install(version) : updates.check())}>Try again</button>
         {/if}
       </div>
     </section>

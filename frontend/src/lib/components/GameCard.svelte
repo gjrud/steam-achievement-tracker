@@ -1,27 +1,38 @@
 <script>
   import {tagDescription} from '../tag.js'
+  import {cssUrl} from '../game.js'
 
-  export let game
-  export let onContextMenu = () => {}
-  export let gameTags = (g) => g.tags || []
-  export let tagLabel = (tag) => tag
-  export let toneClass = (tone) => (tone ? `tone-${tone}` : '')
-  export let tagTone = (tag) => ''
-  export let gameTitle = (g) => g.name || 'Untitled game'
-  export let gameWarning = () => ''
-  export let hasAchievements = () => false
-  export let shouldShowSyncErrorMessage = () => false
-  export let cardProgress = () => 0
-  export let completionLabel = () => ''
-  export let formatPlaytime = (v) => v
-  export let pct = (v) => v
-  export let missingAvgUnlockLabel = () => ''
+  // onContextMenu(event, game): event is the right click (clientX/clientY).
+  let {
+    game,
+    onContextMenu = () => {},
+    gameTags = (g) => g.tags || [],
+    tagLabel = (tag) => tag,
+    toneClass = (tone) => (tone ? `tone-${tone}` : ''),
+    tagTone = (tag) => '',
+    gameTitle = (g) => g.name || 'Untitled game',
+    gameWarning = () => '',
+    hasAchievements = () => false,
+    shouldShowSyncErrorMessage = () => false,
+    cardProgress = () => 0,
+    completionLabel = () => '',
+    formatPlaytime = (v) => v,
+    pct = (v) => v,
+    missingAvgUnlockLabel = () => ''
+  } = $props()
 
-  $: landscape = Boolean(game.coverUrl) && (game.coverKind === 'header' || game.coverKind === 'main')
-  $: coverStyle = game.coverUrl ? `--cover-url: url("${game.coverUrl}")` : undefined
+  let landscape = $derived(Boolean(game.coverUrl) && (game.coverKind === 'header' || game.coverKind === 'main'))
+  let coverStyle = $derived(game.coverUrl ? `--cover-url: ${cssUrl(game.coverUrl)}` : undefined)
 </script>
 
-<article class="game-card" title={gameWarning(game) || gameTitle(game)} on:contextmenu|preventDefault={(event) => onContextMenu(event, game)}>
+<article
+  class="game-card"
+  title={gameWarning(game) || gameTitle(game)}
+  oncontextmenu={(event) => {
+    event.preventDefault()
+    onContextMenu(event, game)
+  }}
+>
   <div
     class="cover"
     class:cover-landscape={landscape}

@@ -4,6 +4,7 @@ import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest'
 import App from './App.svelte'
 import {__resetWailsMocks, __setWailsMocks} from './test/wails-app-mock.js'
 import {__listenerCount, RuntimeError} from './test/wails-runtime-mock.js'
+import {syncAlreadyRunningMessage} from './lib/sync.js'
 import {
   advance,
   dashboardState,
@@ -11,7 +12,9 @@ import {
   failureMessage,
   finishedState,
   hadesCard,
+  profileSetupState,
   rejecting,
+  SYNC_EVENT_GAP_MS,
   settle,
   syncingState,
   syncRun
@@ -64,6 +67,7 @@ describe('App sync events', () => {
     expect(screen.getByText(/Syncing 4 \/ 6/)).toBeInTheDocument()
     expect(getState).toHaveBeenCalledTimes(2)
 
+    await advance(SYNC_EVENT_GAP_MS)
     emitSyncChanged()
     await settle()
     expect(syncStatus()).toHaveTextContent('Last sync: Partial sync, 1 failed')
@@ -100,8 +104,9 @@ describe('App sync events', () => {
     await settle()
     expect(getState).toHaveBeenCalledTimes(2)
 
+    // The burst lands inside the gap: one read is owed, and it waits for the slow read in flight.
     for (let i = 0; i < 5; i++) emitSyncChanged()
-    await settle()
+    await advance(SYNC_EVENT_GAP_MS)
     expect(getState).toHaveBeenCalledTimes(2)
 
     resolveSlowRead(syncingState(3))
@@ -111,6 +116,87 @@ describe('App sync events', () => {
 
     await advance(5000)
     expect(getState).toHaveBeenCalledTimes(3)
+  })
+
+  test('a burst of events inside the gap costs one leading read and one trailing read', async () => {
+    const getState = vi.fn()
+      .mockResolvedValueOnce(syncingState(1))
+      .mockResolvedValueOnce(syncingState(2))
+      .mockResolvedValueOnce(syncingState(6))
+    __setWailsMocks({GetAppState: getState})
+
+    render(App)
+    await settle()
+
+    for (let i = 0; i < 5; i++) emitSyncChanged()
+    await settle()
+    expect(getState).toHaveBeenCalledTimes(2)
+
+    await advance(SYNC_EVENT_GAP_MS)
+    expect(getState).toHaveBeenCalledTimes(3)
+    expect(screen.getByText(/Syncing 6 \/ 6/)).toBeInTheDocument()
+
+    await advance(5000)
+    expect(getState).toHaveBeenCalledTimes(3)
+  })
+
+  test('the last event inside the gap is read when the gap ends', async () => {
+    const getState = vi.fn()
+      .mockResolvedValueOnce(syncingState(1))
+      .mockResolvedValueOnce(syncingState(2))
+      .mockResolvedValueOnce(syncingState(5))
+    __setWailsMocks({GetAppState: getState})
+
+    render(App)
+    await settle()
+    emitSyncChanged()
+    await settle()
+    expect(getState).toHaveBeenCalledTimes(2)
+
+    await advance(100)
+    emitSyncChanged()
+    await advance(SYNC_EVENT_GAP_MS - 101)
+    expect(getState).toHaveBeenCalledTimes(2)
+
+    await advance(1)
+    expect(getState).toHaveBeenCalledTimes(3)
+    expect(screen.getByText(/Syncing 5 \/ 6/)).toBeInTheDocument()
+  })
+
+  test('an event after a quiet gap is read at once', async () => {
+    const getState = vi.fn()
+      .mockResolvedValueOnce(syncingState(1))
+      .mockResolvedValueOnce(syncingState(2))
+      .mockResolvedValueOnce(syncingState(3))
+    __setWailsMocks({GetAppState: getState})
+
+    render(App)
+    await settle()
+    emitSyncChanged()
+    await settle()
+    await advance(SYNC_EVENT_GAP_MS)
+
+    emitSyncChanged()
+    expect(getState).toHaveBeenCalledTimes(3)
+  })
+
+  test('unmounting during a deferred event read clears its timer and makes no read', async () => {
+    const getState = vi.fn()
+      .mockResolvedValueOnce(syncingState(1))
+      .mockResolvedValueOnce(syncingState(2))
+    __setWailsMocks({GetAppState: getState})
+
+    const {unmount} = render(App)
+    await settle()
+    emitSyncChanged()
+    emitSyncChanged()
+    await settle()
+    expect(getState).toHaveBeenCalledTimes(2)
+
+    unmount()
+    expect(vi.getTimerCount()).toBe(0)
+    await advance(SYNC_EVENT_GAP_MS * 2)
+    expect(getState).toHaveBeenCalledTimes(2)
   })
 
   test('an event during the initial read gets one follow-up read, which shows the final state', async () => {
@@ -166,6 +252,45 @@ describe('App sync events', () => {
     expect(screen.queryByText(/Syncing 2 \/ 6/)).not.toBeInTheDocument()
     expect(syncStatus()).toHaveTextContent('Last sync: All games synced')
     expect(screen.getByRole('button', {name: 'Sync now'})).toBeEnabled()
+  })
+
+  test('an event that waits out its gap during an action is read once, after the action finishes', async () => {
+    let resolveDisable
+    const getState = vi.fn()
+      .mockResolvedValueOnce(syncingState(1))
+      .mockResolvedValueOnce(syncingState(2))
+      .mockResolvedValueOnce(finishedState())
+    const disable = vi.fn(() => new Promise((resolve) => {
+      resolveDisable = resolve
+    }))
+    __setWailsMocks({GetAppState: getState, DisableGame: disable})
+
+    render(App)
+    await settle()
+    // The leading event is read at once (read #2 counting the mount read as #1), and opens the gap.
+    emitSyncChanged()
+    await settle()
+    expect(getState).toHaveBeenCalledTimes(2)
+
+    await fireEvent.contextMenu(hadesCard())
+    await fireEvent.click(screen.getByRole('button', {name: 'Disable game'}))
+    expect(disable).toHaveBeenCalledOnce()
+
+    // A second event at 100 ms waits for the gap. The gap ends at 300 ms with the action still in flight, so no read.
+    await advance(100)
+    emitSyncChanged()
+    await advance(SYNC_EVENT_GAP_MS - 100)
+    expect(getState).toHaveBeenCalledTimes(2)
+
+    // The action ends: exactly one more read, which returns the newer state.
+    resolveDisable(syncingState(3))
+    await settle()
+    expect(getState).toHaveBeenCalledTimes(3)
+    expect(syncStatus()).toHaveTextContent('Last sync: All games synced')
+    expect(screen.getByRole('button', {name: 'Sync now'})).toBeEnabled()
+
+    await advance(5000)
+    expect(getState).toHaveBeenCalledTimes(3)
   })
 
   test('drops a read that an action overtook and reads again after the action', async () => {
@@ -316,6 +441,7 @@ describe('App sync events', () => {
     expect(screen.getByText(/Syncing 3 \/ 6/)).toBeInTheDocument()
     expect(screen.getByText(failureMessage)).toBeInTheDocument()
 
+    await advance(SYNC_EVENT_GAP_MS)
     emitSyncChanged()
     await settle()
     expect(getState).toHaveBeenCalledTimes(3)
@@ -329,6 +455,62 @@ describe('App sync events', () => {
     expect(disable).toHaveBeenCalledTimes(2)
     expect(screen.queryByText(failureMessage)).not.toBeInTheDocument()
     expect(screen.getByText(/Syncing 5 \/ 6/)).toBeInTheDocument()
+  })
+
+  test('an event during an in-flight SyncNow is read once SyncNow ends', async () => {
+    let resolveSync
+    const getState = vi.fn()
+      .mockResolvedValueOnce(dashboardState())
+      .mockResolvedValueOnce(syncingState(5))
+    const syncNow = vi.fn(() => new Promise((resolve) => {
+      resolveSync = resolve
+    }))
+    __setWailsMocks({GetAppState: getState, SyncNow: syncNow})
+
+    render(App)
+    await settle()
+    await fireEvent.click(screen.getByRole('button', {name: 'Sync now'}))
+    emitSyncChanged()
+    await settle()
+    expect(getState).toHaveBeenCalledTimes(1)
+
+    resolveSync(syncingState(1))
+    await settle()
+    expect(getState).toHaveBeenCalledTimes(2)
+    expect(screen.getByText(/Syncing 5 \/ 6/)).toBeInTheDocument()
+  })
+
+  test('an event that arrives while the trailing read is in flight gets one more read after it', async () => {
+    let resolveTrailing
+    const getState = vi.fn()
+      .mockResolvedValueOnce(syncingState(1))
+      .mockResolvedValueOnce(syncingState(2))
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveTrailing = resolve
+      }))
+      .mockResolvedValueOnce(syncingState(6))
+    __setWailsMocks({GetAppState: getState})
+
+    render(App)
+    await settle()
+    // t=0: leading read. t=100: owed a trailing read. t=300: the trailing read starts and stays in flight.
+    emitSyncChanged()
+    await settle()
+    await advance(100)
+    emitSyncChanged()
+    await advance(SYNC_EVENT_GAP_MS - 100)
+    expect(getState).toHaveBeenCalledTimes(3)
+
+    // t=400: an event inside the trailing read's gap. It is owed a read, which queues behind the in-flight read.
+    await advance(100)
+    emitSyncChanged()
+    await advance(SYNC_EVENT_GAP_MS - 100)
+    expect(getState).toHaveBeenCalledTimes(3)
+
+    resolveTrailing(syncingState(4))
+    await settle()
+    expect(getState).toHaveBeenCalledTimes(4)
+    expect(screen.getByText(/Syncing 6 \/ 6/)).toBeInTheDocument()
   })
 
   test('a successful action cancels a pending failed-read retry', async () => {
@@ -386,6 +568,60 @@ describe('App sync events', () => {
     expect(screen.getByRole('button', {name: 'Sync now'})).toBeEnabled()
     // The action's own error is not a read error, so the successful read leaves it in place.
     expect(screen.getByText('Disable failed')).toBeInTheDocument()
+  })
+
+  test('after an already-running refusal, Sync stays disabled until the queued refresh resolves', async () => {
+    let resolveRefresh
+    const getState = vi.fn()
+      .mockResolvedValueOnce(dashboardState())
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveRefresh = resolve
+      }))
+    const syncNow = vi.fn(async () => {
+      throw new RuntimeError(syncAlreadyRunningMessage)
+    })
+    __setWailsMocks({GetAppState: getState, SyncNow: syncNow})
+
+    render(App)
+    await settle()
+    await fireEvent.click(screen.getByRole('button', {name: 'Sync now'}))
+    await settle()
+    expect(getState).toHaveBeenCalledTimes(2)
+    // The refusal has ended the SyncNow call, but the refresh that says why is still in flight.
+    expect(screen.getByRole('button', {name: 'Syncing…'})).toBeDisabled()
+    expect(screen.queryByText(syncAlreadyRunningMessage)).not.toBeInTheDocument()
+
+    resolveRefresh(syncingState(2))
+    await settle()
+    expect(screen.getByText(/Syncing 2 \/ 6/)).toBeInTheDocument()
+    expect(screen.getByRole('button', {name: 'Syncing…'})).toBeDisabled()
+  })
+
+  test('a failed refresh after an already-running refusal keeps Sync disabled and retries after 2s', async () => {
+    const getState = vi.fn()
+      .mockResolvedValueOnce(dashboardState())
+      .mockRejectedValueOnce(new RuntimeError(failureMessage))
+      .mockResolvedValueOnce(syncingState(3))
+    const syncNow = vi.fn(async () => {
+      throw new RuntimeError(syncAlreadyRunningMessage)
+    })
+    __setWailsMocks({GetAppState: getState, SyncNow: syncNow})
+
+    render(App)
+    await settle()
+    await fireEvent.click(screen.getByRole('button', {name: 'Sync now'}))
+    await settle()
+    expect(getState).toHaveBeenCalledTimes(2)
+    expect(screen.getByText(failureMessage)).toBeInTheDocument()
+    // The held sync flag is what arms the retry: the failed read left the optimistic state in place.
+    expect(screen.getByRole('button', {name: 'Syncing…'})).toBeDisabled()
+
+    await advance(1999)
+    expect(getState).toHaveBeenCalledTimes(2)
+    await advance(1)
+    expect(getState).toHaveBeenCalledTimes(3)
+    expect(screen.queryByText(failureMessage)).not.toBeInTheDocument()
+    expect(screen.getByText(/Syncing 3 \/ 6/)).toBeInTheDocument()
   })
 
   test('unsubscribes from sync:changed on unmount and makes no reads after it', async () => {
@@ -501,6 +737,7 @@ describe('App sync events', () => {
       expect(screen.getByText(/Syncing 3 \/ 6/)).toBeInTheDocument()
       expect(getState).toHaveBeenCalledTimes(2)
 
+      await advance(SYNC_EVENT_GAP_MS)
       emitSyncChanged()
       await settle()
       expect(screen.getByRole('button', {name: 'Sync now'})).toBeEnabled()
@@ -589,5 +826,90 @@ describe('App sync now', () => {
     expect(syncNow).toHaveBeenCalledOnce()
     expect(await screen.findByRole('button', {name: 'Syncing…'})).toBeDisabled()
     expect(syncStatus()).toHaveTextContent('Current sync: Sync running')
+  })
+
+  test('a second click while SyncNow is in flight does not call it again', async () => {
+    let resolveSync
+    const syncNow = vi.fn(() => new Promise((resolve) => {
+      resolveSync = resolve
+    }))
+    __setWailsMocks({
+      GetAppState: vi.fn().mockResolvedValueOnce(dashboardState()),
+      SyncNow: syncNow
+    })
+
+    render(App)
+    const button = await screen.findByRole('button', {name: 'Sync now'})
+    // Two native clicks before Svelte re-renders: the second one reaches the handler, as a double click would.
+    button.click()
+    button.click()
+
+    expect(syncNow).toHaveBeenCalledOnce()
+    expect(await screen.findByRole('button', {name: 'Syncing…'})).toBeDisabled()
+
+    resolveSync(syncingState(0))
+    expect(await screen.findByText(/Syncing 0 \/ 6/)).toBeInTheDocument()
+    expect(syncNow).toHaveBeenCalledOnce()
+  })
+
+  test('an overlapping SyncNow refusal shows no banner and re-reads the state', async () => {
+    const getState = vi.fn()
+      .mockResolvedValueOnce(dashboardState())
+      .mockResolvedValueOnce(syncingState(2))
+    const syncNow = vi.fn(async () => {
+      throw new RuntimeError(syncAlreadyRunningMessage)
+    })
+    __setWailsMocks({GetAppState: getState, SyncNow: syncNow})
+
+    render(App)
+    await fireEvent.click(await screen.findByRole('button', {name: 'Sync now'}))
+
+    expect(await screen.findByText(/Syncing 2 \/ 6/)).toBeInTheDocument()
+    expect(screen.queryByText(syncAlreadyRunningMessage)).not.toBeInTheDocument()
+    expect(getState).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('button', {name: 'Syncing…'})).toBeDisabled()
+  })
+
+  test('other SyncNow errors still show the banner and do not re-read', async () => {
+    const getState = vi.fn().mockResolvedValueOnce(dashboardState())
+    __setWailsMocks({GetAppState: getState, SyncNow: rejecting()})
+
+    render(App)
+    await fireEvent.click(await screen.findByRole('button', {name: 'Sync now'}))
+
+    expect(await screen.findByText(failureMessage)).toBeInTheDocument()
+    expect(screen.getByRole('button', {name: 'Sync now'})).toBeEnabled()
+    expect(getState).toHaveBeenCalledTimes(1)
+  })
+
+  test('Sync now is not sent while a clear is in flight, so the clear keeps its request token', async () => {
+    let resolveClear
+    const clear = vi.fn(() => new Promise((resolve) => {
+      resolveClear = resolve
+    }))
+    const syncNow = vi.fn(async () => syncingState(0))
+    __setWailsMocks({
+      GetAppState: vi.fn(async () => dashboardState()),
+      ClearActiveUserData: clear,
+      SyncNow: syncNow
+    })
+
+    render(App)
+    await fireEvent.click(await screen.findByRole('button', {name: 'Settings'}))
+    await fireEvent.click(screen.getByRole('button', {name: 'Remove profile'}))
+    const dialog = screen.getByRole('dialog', {name: 'Remove active profile?'})
+    await fireEvent.input(within(dialog).getByLabelText(/Type this exact value/), {target: {value: '76561198000000000'}})
+    await fireEvent.click(within(dialog).getByRole('button', {name: 'Remove profile'}))
+    expect(clear).toHaveBeenCalledOnce()
+
+    // The open modal covers the header Sync now button in the browser. jsdom does no hit-testing, so this click
+    // reaches the handler the way a stray event would; the guard in syncNow is what keeps SyncNow from being called.
+    await fireEvent.click(screen.getByRole('button', {name: 'Sync now'}))
+    expect(syncNow).not.toHaveBeenCalled()
+
+    resolveClear(profileSetupState())
+    expect(await screen.findByRole('heading', {name: 'Connect your profile'})).toBeInTheDocument()
+    expect(syncNow).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog', {name: 'Remove active profile?'})).not.toBeInTheDocument()
   })
 })

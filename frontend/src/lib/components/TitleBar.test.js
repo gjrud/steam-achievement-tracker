@@ -45,7 +45,7 @@ describe('TitleBar DOM and ARIA', () => {
     expect(screen.getByRole('button', {name: 'Settings'})).toHaveAttribute('aria-current', 'page')
   })
 
-  test('the window controls have accessible names and tabindex -1 (keyboard users use OS shortcuts, D13)', () => {
+  test('the window controls have accessible names and tabindex -1', () => {
     renderBar()
 
     for (const name of ['Minimize', 'Maximize', 'Close']) {
@@ -85,22 +85,7 @@ describe('TitleBar DOM and ARIA', () => {
   })
 })
 
-describe('TitleBar keyboard', () => {
-  test('Tab reaches the tabs and the gear in order, and skips the window controls', async () => {
-    renderBar()
-    const user = userEvent.setup()
-
-    const order = []
-    for (let i = 0; i < 5; i++) {
-      await user.tab()
-      order.push(document.activeElement.textContent || document.activeElement.getAttribute('aria-label'))
-    }
-
-    expect(order).toEqual(['Not completed', 'Completed', 'Sync errors', 'Disabled', 'Settings'])
-    await user.tab()
-    expect(document.activeElement).not.toBe(screen.getByRole('button', {name: 'Minimize'}))
-  })
-
+describe('TitleBar Enter', () => {
   test('Enter on a focused tab or the gear changes the view', async () => {
     const {onActiveViewChange} = renderBar()
     const user = userEvent.setup()

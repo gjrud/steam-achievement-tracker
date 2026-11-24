@@ -14,6 +14,9 @@ export function matchesViewFilters(game, query, tag) {
   return matchesSearchQuery(game, query) && matchesTagFilter(game, tag)
 }
 
+// titleCollator is localeCompare's comparer (default locale and options), built once instead of per comparison.
+const titleCollator = new Intl.Collator()
+
 export function sortByTitle(games) {
-  return [...(games || [])].sort((a, b) => gameTitle(a).localeCompare(gameTitle(b)))
+  return [...(games || [])].sort((a, b) => titleCollator.compare(gameTitle(a), gameTitle(b)))
 }

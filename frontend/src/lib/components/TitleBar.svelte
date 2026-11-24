@@ -3,8 +3,7 @@
   // reads --wails-draggable (app.css), and the buttons opt out with no-drag. Runes syntax (D15).
   import {onMount} from 'svelte'
   import {Events, Window} from '@wailsio/runtime'
-  // The title bar's own icon artwork. It started as a copy of build/appicon.svg but no longer matches it: do not copy that
-  // file over it (see docs/frontend.md).
+  // Own icon artwork, no longer the same as build/appicon.svg: do not copy that file over it (docs/frontend.md).
   import appIconUrl from '../../assets/appicon.svg'
 
   let {
@@ -80,11 +79,10 @@
   }
 </script>
 
-<!-- Mousedown on the bar only cancels the focus change and closes the game context menu; the bar has no click or key handler,
-     so the static-element warning does not apply (a header with no role is a static element for Svelte). -->
+<!-- Mousedown only cancels the focus change and closes the game menu; no click or key handler, hence the ignore. -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <header class="title-bar" onmousedown={handleBarMouseDown}>
-  <!-- The icon is decorative: the image is not focusable and has no pointer events, so a press on it targets the icon span (the drag handle). -->
+  <!-- Decorative: a press on it targets this span, the drag handle. -->
   <span class="title-icon" aria-hidden="true">
     <img class="title-icon-img" src={appIconUrl} alt="" width="42" height="42" draggable="false" />
   </span>

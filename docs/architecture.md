@@ -155,8 +155,8 @@ Emit points:
 
 Frontend side (`App.svelte`):
 
-1. `onMount` subscribes with `Events.On('sync:changed', requestRefresh)` before the first read.
-2. `requestRefresh` sets a queued flag. Reads never overlap, wait for user actions in flight, and a burst of events collapses into one extra `GetAppState` read.
+1. `onMount` subscribes with `Events.On('sync:changed', onSyncChanged)` before the first read.
+2. `onSyncChanged` spaces the reads that events cause by `syncEventGapMs` (300 ms): the first event reads at once, events inside the gap get one trailing read when the gap ends, and action-driven reads never wait for the gap. `requestRefresh` sets a queued flag. Reads never overlap, wait for user actions in flight, and a burst of events collapses into one extra `GetAppState` read.
 3. If a read fails while the state still says a sync is running, the frontend retries every 2 seconds until a read succeeds. No other polling of backend state runs. Purely UI timers, such as the clock in `ProfileCard.svelte`, do not read state.
 
 The final event is emitted after the flag is cleared, so the refetch that follows reads `syncInProgress = false`. `GetAppState` also re-checks the sync state against the stored run (`syncStillRunning`), so a run whose final status was written just before the flag cleared is not reported as running.

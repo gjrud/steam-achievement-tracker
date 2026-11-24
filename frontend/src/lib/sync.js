@@ -1,4 +1,14 @@
-import {formatDateTime, formatRelativeTime, integer} from './format.js'
+import {formatDateTime, formatMessage, formatRelativeTime, integer} from './format.js'
+
+// syncAlreadyRunningMessage is the text the backend gives errSyncAlreadyInProgress (app_errors.go), returned when an
+// explicit Sync now overlaps a running sync.
+export const syncAlreadyRunningMessage = 'A sync is already running. Try again when it finishes.'
+
+// isSyncAlreadyRunningError reports whether a SyncNow rejection is the overlapping-start refusal. formatMessage gives
+// the backend's text only for a Go error, so any other rejection never matches.
+export function isSyncAlreadyRunningError(err) {
+  return formatMessage(err) === syncAlreadyRunningMessage
+}
 
 // timeOf returns the datetime, absolute title and relative text for the profile card's time element, or null when
 // the time is missing or unparseable, so the band never writes an invalid datetime attribute.
