@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -202,13 +203,20 @@ func timestampUTC() string {
 }
 
 // inspectSchema reads the applied version from schema_migrations. A database without that table has version 0.
+// A failed read is returned, never taken as "no tables": treating it as an empty database would run the baseline
+// migration over existing data without a backup.
 func inspectSchema(conn *sql.DB) (schemaState, error) {
 	var state schemaState
 	if err := conn.QueryRow("PRAGMA user_version").Scan(&state.userVersion); err != nil {
 		return state, err
 	}
-	state.hasMigrations = tableExists(conn, "schema_migrations")
-	state.hasUserTables = hasUserTables(conn)
+	var err error
+	if state.hasMigrations, err = tableExists(conn, "schema_migrations"); err != nil {
+		return state, err
+	}
+	if state.hasUserTables, err = hasUserTables(conn); err != nil {
+		return state, err
+	}
 	if state.hasMigrations {
 		if err := conn.QueryRow(`select coalesce(max(version), 0) from schema_migrations`).Scan(&state.version); err != nil {
 			return state, err
@@ -217,16 +225,27 @@ func inspectSchema(conn *sql.DB) (schemaState, error) {
 	return state, nil
 }
 
-func tableExists(conn *sql.DB, name string) bool {
+// tableExists reports whether a table named name exists. A missing table is (false, nil); any other error is returned.
+func tableExists(conn *sql.DB, name string) (bool, error) {
 	var exists int
 	err := conn.QueryRow(`select 1 from sqlite_master where type='table' and name=? limit 1`, name).Scan(&exists)
-	return err == nil && exists == 1
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return exists == 1, nil
 }
 
-func hasUserTables(conn *sql.DB) bool {
+// hasUserTables reports whether the database holds any table outside SQLite's own. Errors are returned, not read as
+// an empty database.
+func hasUserTables(conn *sql.DB) (bool, error) {
 	var count int
-	err := conn.QueryRow(`select count(*) from sqlite_master where type='table' and name not like 'sqlite_%'`).Scan(&count)
-	return err == nil && count > 0
+	if err := conn.QueryRow(`select count(*) from sqlite_master where type='table' and name not like 'sqlite_%'`).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func backupDB(conn *sql.DB, paths appdata.Paths) error {
@@ -289,7 +308,43 @@ var migrations = []migration{
 	{version: 1, name: "initial_schema", sql: initialSchemaSQL},
 	{version: 2, name: "cover_cached_flag", sql: coverCachedFlagSQL, compact: true},
 	{version: 3, name: "rewrite_stored_sync_text", sql: rewriteStoredSyncTextSQL, compact: true},
+	{version: 4, name: "add_lookup_indexes_and_prune_snapshots", sql: lookupIndexesAndPruneSnapshotsSQL},
 }
+
+// pruneSnapshotsSQL deletes game_snapshots rows that nothing reads. Per (profile_id, appid, groupid) it keeps the
+// latest row (max id) and the latest completed row. The readers ask only whether a completed row exists, whether any
+// row exists, or which appids have rows (games.go, dashboard.go, cleanup.go, profiles.go). Order is by id
+// (autoincrement), not synced_at. Nothing references game_snapshots by foreign key, so the delete fires no FK checks.
+// Running it again deletes nothing.
+const pruneSnapshotsSQL = `
+DELETE FROM game_snapshots WHERE id NOT IN (
+  SELECT max(id) FROM game_snapshots GROUP BY profile_id, appid, groupid
+  UNION
+  SELECT max(id) FROM game_snapshots WHERE is_completed=1 GROUP BY profile_id, appid, groupid
+);
+`
+
+// lookupIndexesSQL adds the indexes for the lookups that would otherwise scan a whole table: the per-app checks in
+// the cleanup and orphan queries, the snapshot checks in MarkGamePreviouslyCompleted and profileGameHistory, the set
+// lookups in HasSetData, and the latest sync run. The game_sets dlcappid index is reserved for the S5 DLC cover lookup
+// split; no current query uses it. The profile-leading primary keys do not serve the appid lookups, and
+// profile_achievements(appid, apiname) also serves the foreign key check when an achievements row is deleted.
+const lookupIndexesSQL = `
+CREATE INDEX IF NOT EXISTS idx_profile_achievements_appid_apiname on profile_achievements(appid, apiname);
+CREATE INDEX IF NOT EXISTS idx_profile_games_appid on profile_games(appid);
+CREATE INDEX IF NOT EXISTS idx_profile_owned_games_appid on profile_owned_games(appid);
+CREATE INDEX IF NOT EXISTS idx_profile_game_flags_appid on profile_game_flags(appid);
+CREATE INDEX IF NOT EXISTS idx_profile_game_tags_appid on profile_game_tags(appid);
+CREATE INDEX IF NOT EXISTS idx_game_snapshots_appid on game_snapshots(appid);
+CREATE INDEX IF NOT EXISTS idx_game_snapshots_profile_id_appid_groupid_is_completed on game_snapshots(profile_id, appid, groupid, is_completed);
+CREATE INDEX IF NOT EXISTS idx_game_sets_dlcappid on game_sets(dlcappid);
+CREATE INDEX IF NOT EXISTS idx_sync_runs_profile_id on sync_runs(profile_id);
+`
+
+// lookupIndexesAndPruneSnapshotsSQL is migration 4. The prune runs first: it is cheaper to delete duplicate rows than
+// to index them. Not compact: no VACUUM at startup, and the pruned rows are not sensitive. A database at version 4 is
+// refused by older builds (see docs/database.md).
+const lookupIndexesAndPruneSnapshotsSQL = pruneSnapshotsSQL + lookupIndexesSQL
 
 // coverCachedFlagSQL replaces the stored absolute cover path with a cached flag. The path held the OS user name
 // (GDPR: no filesystem paths in the database). Nothing reads it: covers are served by image app id and file name.

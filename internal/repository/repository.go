@@ -2,6 +2,7 @@ package repository
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -255,6 +256,22 @@ func boolInt(v bool) int {
 	}
 	return 0
 }
+
+// int64sJSON encodes ids as a JSON array for `... in (select value from json_each(?))`. One bound array keeps a
+// statement under SQLite's bound-variable limit (32766) however long the list is.
+// An empty or nil slice encodes as "[]": json.Marshal(nil) gives "null", and json_each('null') yields one NULL row,
+// which makes `not in` match nothing.
+func int64sJSON(ids []int64) (string, error) {
+	if len(ids) == 0 {
+		return "[]", nil
+	}
+	b, err := json.Marshal(ids)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
 func floatPtr(v sql.NullFloat64) *float64 {
 	if !v.Valid {
 		return nil

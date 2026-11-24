@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"runtime"
 	"strings"
@@ -82,8 +83,8 @@ func TestOpenAndMigrateRejectsNewerSchema(t *testing.T) {
 		name  string
 		stamp string
 	}{
-		{name: "schema_migrations row above latest", stamp: `INSERT INTO schema_migrations(version, name, applied_at) VALUES(4, 'future', '2026-01-01T00:00:00Z'); PRAGMA user_version = 4;`},
-		{name: "user_version only above latest", stamp: `PRAGMA user_version = 4;`},
+		{name: "schema_migrations row above latest", stamp: fmt.Sprintf(`INSERT INTO schema_migrations(version, name, applied_at) VALUES(%[1]d, 'future', '2026-01-01T00:00:00Z'); PRAGMA user_version = %[1]d;`, latestVersion()+1)},
+		{name: "user_version only above latest", stamp: fmt.Sprintf(`PRAGMA user_version = %d;`, latestVersion()+1)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -97,8 +98,8 @@ func TestOpenAndMigrateRejectsNewerSchema(t *testing.T) {
 				t.Fatal(err)
 			}
 			before := rawRowCounts(t, paths.DB)
-			if before.userVersion != 4 {
-				t.Fatalf("seed user_version = %d, want 4", before.userVersion)
+			if before.userVersion != latestVersion()+1 {
+				t.Fatalf("seed user_version = %d, want %d", before.userVersion, latestVersion()+1)
 			}
 
 			conn, err := OpenAndMigrate(paths)

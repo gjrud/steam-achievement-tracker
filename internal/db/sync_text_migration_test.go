@@ -183,7 +183,7 @@ func TestRewriteStoredSyncTextMigration(t *testing.T) {
 		t.Fatalf("OpenAndMigrate() error = %v", err)
 	}
 	defer conn.Close()
-	assertUserVersion(t, conn, 3)
+	assertUserVersion(t, conn, latestVersion())
 	assertMigration(t, conn, 3)
 
 	wantGames := map[string]string{

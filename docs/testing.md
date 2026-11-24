@@ -74,6 +74,8 @@ No tests. It is constants only.
 | `db_cover_path_test.go` | Migration 2 drops the absolute cover path a version 1 database stored, keeps a cached flag, and compacts the file so the old bytes are gone. |
 | `sync_text_migration_test.go` | Migration 3 rewrites raw stored sync text (`profile_games.last_error`, `sync_runs.error`), keeps the app's own sentences and the run summary, maps `context canceled`, leaves NULL and empty values, and is idempotent. |
 | `dsn_test.go` | SQLite URI building: escaping, query parameters kept, and a path with special characters opens correctly. |
+| `migration4_test.go` | Migration 4 pruning of `game_snapshots` (reader answers unchanged), idempotence and no second backup on reopen, lookup indexes, index use of the lookup queries that live in this package, and the 1M-row startup timing (logged). |
+| `schema_inspect_test.go` | Schema inspection errors surface as errors and are not read as an absent table. |
 
 ### internal/fsretry
 
@@ -109,6 +111,10 @@ No tests. It is constants only.
 | `profiles_active_test.go` | Active profile selection after deactivate, clear and save. |
 | `settings_test.go` | Library settings defaults, per-profile isolation and cleanup. |
 | `sets_test.go` | `HasSetData`. |
+| `id_lists_test.go` | Lists above SQLite's bound-variable limit (JSON-bound id lists), and `int64sJSON` encoding `nil` and empty lists as `[]`. |
+| `snapshots_dedupe_test.go` | `game_snapshots` dedupe: unchanged syncs add no rows, a changed state adds one, completed history survives flips, and the check compares only the latest snapshot. |
+| `cleanup_plan_test.go` | The orphan-delete statements that `ClearProfileData` runs use the migration 4 indexes (`SEARCH ... USING [COVERING] INDEX`). |
+| `profile_removal_timing_test.go` | Removing one of two profiles with 100k achievement rows each, through `ClearProfileData`; generous 60 s bound, time logged. Skipped under `-short`. |
 
 The benchmark seeds 250 base apps. Every second app has a DLC set and every fifth has an extra set, giving 425 entries. The seed is fixed so runs compare the same rows.
 

@@ -2,7 +2,6 @@ package repository
 
 import (
 	"database/sql"
-	"strings"
 	"time"
 )
 
@@ -64,7 +63,20 @@ func (r *Repository) SaveGameSync(update GameSyncUpdate) error {
 		if err := upsertEntry(tx, update.ProfileID, update.AppID, set, now); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`insert into game_snapshots(profile_id, appid, groupid, total_achievements, unlocked_achievements, completion_percent, missing_avg_unlock, is_completed, synced_at) values(?,?,?,?,?,?,?,?,?)`, update.ProfileID, update.AppID, set.GroupID, set.TotalAchievements, set.UnlockedAchievements, set.CompletionPercent, set.MissingAvgUnlock, boolInt(set.IsCompleted), now); err != nil {
+		// Dedupe: a snapshot is written only when the state differs from the latest stored snapshot of this
+		// (profile, app, group), or when none exists yet. Unchanged syncs add no rows; every change is kept,
+		// so the "ever completed" history survives. Compared against snapshots, not profile_games, which the
+		// prune and warning paths can leave out of step with history.
+		if _, err := tx.Exec(`insert into game_snapshots(profile_id, appid, groupid, total_achievements, unlocked_achievements, completion_percent, missing_avg_unlock, is_completed, synced_at)
+			select ?,?,?,?,?,?,?,?,?
+			where not exists (
+				select 1 from (
+					select total_achievements t, unlocked_achievements u, is_completed c from game_snapshots
+					where profile_id=? and appid=? and groupid=? order by id desc limit 1
+				) where t=? and u=? and c=?
+			)`,
+			update.ProfileID, update.AppID, set.GroupID, set.TotalAchievements, set.UnlockedAchievements, set.CompletionPercent, set.MissingAvgUnlock, boolInt(set.IsCompleted), now,
+			update.ProfileID, update.AppID, set.GroupID, set.TotalAchievements, set.UnlockedAchievements, boolInt(set.IsCompleted)); err != nil {
 			return err
 		}
 		if err := r.recomputeGameTagsTx(tx, update.ProfileID, update.AppID, set.GroupID); err != nil {
@@ -132,12 +144,12 @@ func pruneStaleEntries(tx *sql.Tx, profileID, appID int64, keep []int64) error {
 	where := `profile_id=? and appid=?`
 	args := []any{profileID, appID}
 	if len(keep) > 0 {
-		pl := make([]string, len(keep))
-		for i, id := range keep {
-			pl[i] = "?"
-			args = append(args, id)
+		keepJSON, err := int64sJSON(keep)
+		if err != nil {
+			return err
 		}
-		where += ` and groupid not in (` + strings.Join(pl, ",") + `)`
+		where += ` and groupid not in (select value from json_each(?))`
+		args = append(args, keepJSON)
 	}
 	if _, err := tx.Exec(`delete from profile_game_tags where `+where, args...); err != nil {
 		return err
@@ -261,33 +273,20 @@ func (r *Repository) DisableMissingOwnedGames(profileID int64, owned []int64) er
 		}
 		return tx.Commit()
 	}
-	pl := make([]string, len(owned))
-	ownedArgs := make([]any, 0, len(owned)+1)
-	ownedArgs = append(ownedArgs, profileID)
-	for i, id := range owned {
-		pl[i] = "?"
-		ownedArgs = append(ownedArgs, id)
-	}
-	inClause := strings.Join(pl, ",")
-	if _, err := tx.Exec(`update profile_game_flags set disabled=0, disabled_reason=null, updated_at=? where profile_id=? and disabled=1 and disabled_reason='not_owned' and appid in (`+inClause+")", append([]any{now}, ownedArgs...)...); err != nil {
+	// One JSON array argument instead of one placeholder per id: a large library would exceed SQLite's variable limit.
+	ownedJSON, err := int64sJSON(owned)
+	if err != nil {
 		return err
 	}
-	missingArgs := make([]any, 0, len(owned)+3)
-	missingArgs = append(missingArgs, now, now, profileID)
-	for _, id := range owned {
-		missingArgs = append(missingArgs, id)
+	if _, err := tx.Exec(`update profile_game_flags set disabled=0, disabled_reason=null, updated_at=? where profile_id=? and disabled=1 and disabled_reason='not_owned' and appid in (select value from json_each(?))`, now, profileID, ownedJSON); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(`insert into profile_game_flags(profile_id, appid, groupid, disabled, disabled_reason, created_at, updated_at)
-		select profile_id, appid, groupid, 1, 'not_owned', ?, ? from profile_games where profile_id=? and appid not in (`+inClause+`)
-		on conflict(profile_id, appid, groupid) do update set disabled=1, disabled_reason=`+notOwnedReasonSQL+`, updated_at=excluded.updated_at`, missingArgs...); err != nil {
+		select profile_id, appid, groupid, 1, 'not_owned', ?, ? from profile_games where profile_id=? and appid not in (select value from json_each(?))
+		on conflict(profile_id, appid, groupid) do update set disabled=1, disabled_reason=`+notOwnedReasonSQL+`, updated_at=excluded.updated_at`, now, now, profileID, ownedJSON); err != nil {
 		return err
 	}
-	deleteArgs := make([]any, 0, len(owned)+1)
-	deleteArgs = append(deleteArgs, profileID)
-	for _, id := range owned {
-		deleteArgs = append(deleteArgs, id)
-	}
-	if _, err := tx.Exec(`delete from profile_game_tags where profile_id=? and appid not in (`+inClause+")", deleteArgs...); err != nil {
+	if _, err := tx.Exec(`delete from profile_game_tags where profile_id=? and appid not in (select value from json_each(?))`, profileID, ownedJSON); err != nil {
 		return err
 	}
 	return tx.Commit()

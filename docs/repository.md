@@ -143,7 +143,7 @@ One transaction for one game. In order:
 4. `upsertGameSets`: upsert `game_sets` for every set (name, `dlcappid`, `sort_order`). Nothing is deleted: a set Steam stops reporting keeps its row, so `HasSetData` stays true for that app.
 5. For each set: upsert `achievements` (`groupid`, `archived`, `global_percent`) and `profile_achievements` (`unlocked`, `unlock_time`).
 6. `pruneStaleEntries`: delete `profile_game_tags` and `profile_games` of this app whose `groupid` is not in the new set list. `profile_game_flags` and `game_snapshots` are kept.
-7. For each set: upsert `profile_games` (all stats and flags from the update); insert a `game_snapshots` row; `recomputeGameTagsTx`.
+7. For each set: upsert `profile_games` (all stats and flags from the update); insert a `game_snapshots` row only when the latest snapshot's (total, unlocked, is_completed) differs from this update or none exists; `recomputeGameTagsTx`.
 
 An empty `Sets` removes all entries of the app (step 6 keeps none). The syncer uses that for games whose eligible sets are empty. `WasCompleted` and `NewlyIncomplete` come from the caller; this method does not derive them.
 
