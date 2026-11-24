@@ -18,21 +18,25 @@ import (
 )
 
 // stubGitHub serves the GitHub release API and asset downloads from memory. Asset URLs point back at the stub, so no
-// request leaves the test.
+// request leaves the test. assets is the release's asset list; nil means realAssets.
 type stubGitHub struct {
 	tag        string
 	withSums   bool
 	sumsStatus int
 	latestCode int
+	assets     []string
 	bodies     map[string][]byte
 	srv        *httptest.Server
 }
 
 func newStubGitHub(t *testing.T, s *stubGitHub) *httptest.Server {
 	t.Helper()
+	if s.assets == nil {
+		s.assets = realAssets
+	}
 	s.bodies = map[string][]byte{}
-	for _, name := range realAssets {
-		if name == "SHA256SUMS" {
+	for _, name := range s.assets {
+		if name == assetSHA256SUMS {
 			continue
 		}
 		s.bodies[name] = []byte("bytes of " + name)
@@ -46,7 +50,7 @@ func newStubGitHub(t *testing.T, s *stubGitHub) *httptest.Server {
 				return
 			}
 			var assets []map[string]any
-			for _, name := range realAssets {
+			for _, name := range s.assets {
 				if name == "SHA256SUMS" && !s.withSums {
 					continue
 				}
@@ -66,8 +70,8 @@ func newStubGitHub(t *testing.T, s *stubGitHub) *httptest.Server {
 				return
 			}
 			var b strings.Builder
-			for _, name := range realAssets {
-				if name == "SHA256SUMS" {
+			for _, name := range s.assets {
+				if name == assetSHA256SUMS {
 					continue
 				}
 				sum := sha256.Sum256(s.bodies[name])
@@ -130,18 +134,39 @@ func TestProviderSelectsAppImageAndVerifiesDigest(t *testing.T) {
 	}
 }
 
+// TestProviderSelectsWindowsPortable runs both portable names end to end: the release's asset list carries one of them,
+// the provider selects it, and its digest is found by exact name in SHA256SUMS and verified.
 func TestProviderSelectsWindowsPortable(t *testing.T) {
-	stub := &stubGitHub{tag: "v0.3.0", withSums: true}
-	srv := newStubGitHub(t, stub)
-	rel, err := providerFor(t, srv.URL).Check(context.Background(), updater.CheckRequest{CurrentVersion: "0.2.0", Platform: "windows", Arch: "amd64"})
-	if err != nil {
-		t.Fatalf("Check: %v", err)
+	cases := []struct {
+		name  string
+		asset string
+		list  []string
+	}{
+		{"unversioned name (next release, realAssets)", assetPortableUnversioned, realAssets},
+		{"versioned name (earlier release)", assetPortable, assetsWithPortable(assetPortable)},
 	}
-	if rel == nil || !strings.HasSuffix(rel.Artifact.Filename, windowsPortableSuffix) {
-		t.Fatalf("release = %+v", rel)
-	}
-	if refusal := installRefusal(rel.Verification, hostEnv{goos: "windows"}); refusal != "" {
-		t.Fatalf("windows portable refused: %q", refusal)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &stubGitHub{tag: "v0.3.0", withSums: true, assets: tc.list}
+			srv := newStubGitHub(t, stub)
+			rel, err := providerFor(t, srv.URL).Check(context.Background(), updater.CheckRequest{CurrentVersion: "0.2.0", Platform: "windows", Arch: "amd64"})
+			if err != nil {
+				t.Fatalf("Check: %v", err)
+			}
+			if rel == nil || rel.Artifact.Filename != tc.asset {
+				t.Fatalf("release = %+v, want filename %q", rel, tc.asset)
+			}
+			if rel.Verification == nil || rel.Verification.DigestAlgo != "sha256" || len(rel.Verification.Digest) != sha256.Size {
+				t.Fatalf("verification = %+v", rel.Verification)
+			}
+			want := sha256.Sum256(stub.bodies[tc.asset])
+			if !bytes.Equal(rel.Verification.Digest, want[:]) {
+				t.Fatal("digest does not match the asset bytes")
+			}
+			if refusal := installRefusal(rel.Verification, hostEnv{goos: "windows"}); refusal != "" {
+				t.Fatalf("windows portable refused: %q", refusal)
+			}
+		})
 	}
 }
 

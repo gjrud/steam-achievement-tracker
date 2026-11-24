@@ -154,7 +154,7 @@ A refusal makes the release notify-only. The banner then shows the reason and th
 
 | Platform | Asset |
 | --- | --- |
-| Windows amd64 | the asset whose name ends with `-windows-amd64-portable.exe` (for example `steam-achievement-tracker-<version>-windows-amd64-portable.exe`). The installer and any package are never chosen. |
+| Windows amd64 | the asset whose name ends with `-windows-amd64-portable.exe`: `steam-achievement-tracker-windows-amd64-portable.exe` from the first release after v1.2.1 on (no version in the name), and `steam-achievement-tracker-<version>-windows-amd64-portable.exe` in earlier releases. The suffix matches both. The installer and any package are never chosen. |
 | Linux amd64 | exactly `steam-achievement-tracker-linux-x86_64.AppImage`. The release job renames the AppImage to this name before it writes `SHA256SUMS`. |
 | Anything else | none (-1) |
 
@@ -279,7 +279,7 @@ A leftover `wails-update-*` directory inside the Windows install folder makes th
 - Update authenticity is not checked. The update is integrity-checked against a sums file from the same release.
 - No rollback for a new version that starts and then crashes. Reinstall the same or a newer version. An older build refuses a database stamped with a newer schema (`internal/db`), so do not reinstall an older version after a newer one has run.
 - A machine-wide (HKLM) install is not supported by the updater, so its Apps & Features entry is never changed.
-- Portable exes keep their versioned download name (`...-<old>-windows-amd64-portable.exe`), so their name shows the old version. The AppImage asset name has no version, so it is unaffected unless the user renamed the file.
+- The first release after v1.2.1 names the portable exe without a version (`steam-achievement-tracker-windows-amd64-portable.exe`), so a self-updated file keeps a stable name. A portable file that already carries a version in its name (`...-<old>-windows-amd64-portable.exe`) keeps that name after an update, because the updater never renames the file. Rename it by hand once (close the app first; renaming breaks taskbar pins and shortcuts that point to the old name). Data, settings and the API key are not tied to the file name.
 - Unauthenticated GitHub rate limit: 60 requests per hour per IP. A check costs up to two requests. An Install costs a re-check (up to two) plus the download (one).
 - Installs into a folder that is not writable (for example a machine-wide Windows install) fail at download with the not-writable sentence and the release link. There is no probe before the download.
 - Linux non-AppImage installs, including packages in `/usr/local/bin`, are notify-only.

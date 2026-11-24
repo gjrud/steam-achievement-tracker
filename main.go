@@ -71,9 +71,10 @@ func main() {
 		Logger: newWailsLogger(logWriter{}),
 		Windows: application.WindowsOptions{
 			// WebView2 profile (browser cache and state) under the app's cache directory, created above. Wails' default
-			// is %AppData%\<exe name>, and releases rename the portable exe per version, so each version would start a
-			// new profile and orphan the old one. This path is fixed. Ignored on Linux. The cache directory is kept on
-			// uninstall (build/windows/nsis/project.nsi).
+			// is %AppData%\<exe name>, but the exe name is not stable: older releases put the version in the portable
+			// exe's name, and a user may rename the file. A profile keyed on the exe name would change with it and
+			// orphan the old one. This path is fixed. Ignored on Linux. The cache directory is kept on uninstall
+			// (build/windows/nsis/project.nsi).
 			WebviewUserDataPath: webviewPath,
 		},
 		Linux: application.LinuxOptions{

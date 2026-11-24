@@ -34,7 +34,7 @@ I built this app for personal use, entirely through vibecoding. I have entry-lev
 Download a file from the [GitHub Releases](https://github.com/gjrud/steam-achievement-tracker/releases) page. Each release lists `SHA256SUMS` for its files. Check a download with `sha256sum --check --ignore-missing SHA256SUMS` on Linux, or `Get-FileHash <file> -Algorithm SHA256` in PowerShell.
 
 - **Linux:** a deb, rpm, or Arch (`pkg.tar.zst`) package, or the AppImage. Removing a package removes only the program files.
-- **Windows:** `steam-achievement-tracker-<version>-windows-amd64-setup.exe` (per-user installer, no administrator rights, Start Menu shortcut) or `...-windows-amd64-portable.exe` (runs without installing; same data folder as the installer). The builds are not code-signed, so SmartScreen may show "Windows protected your PC". Choose **More info**, then **Run anyway**.
+- **Windows:** `steam-achievement-tracker-<version>-windows-amd64-setup.exe` (per-user installer, no administrator rights, Start Menu shortcut) or `steam-achievement-tracker-windows-amd64-portable.exe` (runs without installing; same data folder as the installer). Older portable downloads have a version in the file name (`steam-achievement-tracker-<version>-windows-amd64-portable.exe`); in-app updates keep that file name, so it keeps showing the old version. To rename it to `steam-achievement-tracker-windows-amd64-portable.exe`, close the app first; renaming breaks taskbar pins and shortcuts that point to the old name. The builds are not code-signed, so SmartScreen may show "Windows protected your PC". Choose **More info**, then **Run anyway**.
 
 Uninstalling never removes your data, cache, logs, or saved API key.
 

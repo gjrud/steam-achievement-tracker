@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -70,19 +70,21 @@ jobs:
       GIT_COMMITTER_NAME: ${{ github.repository_owner }}
       GIT_COMMITTER_EMAIL: ${{ github.repository_owner }}@users.noreply.github.com
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/setup-go@v7
+      # No caches in release builds: the artifacts must not come from restored caches (cache poisoning).
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
+          cache: false
 
-      - uses: actions/setup-node@v7
+      # No npm cache, independent of any packageManager field (see the cache rule above).
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          package-manager-cache: false
 
       # CGO deps for Wails v3 on Linux (GTK4 + WebKitGTK 6.0) and go-sqlite3.
       - name: Install system packages
@@ -139,7 +141,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-packages
           path: |
@@ -156,20 +158,21 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/setup-go@v7
+      # No caches in release builds: the artifacts must not come from restored caches (cache poisoning).
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
+          cache: false
 
-      # npm ci itself runs inside the windows:build task (frontend install step).
-      - uses: actions/setup-node@v7
+      # npm ci itself runs inside the windows:build task (frontend install step). No npm cache (see above).
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          package-manager-cache: false
 
       # Bindings generation compiles main.go, which embeds all:frontend/dist. The real
       # frontend build (run by the windows:build task) overwrites it.
@@ -183,8 +186,9 @@ jobs:
           go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      # gcc: CGO build. makensis: NSIS installer. windows-latest should have both; the
-      # NSIS install is a fallback. Fails fast if either is still missing.
+      # gcc: CGO build. makensis: NSIS installer. windows-latest normally ships both; the NSIS install is a
+      # fallback only, pinned to nsis 3.13.0. To update, check the current version on
+      # community.chocolatey.org/packages/nsis and bump --version here. Fails fast if either is still missing.
       - name: Verify toolchain (gcc, NSIS)
         run: |
           gcc --version
@@ -192,7 +196,7 @@ jobs:
             # Chocolatey feed returns transient 504s; retry before failing.
             installed=0
             for attempt in 1 2 3 4 5; do
-              if choco install nsis -y --no-progress; then
+              if choco install nsis --version=3.13.0 -y --no-progress; then
                 installed=1
                 break
               fi
@@ -265,16 +269,18 @@ jobs:
           }
           Write-Host "exe ProductVersion matches: $got"
 
-      # Final names carry the full tag version (pre-release suffix included). The release job
+      # Final names. The setup exe carries the full tag version (pre-release suffix included). The portable exe is
+      # unversioned on purpose: a self-updated file keeps a stable name, like the AppImage. The updater matches the
+      # portable exe by its '-windows-amd64-portable.exe' suffix, so do not add a version back. The release job
       # uploads these files as-is.
       - name: Stage artifacts
         run: |
           mkdir -p dist-windows
-          mv bin/steam-achievement-tracker.exe "dist-windows/steam-achievement-tracker-${VERSION}-windows-amd64-portable.exe"
+          mv bin/steam-achievement-tracker.exe "dist-windows/steam-achievement-tracker-windows-amd64-portable.exe"
           mv bin/steam-achievement-tracker-amd64-installer.exe "dist-windows/steam-achievement-tracker-${VERSION}-windows-amd64-setup.exe"
           ls -la dist-windows
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-packages
           path: dist-windows/*.exe
@@ -292,18 +298,18 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       # Full history + tags for the changelog and the source archive.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
       # Both downloads go into the same flat dist/ (artifacts hold files only, no subdirectories).
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: linux-packages
           path: dist
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: windows-packages
           path: dist
@@ -316,7 +322,7 @@ jobs:
             exit 1
           fi
           version="${GITHUB_REF_NAME#v}"
-          for f in "dist/steam-achievement-tracker-${version}-windows-amd64-portable.exe" \
+          for f in "dist/steam-achievement-tracker-windows-amd64-portable.exe" \
                    "dist/steam-achievement-tracker-${version}-windows-amd64-setup.exe"; do
             if [[ ! -f "$f" ]]; then
               echo "::error::missing $f"
@@ -357,9 +363,8 @@ jobs:
       # The in-app updater reads SHA256SUMS to verify its downloads, so both updater assets must be listed by name.
       - name: Check SHA256SUMS lists the updater assets
         run: |
-          version="${GITHUB_REF_NAME#v}"
           for name in \
-            "steam-achievement-tracker-${version}-windows-amd64-portable.exe" \
+            "steam-achievement-tracker-windows-amd64-portable.exe" \
             "steam-achievement-tracker-linux-x86_64.AppImage"; do
             if ! awk -v n="$name" '$2 == n { found = 1 } END { exit !found }' dist/SHA256SUMS; then
               echo "::error::SHA256SUMS does not list '$name'"
@@ -372,7 +377,7 @@ jobs:
         run: bash .github/scripts/changelog.sh "$GITHUB_REF_NAME" | tee notes.md
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*
 

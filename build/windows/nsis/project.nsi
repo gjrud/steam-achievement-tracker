@@ -210,6 +210,6 @@ Section "uninstall"
     #
     # The WebView2 profile moved from Wails' default %AppData%\<exe name> to the cache directory (main.go). Installs
     # made before that move leave an orphaned %AppData%\<exe name> folder (browser state only, no user data). It is
-    # not removed here: the folder name is the exe name of the version that created it, and releases rename the exe
-    # per version, so this uninstaller cannot reliably find it.
+    # not removed here: the folder name is the exe name of the version that created it, and older releases named the
+    # portable exe per version, so this uninstaller cannot reliably find it.
 SectionEnd
