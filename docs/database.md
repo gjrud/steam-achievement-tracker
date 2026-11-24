@@ -6,9 +6,9 @@ Developer reference for the SQLite layer in `internal/db` (`db.go`, `dsn.go`). T
 
 - Driver: `github.com/mattn/go-sqlite3` (CGO). `go.mod` pins v1.14.x.
 - One database file: `<data>/steam-achievement-tracker.db` (`config.DBFileName`), with `<data>` set to `appdata.Paths.DataDir`. Backups go in `<data>/backups/`.
-- Privacy (GDPR): all data in this file stays on the user's machine. The app sends it nowhere. Its network traffic goes to Steam (Web API and CDN) and, for update checks and update downloads, to GitHub (see [updater.md](updater.md#network)); the README "Where your data stays" section says the same. The update check setting is stored here, but no database content is sent with an update request. The database never stores filesystem paths, since they carry the OS user name. Cover files are found from `image_appid` and `file_name` only (`cover_images.cached` is the flag). Two things can still hold personal data, and the README privacy section tells users about them. The sync error text (`sync_runs.error`, `profile_games.last_error`) holds only user-safe sentences: `steam.UserMessage` text, the usererr sentences the app writes, and the run texts the app writes itself (see [app-service.md](app-service.md#error-boundary)). Migration 3 rewrote the rows written by earlier versions, which had stored raw error text, so no row keeps a request address, SteamID64, vanity name or backend text (see [Migrations](#migrations)). Backups made before migration 2 still hold the old `cover_images.path` values. A backup made before migration 3 still holds the old raw `last_error` and `sync_runs.error` text, which can include request addresses with a SteamID64 from older versions; the app does not display it, but the file stays on disk until the user deletes it.
+- Privacy (GDPR): the database stays on the user's machine, and no database content is sent anywhere. Network use is Steam, and GitHub for updates (see [updater.md](updater.md#network) and the README "Data and privacy" section). The database never stores filesystem paths, since they carry the OS user name. `sync_runs.error` and `profile_games.last_error` hold only user-safe sentences (see [app-service.md](app-service.md#error-boundary)); migration 3 rewrote older rows. Pre-upgrade backups can still hold old data; see [Backup before migration](#backup-before-migration).
 - Journal mode WAL. Foreign keys enforced.
-- Connection pool capped at one open and one idle connection (`SetMaxOpenConns(1)`, `SetMaxIdleConns(1)`). Every query, including nested queries, shares that connection. Do not query `*sql.DB` while a transaction or an open `*sql.Rows` on the same handle remains in use; the query blocks forever. Repository code closes `rows` before issuing the next statement for this reason (see the comments in `loadGameCards` and `profileGameTags`).
+- Connection pool capped at one open and one idle connection (`SetMaxOpenConns(1)`, `SetMaxIdleConns(1)`). Every query, including nested queries, shares that connection. Do not query `*sql.DB` while a transaction or an open `*sql.Rows` on the same handle remains in use; the query blocks forever. Repository code closes `rows` before issuing the next statement for this reason (see the comment on `loadGameCards`, and [repository.md](repository.md#repository-type)).
 - Timestamps are stored as text. The repository writes `time.Now().UTC().Format(time.RFC3339)`. `SaveGameSync` takes its timestamp (`SyncedAt`) from the caller.
 
 ## Open flow
@@ -81,13 +81,13 @@ Build DSNs only through `sqliteDSN`. Do not concatenate paths into DSN strings (
   `DROP COLUMN` needs SQLite 3.35 or newer; the bundled go-sqlite3 ships 3.54.
 - Migration 3 `rewrite_stored_sync_text` (`rewriteStoredSyncTextSQL`, `compact: true`) rewrites stored error text. Versions before it stored the raw error in `profile_games.last_error` and `sync_runs.error`, and the UI shows both. The rule is an allowlist, not a pattern match:
   - a value that is exactly one of the sentences the app writes (the `steam.UserMessage` sentences, the usererr sentences, and the run texts `app restarted before sync completed` and `sync ended but its final status could not be saved`) is kept;
-  - `sync_runs.error` also keeps the run summary `N of M games failed to sync`, where N and M are non-empty runs of digits and the value holds nothing else (checked by `partialRunSummarySQL`: `rtrim` on each number, and the fixed words by position, because a `GLOB` cannot require digits-only parts). `1x of 2 games failed to sync` is rewritten;
+  - `sync_runs.error` also keeps the run summary `N of M games failed to sync`, where N and M are non-empty runs of digits and the value holds nothing else (checked by `partialRunSummarySQL`: `rtrim` on each number, and the fixed words by position, because a `GLOB` cannot require digits-only parts);
   - `context canceled` becomes `The request was canceled.`;
   - any other non-empty value becomes `Something went wrong. See the log file for details.`;
   - NULL and empty values are not changed.
 
-  The list is frozen in the migration SQL (`syncTextSafeSentences`). It is not a pattern list because the raw texts vary (endpoints, status lines, URLs, decode messages) and an unlisted raw form would survive a pattern rule. The trade-off: a sentence that the app wrote in an earlier version and that is not on the list becomes the generic sentence. Re-running the migration SQL changes nothing. `compact` removes the old text from the free pages.
-- `compact: true` on a migration means that after its transaction commits, `compact` runs `VACUUM` and then `PRAGMA wal_checkpoint(TRUNCATE)`. `VACUUM` cannot run inside the transaction. Without it the dropped path bytes stay in free pages and in the WAL. `compact` runs only when a compacting migration ran in this open and the database already had user tables before the open (a fresh install holds no dropped data, so it is skipped). A failure is logged with `log.Printf("compact database: ...")` and not returned: `OpenAndMigrate` succeeds, the migration itself stays committed, and `compact` is not retried on the next open. The dropped bytes then stay in free pages and the WAL until SQLite reuses them or a later `VACUUM` runs.
+  The list lives in the migration SQL (`syncTextSafeSentences`). It is append-only: new app sentences are added (see [Adding tests](testing.md#adding-tests)); entries are never removed or edited. It is not a pattern list because the raw texts vary (endpoints, status lines, URLs, decode messages) and an unlisted raw form would survive a pattern rule. The trade-off: a sentence that the app wrote in an earlier version and that is not on the list becomes the generic sentence. Re-running the migration SQL changes nothing. `compact` removes the old text from the free pages.
+- `compact: true` on a migration means that after its transaction commits, `compact` runs `VACUUM` and then `PRAGMA wal_checkpoint(TRUNCATE)`. `VACUUM` cannot run inside the transaction. Without it the dropped or rewritten bytes stay in free pages and in the WAL. `compact` runs only when a compacting migration ran in this open and the database already had user tables before the open (a fresh install holds no dropped data, so it is skipped). A failure is logged as `migration committed; compact database: …` (path-redacted) and not returned: `OpenAndMigrate` succeeds, the migration itself stays committed, and `compact` is not retried on the next open. An incomplete `wal_checkpoint(TRUNCATE)` (busy, or log ≠ checkpointed frames) also counts as a failure. The dropped or rewritten bytes then stay in free pages and the WAL until SQLite reuses them or a later `VACUUM` runs.
 
 ### Backup before migration
 
@@ -98,15 +98,15 @@ Runs only when a migration is pending and the database already contains user tab
 - Copies the main DB file (`paths.DB`) only; WAL and SHM are not copied, because the checkpoint emptied the WAL.
 - Output: `<data>/backups/steam-achievement-tracker-<UnixNano>.db`, created with `O_EXCL` (never overwrites), mode `0600`, then `Sync()`, `Close()`, and `Chmod 0600` again.
 - On copy or sync failure the partial file is removed after `Close` through `fsretry.Remove` (Windows cannot delete an open file). A file that could not be created is never removed.
+- A backup failure (directory, checkpoint, copy) aborts the open: no migration runs and `OpenAndMigrate` returns the error.
 - No retention or pruning. Backups accumulate; nothing in the code deletes them.
 - The backup is not rolled back or restored automatically. A failed migration leaves the backup file behind for manual recovery.
-- Backups made before migration 2 still hold the old absolute cover paths (`cover_images.path`), and so do backups from before any later upgrade. The app never reads or deletes them. Users who care about the OS user name in them must delete the files in `<data>/backups/` (see the README privacy section).
-- A backup made before migration 3 still holds the raw sync error text that migration 3 rewrote (`profile_games.last_error`, `sync_runs.error`), which can include request addresses with a SteamID64. The app does not display it and never reads it; delete it with the other backups if that matters.
+- Backups keep data as it was before the upgrade: one made before migration 2 holds absolute cover paths (`cover_images.path`); one made before migration 3 holds raw `last_error` and `sync_runs.error` text, which can include request URLs with a SteamID64. The app never reads or deletes backups; users must delete them from `<data>/backups/` (see the README "Data and privacy" section).
 
 ### Adding a migration
 
-1. Add a SQL constant next to `initialSchemaSQL` in `db.go` (for example `migrationV2SQL`). Use plain SQL. A migration may contain multiple statements, as the initial migration does.
-2. Append an entry to `migrations`: `{version: 3, name: "descriptive_name", sql: migrationV3SQL}` (set `compact: true` only if the migration drops data). Use the next integer; keep versions contiguous and strictly increasing. `latestVersion()` takes the maximum, so a gap is not an error, but a gap is confusing.
+1. Add a SQL constant in `db.go` next to the other migration constants (for example `migrationV4SQL`). Use plain SQL. A migration may contain multiple statements, as the initial migration does.
+2. Append an entry to `migrations`: `{version: 4, name: "descriptive_name", sql: migrationV4SQL}` (set `compact: true` only if the migration drops or rewrites data that must leave the file; migration 3 rewrites data and is marked compact). Use the next integer; keep versions contiguous and strictly increasing. `latestVersion()` takes the maximum, so a gap is not an error, but a gap is confusing.
 3. Never edit `initialSchemaSQL` or any applied migration. Existing databases will not re-run it.
 4. Update the table reference and mermaid diagram below, plus `repository.md` if query code changes.
 5. Update tests that pin the current version or schema: `internal/db/db_test.go` and `db_gap_test.go` (version stamps, `user_version`, backup naming). Add a test that migrates a database at the previous version and checks the new rows and `user_version`.
@@ -129,7 +129,7 @@ Key-value store for app-level settings.
 Used keys:
 
 - `active_profile_id`. Value is the decimal `profiles.id`, or the empty string meaning no active profile. A missing row also means no active profile. See [repository.md](repository.md#settings-keys).
-- `update_checks_enabled`. Value `1` (on) or `0` (off), written by `SetUpdateChecksEnabled`. A missing row means on, which is the default. Any other value, or a read error, makes the repository return an error, and the updater then treats the setting as unreadable: the startup check is skipped and the snapshot reports checks off. The setting is app-wide, not per profile, and it is added without a migration: the table already exists, and older rows are unaffected. See [updater.md](updater.md#persistence).
+- `update_checks_enabled`. `1` (on) or `0` (off), app-wide; a missing row means on. Added without a migration. Read/write rules: [repository.md](repository.md#update-check-setting), [updater.md](updater.md#persistence).
 
 ### `schema_migrations`
 
@@ -164,7 +164,7 @@ Shared Steam app metadata. Not per profile.
 | `appid` | integer | no | PK | | |
 | `name` | text | no | | | |
 | `has_achievements` | integer | no | | `0` | Bool. |
-| `achievement_status` | text | no | | `'unknown'` | Set by sync (for example `ok`, `no_achievements`). |
+| `achievement_status` | text | no | | `'unknown'` | Set by sync: `unknown` (default, until a successful game sync), `ok`, or `no_achievements`. |
 | `created_at` | text | no | | | |
 | `updated_at` | text | no | | | |
 

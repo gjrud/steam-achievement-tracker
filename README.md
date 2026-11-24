@@ -7,364 +7,191 @@
 [![CodeQL](https://github.com/gjrud/steam-achievement-tracker/actions/workflows/github-code-scanning/codeql/badge.svg?branch=main)](https://github.com/gjrud/steam-achievement-tracker/actions/workflows/github-code-scanning/codeql)
 [![Latest release](https://img.shields.io/github/v/release/gjrud/steam-achievement-tracker?include_prereleases&sort=date&label=release)](https://github.com/gjrud/steam-achievement-tracker/releases)
 
+![Steam Achievement Tracker showing the Not completed view, ranked by how close each game is to completion](assets/screenshots/overview.png)
+
 Steam Achievement Tracker is a Linux and Windows desktop app that tracks your Steam achievement progress. It reads your Steam profile and keeps the results on your computer. It highlights games worth finishing next and makes sync problems visible instead of silently losing old data.
 
 I built this app for personal use, entirely through vibecoding. I have entry-level knowledge of Go, which I often use for personal or work-related CLI tools, but the Svelte/JavaScript frontend is far outside my area of expertise.
 
 ## Features
 
-- **Profile setup** from a SteamID64, a profile URL, or a vanity name. The profile is checked before it is saved.
-- **Secure key storage**: your Steam Web API key is kept only in the system keyring.
-- **Automatic and manual sync** of your library, playtime, purchase status, achievements, and cover images from Steam.
-- **Dashboard** with counters for games, purchased games, completed games and sets, and unlocked achievements, plus a profile card with the latest sync status.
-- **Not completed** view: games ranked by how close they are to being finished, with search and tag filters.
-- **Completed** view: achievement sets that are fully unlocked.
-- **Sync errors** view: games whose latest refresh failed. Earlier data is kept.
-- **Disabled** view: games you disabled, and games the profile no longer owns.
-- **Achievement sets**: each set of a game (base game, named sets, DLC sets) is its own card, completed and disabled on its own.
-- **Per-set actions**: mark as previously completed, flag missing achievements as DLC-related, disable or re-enable.
-- **Library sync options** for unvetted apps and played free-to-play games, per profile.
-- **Remove profile** from Settings. By default, this only disconnects the profile and keeps its data. You can also delete the data and the saved API key.
-- **Local storage** in SQLite, with a backup before database upgrades, and rotating log files.
-- **Update checks** against this project's GitHub releases. The Windows portable and installed builds and the Linux AppImage can update in place. You choose when to install (see [Updates](#updates)).
+- Connect a profile from a SteamID64, a profile URL, or a vanity name. The profile is checked before it is saved.
+- Sync your library, playtime, achievements, and cover images from Steam, automatically or on demand.
+- A dashboard with counters and the latest sync status, and views for games that are not completed, completed, failed to sync, or disabled.
+- Games ranked by how close they are to completion. Each achievement set (base game, named sets, DLC) is its own card.
+- Per-game actions: disable or re-enable, mark as previously completed, flag missing achievements as DLC-related.
+- Your Steam Web API key is stored only in the system keyring. Everything else stays on your computer, in a local SQLite database, a cover cache, and log files.
+- Update checks against this project's GitHub releases, which you can turn off. Some installs can update in place.
 
 ## Requirements
 
-### Linux requirements
-
-- A Linux desktop session with the GTK 4 and WebKitGTK 6.0 runtime libraries. The deb, rpm, and Arch packages install them as dependencies. If the AppImage fails to start, install the GTK 4 and WebKitGTK 6.0 runtime packages. On Debian and Ubuntu the packages are `libgtk-4-1` and `libwebkitgtk-6.0-4`.
-- A Secret Service provider such as GNOME Keyring, unlocked while you use the app. The packages do not install one.
-
-### Windows requirements
-
-- Windows 10 or Windows 11, 64-bit (amd64). Windows Credential Manager is built in.
-- Microsoft Edge WebView2 Runtime. Windows 11 includes it, and the setup installer adds it on Windows 10 when it is missing. The portable exe installs nothing. On Windows 10 the app may not start until the [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) is installed, so install it first.
-
-### Both systems
-
-- A Steam Web API key (see [Get a Steam Web API key](#get-a-steam-web-api-key)).
-- Network access to Steam's Web API and Steam's image servers. Update checks also need access to GitHub; they can be turned off (see [Updates](#updates)).
-- Your own Steam profile, from the account that owns the API key. It can have any privacy setting, including private.
+- **Linux:** a desktop session with the GTK 4 and WebKitGTK 6.0 runtime libraries, and a Secret Service provider such as GNOME Keyring, unlocked while you use the app. The deb, rpm, and Arch packages install the libraries. If the AppImage fails to start, install them (on Debian and Ubuntu: `libgtk-4-1` and `libwebkitgtk-6.0-4`). No package installs a Secret Service provider.
+- **Windows:** Windows 10 or 11, 64-bit. Windows 10 may need the [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/); the installer adds it when missing, the portable exe does not.
+- **Both:** a Steam Web API key from the account that owns the profile, and network access to Steam and, for update checks, GitHub. The profile can have any privacy setting, including private.
 
 ## Install
 
-### Linux install
+Download a file from the [GitHub Releases](https://github.com/gjrud/steam-achievement-tracker/releases) page. Each release lists `SHA256SUMS` for its files. Check a download with `sha256sum --check --ignore-missing SHA256SUMS` on Linux, or `Get-FileHash <file> -Algorithm SHA256` in PowerShell.
 
-Download a package for your distribution (deb, rpm, or Arch `pkg.tar.zst`) or the AppImage from the [GitHub Releases](https://github.com/gjrud/steam-achievement-tracker/releases) page. Each release lists `SHA256SUMS` for its files.
+- **Linux:** a deb, rpm, or Arch (`pkg.tar.zst`) package, or the AppImage. Removing a package removes only the program files.
+- **Windows:** `steam-achievement-tracker-<version>-windows-amd64-setup.exe` (per-user installer, no administrator rights, Start Menu shortcut) or `...-windows-amd64-portable.exe` (runs without installing; same data folder as the installer). The builds are not code-signed, so SmartScreen may show "Windows protected your PC". Choose **More info**, then **Run anyway**.
 
-The packages install the program, a menu entry, and app icons. The window and taskbar use the icon from that menu entry. The title bar inside the app always shows the app's own icon.
-
-Removing the package removes only the program files. Your data, cache, logs, and saved API key stay (see [Data and privacy](#data-and-privacy)).
-
-### Windows install
-
-Each release has two amd64 files:
-
-- `steam-achievement-tracker-<version>-windows-amd64-setup.exe`: a per-user installer. It needs no administrator rights, installs to `%LocalAppData%\Programs\Steam Achievement Tracker` and adds a Start Menu shortcut (no desktop icon). Uninstalling removes the program files and shortcut, but keeps your data, cache, and saved API key.
-- `steam-achievement-tracker-<version>-windows-amd64-portable.exe`: runs without installing. It uses the same data folder as the installer, so you can switch between the two.
-
-The Windows builds are not code-signed. SmartScreen warns about unsigned apps until the downloads build reputation, and may show "Windows protected your PC". Choose **More info**, then **Run anyway**. To check a file first, compare its hash with `SHA256SUMS` on the release page. In PowerShell:
-
-```powershell
-Get-FileHash .\steam-achievement-tracker-<version>-windows-amd64-setup.exe -Algorithm SHA256
-```
-
-On Linux, run `sha256sum --check --ignore-missing SHA256SUMS` in the folder that holds the downloaded files. The file lists every release asset, so `--ignore-missing` skips the ones you did not download.
+Uninstalling never removes your data, cache, logs, or saved API key.
 
 ### Get a Steam Web API key
 
-1. While signed in to Steam, open <https://steamcommunity.com/dev/apikey>. The setup screen's **Get a Steam Web API key** link opens the same page.
+1. While signed in to Steam, open <https://steamcommunity.com/dev/apikey>.
 2. When Steam asks for a domain name, enter `localhost`.
-3. Start the app, paste the key on the setup screen and click **Save key**. Saving does not start a sync.
+3. Start the app, paste the key on the setup screen, and click **Save key**. Saving does not start a sync. Then [connect your profile](#connect-a-profile).
 
-The app stores the key in the system keyring under service `steam-achievement-tracker` and user `steam-web-api-key`:
+The key is stored in the system keyring under service `steam-achievement-tracker` and user `steam-web-api-key` (Secret Service on Linux; a generic credential in Windows Credential Manager). Settings cannot change the key. To replace it before a profile is connected, use **Replace key** on the setup screen. Once a profile is connected, remove the profile with **Delete API key** turned on (see [Remove the profile](#remove-the-profile); leave **Delete profile data** off to keep its data), enter the new key, and connect the same profile again.
 
-- **Linux:** the Secret Service keyring. It may ask you to unlock it first.
-- **Windows:** Windows Credential Manager, as a generic credential named `steam-achievement-tracker:steam-web-api-key`. View or delete it under **Credential Manager** > **Windows Credentials** > **Generic Credentials**.
-
-### Launch
-
-On Linux, start `steam-achievement-tracker` from your menu or a terminal. On Windows, use the Start Menu or run the portable exe. If no key is stored, the app opens the key setup screen. **Retry key lookup** checks the keyring again, which helps if you stored the key another way.
+![API key form, opened with Replace key](assets/screenshots/setup-apikey.webp)
 
 ## Usage
 
-### Change the API key
+### Connect a profile
 
-To enter your first key, see [Get a Steam Web API key](#get-a-steam-web-api-key). You cannot change the key in Settings. If no profile is active, the profile setup screen has a **Replace key** button. Once a profile is connected, remove it with **Delete API key** (see [Remove the active profile](#remove-the-active-profile)), enter the new key, then connect the profile again. Its data is kept unless you also chose **Delete profile data**.
+With a key saved and no profile active, enter a SteamID64, a profile URL with its scheme (`https://steamcommunity.com/profiles/<steamid64>` or `https://steamcommunity.com/id/<name>`), or a vanity name. Click **Validate** to see the Steam name and avatar the app found, then **Save and sync** to make the profile active and start a sync. Only one profile is active at a time.
 
-![API key form, opened with Replace key](assets/screenshots/setup-apikey.gif)
+![Connect a Steam profile](assets/screenshots/connect-profile.webp)
 
-### Connect a Steam profile
+### Sync and dashboard
 
-On first launch, if a key is saved and no profile is active, enter one of:
+A sync starts when you save a profile, when the app starts with a profile and key, and when you click **Sync now**.
 
-- A SteamID64, such as `7656119...`
-- A profile URL with its scheme, such as `https://steamcommunity.com/profiles/<steamid64>`
-- A vanity URL with its scheme, such as `https://steamcommunity.com/id/<name>`
-- A vanity name on its own
+- If one game fails, the rest of the sync continues. The failed game keeps its previous data and appears in **Sync errors**.
+- Games Steam no longer lists for the profile are disabled. A game you disabled yourself stays disabled.
+- Steam rate-limits requests, so a large library takes a while. If the app closes during a sync, the run is recorded as failed and unfinished games keep their previous data.
 
-Click **Validate** to see the Steam name and avatar the app found. Click **Save and sync** to make the profile active and start a sync. Only one profile can be active at a time.
+The dashboard shows the profile card, with the latest sync status and **Sync now**, and counters for games, purchased games, completed games and sets, and unlocked achievements. If some counted games are unvetted (see [Library sync options](#library-sync-options)), a completed counter shows the vetted count followed by the total, such as `12 (15)`. The title bar holds the views below, and a gear icon opens **Settings**.
 
-![Connect a Steam profile](assets/screenshots/connect-profile.gif)
+### Achievement sets
 
-### Sync
-
-A sync starts when you save a profile, when the app starts with a profile and key, or when you click **Sync now**. While it runs, the button reads **Syncing…** and the dashboard refreshes as the sync progresses.
-
-- Games that Steam no longer lists for the profile are disabled for that profile. A game you disabled yourself stays disabled, even if Steam lists it again.
-- Each achievement set of a game gets its own card. Achievements that Steam marks as archived are not counted.
-- DLC sets stay in the list even when you do not own the DLC. They are tagged **Not owned**.
-- If one game fails, the rest of the sync continues. The failed game keeps its previous data, appears in **Sync errors**, and the run is reported as partial.
-- If the app closes during a sync, the sync stops and its run is recorded as failed. Games that were not finished keep their previous data. **Sync canceled** appears only for a run that never recorded its end, such as after a crash or power loss. The next start marks such a run canceled.
-
-Steam limits how quickly the app can request data. The app fetches up to four games at a time and retries requests when Steam returns a temporary error, so syncing a large library takes a while.
-
-### Dashboard
-
-The header shows the profile card and five counters, grouped into three sections:
-
-- **Library**: **All games** (games that are not disabled, including free-to-play games you have played) and **Purchased** (games that are not disabled and are in your account's purchased list). Played free-to-play games are not included in **Purchased**. Steam's purchased list may also include free license grants.
-- **Completed**: **Completed games** (games whose base set is complete; a game with only a completed DLC set does not count) and **Completed sets** (completed base, named or DLC sets, each counted separately).
-- **Unlocked**: **Achievements**, the unlocked achievements in games that are not disabled.
-
-If some counted games or sets are unvetted (see [Library sync options](#library-sync-options)), a completed counter shows the vetted count followed by the total, such as `12 (15)`. The vetted count appears in green.
-
-The profile card shows your avatar, name, and the **Sync now** button. Below the button, the sync band shows the latest sync:
-
-- **Green**, with a check mark: all games synced.
-- **Amber**, with a warning: partial sync, with the number of failed games.
-- **Red**, with a warning: sync failed, with the number of errors when there are any.
-- **Blue**, with a spinner: a sync is running, shown as games synced out of games in the library.
-- **Grey**: no sync yet, or the last sync was canceled.
-
-Below the headline, the dashboard shows the game counts and how long ago the sync finished, such as "5 min ago" or "2 hours ago". After seven days, it shows the date and time instead. While a sync runs, it shows `Started <time>` using the start time. Each state has an icon and text, so colour is not the only signal.
-
-The app's title bar across the top of the window holds the tabs **Not completed**, **Completed**, **Sync errors** and **Disabled**. A gear icon beside them opens **Settings**. On the setup screens the bar shows only the icon and the window controls (minimize, maximize, close). On a narrow window the tabs get tighter, and a label that does not fit is cut short with an ellipsis. The controls keep their place and the bar does not wrap. The dashboard header still stacks on a narrow window.
+A game with DLC or several sets (such as Team Fortress 2's class sets) gets one card per set. Each set is completed and disabled on its own, and a set shares its game's playtime. A DLC set you do not own is tagged **Not owned**, and its achievements are left out of the counters. Sets without achievements are not shown.
 
 ### Not completed
 
-This view lists games that are not yet complete. Each card shows progress, playtime, and tags, plus cover art when cached. When Steam provides the data, it also shows the average unlock rate for the achievements you are missing.
+Games ranked by how close they are to being finished, with title search and tag filters. Cards show progress, playtime, tags and cover art. The order uses a suggestion score from your completion percentage and, when Steam provides it, the average unlock rate of the achievements you are missing. Among the normal candidates, games flagged **New achievements added** come first; then come unowned DLC sets, then games flagged **Achievements in DLC**, then games with no achievements.
 
-![Not completed view](assets/screenshots/not-completed.gif)
+![Not completed view](assets/screenshots/not-completed.webp)
 
-Search filters by title. Select a tag chip to show only matching cards; each chip shows how many cards match.
+| Tag | Meaning |
+| --- | --- |
+| **New achievements added** | The game was complete before, but Steam has added locked achievements since. |
+| **Almost there** | The game has playtime and a suggestion score of 40 or higher. |
+| **In progress** | The game has playtime and a score below 40. |
+| **Untouched** | The game has no recorded playtime. |
+| **Unvetted** | Steam has not vetted the app yet. Cleared by the next sync after Steam vets it. |
+| **No achievements** | Steam reports no achievements for the game. |
+| **Set** / **DLC** / **Not owned** | The card is a non-base set, a DLC set, or a DLC set you do not own. |
+| **Achievements in DLC** | You flagged the remaining achievements as DLC-related. |
+| **Missing cover art** | No cover is cached. |
+| **Sync error** | The latest refresh of this game failed. |
 
 ### Completed
 
-The **Completed** tab lists games and sets with all known achievements unlocked. Search and tag chips work the same way as in **Not completed**.
+Fully unlocked games and achievement sets, with the same search and tag filters.
 
 ![Completed games view](assets/screenshots/completed.png)
 
 ### Sync errors
 
-This tab lists games whose latest refresh failed. The app shows previous data when available. Use **Disable** to hide a game that keeps failing. Right-click a row to mark the game as previously completed, flag its missing achievements as DLC-related, or disable it.
+Games whose latest refresh failed. Earlier data is kept, and the next sync retries them. Use **Disable** to hide a game that keeps failing.
 
 ![Sync errors view](assets/screenshots/sync-error.png)
 
 ### Disabled
 
-This tab lists games you disabled and games the profile no longer owns. Click **Re-enable** to bring a game back.
+Games you disabled and games the profile no longer owns. Right-click a card, or a row in **Sync errors**, and choose **Disable game** (or **Disable set**) to hide it from the views and totals and skip it during sync. Click **Re-enable** in **Disabled** to bring it back.
 
-### Achievement sets
+![Disable and re-enable games](assets/screenshots/disable-renable.webp)
 
-Steam groups achievements into sets. A game with DLC or multiple sets (such as Team Fortress 2's class sets) gets one card per set:
+### Flags
 
-- A set is completed on its own. A completed set moves to **Completed**, and its unfinished siblings stay in **Not completed**.
-- Unnamed sets are named after the game, for example `Team Fortress 2 – Scout`. A card for a set other than the base set has the **Set** tag, and a card for a DLC set has the **DLC** tag.
-- A DLC set you do not own is tagged **Not owned**. It has no progress, and its achievements are left out of the dashboard counters. The next sync after you buy the DLC removes the tag.
-- Sets show the same playtime as their game, because Steam reports playtime per game.
-- Sets without achievements are not shown.
+The same right-click menu has two flags. **Mark as previously completed** is for a game that was complete before Steam added achievements; it adds the **New achievements added** tag while the game is incomplete. **Flag missing achievements in DLC** is for remaining achievements that belong to DLC or to content you do not plan to count; it adds the **Achievements in DLC** tag. Flags are local bookkeeping stored per profile and can be cleared from the same menu.
 
-Search matches the game name and lists all of that game's set cards. Disable and re-enable affect one card at a time. If every set of a game is disabled, the app skips that game during sync. New DLC sets appear only after you re-enable one of its sets.
-
-### Cover art
-
-The app downloads cover images from Steam's image servers to its cache folder. A base game uses the library image from your owned-games data. DLC sets and games without that image use other images Steam lists for the app. A DLC set without its own image uses its parent game's cover. If Steam has no cover, the app checks again after 7 days. Until a cover downloads, the card shows the title's first letter and **Missing cover art**.
-
-### Tags and sorting
-
-The **Not completed** list ranks games by how close they are to completion:
-
-1. Games with achievements that are not flagged as DLC-related. Games flagged **New achievements added** come first.
-2. DLC sets you do not own (**Not owned**), sorted by title. These never rank above a real candidate.
-3. Games flagged **Achievements in DLC**, sorted by suggestion score.
-4. Games with no Steam achievements, sorted by title.
-
-Within the first group, games are sorted by suggestion score, highest first. The score uses your completion percentage and, when Steam provides it, the average unlock rate for the achievements you are missing.
-
-| Tag | Meaning |
-| --- | --- |
-| **New achievements added** | The game was complete before, but Steam has added locked achievements since. Incomplete cards only. |
-| **Almost there** | The game has playtime and its suggestion score is 40 or higher. |
-| **In progress** | The game has playtime, and its suggestion score is below 40. |
-| **Untouched** | The game has no recorded playtime. |
-| **Unvetted** | Steam has not vetted the app yet. Appears on games synced while **Include unvetted apps** was on: every card of such a game, including set and DLC cards and completed cards, has it and can be filtered by it. The next sync after Steam vets the app clears it. A game that leaves the library keeps its last known vetted state, so it may still show the tag in **Disabled**. |
-| **No achievements** | Steam reports no achievements for the game. |
-| **Set** | The card is an achievement set other than the game's base set. |
-| **DLC** | The set belongs to a DLC. |
-| **Not owned** | The set belongs to a DLC you do not own. It has no progress tags. |
-| **Achievements in DLC** | You flagged the remaining achievements as DLC-related. Incomplete cards only. |
-| **Missing cover art** | No cover is cached. A DLC set counts as covered when its parent game is. |
-| **Sync error** | The latest refresh of this game failed. |
-| **Completed** | Shown on completed cards. |
-
-Filter chips and card tags follow this table's order. On completed cards, **Completed** appears first but has no filter chip. A view shows chips only for tags used by at least one card. Changing tabs clears the selected chip, but search still applies.
-
-### Right-click actions
-
-Right-click a game card or a row in **Sync errors** to open its menu:
-
-- **Disable game** or **Disable set** hides it from the active views and totals, and skips it during sync. Re-enable it from **Disabled**.
-- **Mark as previously completed** is for a game that was complete before Steam added more achievements. It adds the **New achievements added** tag while the game is incomplete.
-- **Flag missing achievements in DLC** is for remaining achievements that belong to DLC or to content you do not plan to count. It adds the **Achievements in DLC** tag.
-
-These flags are local bookkeeping stored on your computer for each profile. You can clear either flag from the same menu.
-
-![Disable and re-enable games](assets/screenshots/disable-renable.gif)
-
-![Manually flag games](assets/screenshots/flag-games.gif)
+![Manually flag games](assets/screenshots/flag-games.webp)
 
 ### Library sync options
 
-In **Settings**, choose what to load when syncing the active profile. Each profile has its own settings; both options are on for a new profile. The update check setting is different: it applies to the whole app (see [Updates](#updates)).
+In **Settings**, each profile has two options, both on for a new profile:
 
-- **Include unvetted apps**: includes new Steam apps that Steam hides until it vets them. Those games are tagged **Unvetted** and counted separately in the **Completed** counters. With the option off, every game counts as vetted.
-- **Include played free games**: includes free-to-play games you played without buying. With the option off, only purchased games are tracked, and **Purchased** equals **All games**.
+- **Include unvetted apps**: includes new Steam apps that Steam hides until it vets them. They are tagged **Unvetted** and counted separately in the **Completed** counters.
+- **Include played free games**: includes free-to-play games you played without buying. With it off, only purchased games are tracked.
 
-Changes take effect on the next sync and do not start one. Turning an option off removes the games it excludes during that sync, so they may appear in **Disabled** as no longer owned.
+Changes apply on the next sync. Turning an option off moves the games it excludes to **Disabled**; turning it back on brings them back.
 
-### Remove the active profile
+### Remove the profile
 
-In **Settings**, use **Remove profile** in the **Remove active profile** section. Before enabling the button, the dialog asks you to type the value shown (the profile's SteamID64). Two switches, both off by default, let you choose what else to delete:
+**Remove profile** in **Settings** asks you to type the profile's SteamID64. Two switches, both off by default, choose what else is deleted:
 
-- **Delete profile data** deletes the profile's games, playtime and purchase status, achievements, sync history, manual flags, tags, library sync settings and cached covers.
-- **Delete API key** deletes the Steam Web API key from the system keyring. The app then shows the key screen, and sync stays unavailable until you enter a key again.
+- **Delete profile data**: the profile's games, achievements, sync history, flags, tags, library sync settings and cached covers.
+- **Delete API key**: the key in the system keyring. The app then shows the key screen again.
 
-The confirm button describes what will be deleted, such as **Remove profile and data**. Neither switch deletes log files (see [Log files](#log-files)).
+With both off, the profile is only disconnected: its data stays on disk, and connecting the same SteamID64 again restores it. To delete disconnected data, reconnect the profile (this starts a sync) and remove it with **Delete profile data**, or delete all app data by removing the folders (see [Data and privacy](#data-and-privacy)). Neither switch deletes log files.
 
-If both switches are off, the app only disconnects the profile. Its data stays on disk and the key is kept. Connecting the same SteamID64 again restores the data and starts a sync. Disconnected profile data stays on disk until you reconnect that profile and remove it with **Delete profile data**. If you deleted the profile data, reconnecting starts with both library sync options on.
-
-![Remove active profile](assets/screenshots/clear-data.gif)
+![Remove active profile](assets/screenshots/clear-data.webp)
 
 ## Updates
 
-The app can check GitHub for a newer stable release. It checks a few seconds after startup, and when you click **Check now** in **Settings**. It does not check on a timer. Nothing is downloaded until you click **Install**. When a newer version is available, the dashboard shows a banner with **Install**, a link to the release notes, and **Later**. Installs that cannot update in place (see below) get the same banner without **Install**. **Later** hides the banner until the next launch or your next manual check.
+The app checks GitHub for a newer stable release a few seconds after startup, and when you click **Check now** in **Settings**. A banner offers **Install**, the release notes, and **Later**. Nothing is downloaded until you click **Install**.
 
-**What is contacted.** The app makes ordinary HTTPS requests to `api.github.com`. A check asks for the latest release. When a newer one exists, it also downloads `SHA256SUMS`, which `api.github.com` redirects to a GitHub file host. Install downloads the release file the same way. Each request has no account, install or user identifier and no app version. There is no telemetry: the app does not report its usage, crashes or version to anyone. Your library, profile and API key are never sent.
-
-**Turn checks off.** In **Settings**, clear **Check for updates on startup**. With it off, the app makes no request at startup. **Check now** still works. The setting is stored in the app's database and applies to the whole app, not to one profile.
-
-**Which installs update in place.** The Windows portable exe, the Windows installer (per-user), and the Linux AppImage. Click **Restart now** to apply a downloaded update. The app closes, the new version replaces the old one, and the app starts again. **Restarting cancels a running sync.** When the app opens again, it starts a new sync if a profile and API key are set. Your database is kept.
-
-**Which installs only get a notice.** Linux deb, rpm and Arch packages. The banner shows the new version and a link to the release page. Update these with your package manager, or download the new release yourself.
-
-**What the check guarantees.** Every in-app update is compared with `SHA256SUMS` from the same release. This detects a damaged or incomplete download. It does not prove that the release came from the developer, because the checksum file comes from the same release as the file. To verify where a downloaded file came from, use its build provenance attestation:
-
-```sh
-gh attestation verify <file> --repo gjrud/steam-achievement-tracker
-```
-
-**Limits and leftovers.**
-
-- Only stable releases are offered. Pre-releases (tags with a `-` suffix) are never offered.
-- If the new version cannot start, the app restores the previous version. If it starts and then crashes, there is no rollback: it stays installed. Reinstall the same or a newer version from the release page. Do not reinstall an older version: an older build refuses a database that a newer build has upgraded.
-- The portable exe keeps the file name it was downloaded with, which includes the old version number. The AppImage name has no version. A file you renamed keeps your name.
-- A Windows install in a folder you cannot write to (for example a machine-wide install) fails at download with a message and the release link. The app keeps working.
-- An update can leave these files:
-  - `<app file>.bak`, a copy of the previous version, next to the AppImage on Linux or the exe on Windows, and `<exe>.old.<number>` next to the exe on Windows. When the app starts again, it removes the `.old` files, and the `.bak` file once it is more than 10 minutes old. The Windows uninstaller removes them too.
-  - A folder named `wails-update-<random>` next to the app, after a failed update or a crash. An update that was downloaded but not applied is removed when you close the app. When the app starts again, it removes such a folder if it holds only plain files and has not changed for 10 minutes, and no update is in progress.
-  - A log file named `wails-update-<pid>.log` in your system's temporary folder. It contains full file paths, usually including your user name. The app removes it the next time it starts, once the file is more than 10 minutes old. So a log from a failed update stays if you restart the app within 10 minutes.
-- Versions released before this feature need one manual update: download the new release from the release page and install it.
-- Builds made from source without a version tag (development, Docker and untagged local builds) have no update checks and no update controls.
-- Unauthenticated GitHub requests are limited to 60 per hour per IP address. If a check fails, try again later.
+- **Updates in place:** the Windows portable exe, the Windows per-user installer, and the Linux AppImage. **Restart now** applies a downloaded update and cancels a running sync; a new sync starts when the app reopens. If the new version cannot start, the previous version is restored; if it starts and then crashes, there is no rollback.
+- **Notice only:** Linux deb, rpm and Arch packages show the banner without **Install**. Update them with your package manager.
+- **Integrity:** each download is compared with `SHA256SUMS` from the same release. This detects damage, not a forged release. To check where a file came from, run `gh attestation verify <file> --repo gjrud/steam-achievement-tracker`.
+- **Turn checks off:** clear **Check for updates on startup** in **Settings**. **Check now** still works.
+- Pre-releases are never offered. Builds made from source without a version tag have no update checks. An older build refuses a database that a newer build has upgraded, so never reinstall an older version over a newer one.
+- GitHub limits unauthenticated requests to 60 per hour per IP address. If a check fails, try again later.
 
 ## Data and privacy
 
-The app stores its files in three folders for your user account. Each folder ends in `steam-achievement-tracker`. The environment variables `XDG_DATA_HOME`, `XDG_CACHE_HOME`, and `XDG_STATE_HOME` change the base folders on both systems.
+All your data stays on your computer. The app has no accounts, telemetry, or analytics, and never sends your library, profile, or key to the developer or any other service. It connects only to:
+
+- **Steam's Web API** (`api.steampowered.com`): your key is sent only to the requests that need it.
+- **Steam's CDN**, for cover art and avatars.
+- **GitHub** (`api.github.com` and its file host), for update checks and downloads. No account or identifier is sent, but GitHub sees your IP address.
+
+Files live in three folders ending in `steam-achievement-tracker` (the `XDG_DATA_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME` variables change the base folders). **Settings** shows the exact paths.
 
 | Folder | Linux | Windows | Holds |
 | --- | --- | --- | --- |
-| Data | `~/.local/share/steam-achievement-tracker/` | `%LocalAppData%\steam-achievement-tracker\` | The database and its backups |
-| Cache | `~/.cache/steam-achievement-tracker/` | `%LocalAppData%\cache\steam-achievement-tracker\` | Cover images. On Windows also the WebView2 browser profile (`webview/`) |
-| State | `~/.local/state/steam-achievement-tracker/` | `%LocalAppData%\steam-achievement-tracker\` | Log files (`logs/`) |
+| Data | `~/.local/share/steam-achievement-tracker/` | `%LocalAppData%\steam-achievement-tracker\` | The SQLite database and its pre-upgrade backups (`backups/`) |
+| Cache | `~/.cache/steam-achievement-tracker/` | `%LocalAppData%\cache\steam-achievement-tracker\` | Cover images (and the WebView2 profile on Windows). Safe to delete. |
+| State | `~/.local/state/steam-achievement-tracker/` | `%LocalAppData%\steam-achievement-tracker\` | Log files (`logs/`), rotated at 5 MB |
 
-On Windows, the data and state folders are the same. The **Settings** screen shows the data, cache, and log folders, along with the current log file.
+The API key is never written to the database, the logs, or error messages. Logs can still contain your Steam app IDs and Steam's raw error text. Before sharing a database, log file, or screenshot (for example, in a bug report), remove or blur your display name, SteamID64, and avatar. Database backups made by older upgrades may still hold file paths with your user name, or old error text with your SteamID64; delete any you do not need from `backups/`.
 
-The folders are created for your user only. Windows does not use Linux permission bits; it relies on your user profile's permissions instead.
-
-You can delete the cache at any time. The next sync downloads the covers again; until then, the cards show placeholders.
-
-Your Steam Web API key is stored only in the system keyring, not in these folders (see [Get a Steam Web API key](#get-a-steam-web-api-key)). The app deletes that keyring item only when you choose **Delete API key**.
-
-### Where your data stays
-
-All your data stays on your computer: profiles, library, achievements, sync history, settings, and logs. The app never sends this data to the developer or any other service. It has no accounts, telemetry, or analytics.
-
-The app connects to Steam and, for update checks, to GitHub:
-
-- **Steam's Web API** (`api.steampowered.com`). Your API key is sent only to the requests that need it, to find your profile and read your games and achievements.
-- **Steam's CDN**, for cover art and profile avatars.
-- **GitHub** (`api.github.com`, and the GitHub file host that serves downloads), for update checks and in-app update downloads. No account or identifier is sent, but GitHub sees your IP address, as with any web request. You can turn startup checks off. See [Updates](#updates).
-
-Besides these, the only other network actions are two links that open in your default browser, so your browser loads the page, not the app: **Get a Steam Web API key** opens Steam's key page, and the release link in the update banner opens the GitHub release page.
-
-Your API key is never written to the database, the log files or error messages.
-
-### What is stored in the database
-
-The database file is stored in the data folder. It contains:
-
-- For each connected profile: the SteamID64, the Steam display name and the avatar URL.
-- Your owned games, playtime and purchase status. Game names, achievement API names, Steam's global unlock percentages, and your unlock state and unlock time for each achievement.
-- Your choices: the previously completed, missing-DLC and disabled flags, the library sync options, and the dashboard tags.
-- The sync history: when each sync ran, its status and any error message.
-- The cover records: the cover file name, the Steam URL it came from and when it was checked. The database stores no file paths.
-- The active profile.
-
-The vanity name or profile URL you enter during setup is used once to look up your SteamID64, then discarded.
-
-### Log files
-
-Log files are in the `logs` folder inside the state folder. The current file is `app.log`. When it reaches 5 MB, it is rotated: the 5 newest old files are kept and older ones are removed. Old files are not compressed. Logs record app events, sync warnings, and errors, mostly by Steam app ID. The API key is always removed from these messages. The SteamID64 and vanity name are also removed from the request address that a failed Steam request can include in an error, so new log lines do not contain them. Log lines can still include Steam's raw response text, the app ID, and database or system keyring error text. A file-system error (`*fs.PathError` or `*os.LinkError`) is logged with its paths reduced to file names; a path that appears inside other error text is not removed. Steam's own error text never reaches the app screens or the stored sync history; it is logged only. Errors shown in the app and saved for display are short plain-language messages instead (for example "Steam is temporarily unavailable. Try again later." or "Something went wrong. See the log file for details."): the per-game message in the Sync errors view, the sync run's error, which is stored and exposed in the app state, and the messages of the bound actions and the startup screen. They do not carry the raw Steam response, a file path, SQL, or keyring backend text. Update checks and installs log only a short category, such as `update: check failed: check-failed`, with no file path. To remove log lines, delete the `logs` folder (see below). **Delete profile data** removes the sync history with the profile's data.
-
-### Sharing and erasing your data
-
-Before sharing the database, a log file, or a screenshot (for example, in a bug report), check for your display name, SteamID64, and avatar. Remove or blur them.
-
-To erase a profile in the app, use **Remove profile** (see [Remove the active profile](#remove-the-active-profile)). **Delete profile data** removes the data that only that profile uses. **Delete API key** removes the key from the keyring. Neither one deletes log files. Logs rotate at 5 MB and the 5 newest old files are kept. To remove all of them, delete the `logs` folder in the state folder.
-
-To erase everything, close the app and delete the data, cache, and state folders listed above. On Windows, the data and state folders are the same. If you did not use **Delete API key**, also remove the `steam-achievement-tracker` item from your keyring (Secret Service on Linux, Credential Manager on Windows). Update logs (`wails-update-<pid>.log`, see [Updates](#updates)) are in your system's temporary folder, not in these folders, so delete them there too.
-
-Before a database upgrade, the app copies the database to the `backups` folder inside the data folder. The app never reads or deletes these backups. A backup made before the upgrade that removed stored cover file paths still contains those paths, including your user name. A backup made before the upgrade that rewrote stored sync error text still holds the old text, which can include a request address with your SteamID64; the app does not display it. Delete any backups you do not need from `backups`. This does not affect the current database.
+To erase everything, close the app and delete the three folders, the `steam-achievement-tracker` item in your keyring (unless you used **Delete API key**), and any `wails-update-<pid>.log` files in your system's temporary folder (they contain full file paths, including your user name).
 
 ## Troubleshooting
 
-- **"No Steam profile was found for that account.", a profile link error, or a vanity name error**: check the SteamID64, profile link, or vanity name. A link must include its scheme, such as `https://`, and contain `steamcommunity.com/profiles/<number>` or `steamcommunity.com/id/<name>`. Without the scheme, the app treats the text as a vanity name, which fails.
-- **Sync fails or the profile shows no games**: make sure the profile is yours and belongs to the account that owns the API key. Any privacy setting works.
-- **"Steam Web API key missing"**: enter the key on the setup screen. If you stored it outside the app, click **Retry key lookup**.
-- **The key does not save on Linux**: unlock your Secret Service keyring and try again. If you dismissed the unlock prompt, the app reports that it did not store the key instead of reporting success.
-- **Startup error screen**: the message names the problem and shows the log file. The log has the details.
-- **Portable exe does not start on Windows 10**: install the WebView2 Runtime first (see [Windows requirements](#windows-requirements)).
-- **SmartScreen warning on Windows**: see the note in [Windows install](#windows-install).
-- **"Could not check for updates"**: GitHub may be unreachable or rate-limited. Try again later. To stop checks, see [Updates](#updates).
-- **"The app folder is not writable"**: download the new release from the release page and install it by hand.
-- **Covers are blank**: they download on the next sync. If Steam has no image for a game, the card keeps the placeholder.
-- **Sync failed or partial**: open the **Sync errors** tab to see which games failed. The next sync retries them.
+- **Profile or vanity name not found**: check the SteamID64, link or name. A link needs its scheme (`https://steamcommunity.com/profiles/<number>` or `.../id/<name>`); without it, the text is treated as a vanity name.
+- **Sync fails or shows no games**: the profile must belong to the account that owns the API key. Any privacy setting works.
+- **"Steam Web API key missing"**: enter the key on the setup screen, or click **Retry key lookup** if you stored it outside the app.
+- **The key does not save on Linux**: unlock your Secret Service keyring and try again.
+- **Startup error screen**: the message names the problem. The log file, shown on the screen, has the details.
+- **App does not start on Windows 10**: install the WebView2 Runtime first.
+- **Covers are blank**: they download on the next sync. If Steam has no image, the card keeps the placeholder until a later sync finds one.
 - **A game is missing**: check whether it is disabled, whether **Include played free games** or **Include unvetted apps** is off, and whether Steam still lists it for the profile.
+- **"The app folder is not writable"** (update): download the new release and install it by hand.
 
-Find the log file in the state folder listed in [Data and privacy](#data-and-privacy).
+## Development
 
-## For developers
+The Go backend is at the repository root and in `internal/`. It is a [Wails v3](https://v3.wails.io) app that stores data in SQLite (`go-sqlite3`, CGO) and the key in the system keyring. The frontend is Svelte 5 + Vite in `frontend/`, embedded into the binary. `build/` holds the packaging files, `.github/` the CI and release workflows, and `docs/` the developer documentation.
 
-See [docs/](docs/README.md) for developer documentation on the architecture, Go packages, database, sync logic, frontend, tests, and build and release process.
+Building needs Go, Node.js with npm, the Wails v3 CLI (`wails3`) at the version in `go.mod`, and on Linux a C compiler, `pkg-config`, and the GTK 4 and WebKitGTK 6.0 development headers. Windows builds run only on Windows, with MinGW-w64 and NSIS. See [docs/build-and-release.md](docs/build-and-release.md#prerequisites) for exact versions.
 
-Quick start from the repository root:
+From the repository root:
 
 ```sh
-wails3 dev     # run the app in development mode
-wails3 build   # build the production binary in bin/
+wails3 dev                          # run the app in development mode
+wails3 build                        # build the production binary in bin/
+VERSION=0.0.0-dev wails3 package    # Linux packages in bin/
+(cd frontend && npm ci && npm test) # frontend tests
+go test ./internal/...              # backend tests
 ```
 
-See [docs/build-and-release.md](docs/build-and-release.md) for build prerequisites and packaging, and [docs/testing.md](docs/testing.md) for testing.
+`wails3 package` builds for the current OS only. Packages, and production builds on Windows, need a version: set `VERSION` or check out a `vX.Y.Z` tag. Releases are built by the release workflow when a `vX.Y.Z` tag is pushed. See [docs/testing.md](docs/testing.md) for the full verification sequence, and [docs/](docs/README.md) for the architecture, packages, database, sync logic and release procedure.
 
 For security issues, see [SECURITY.md](SECURITY.md). The license is MIT; see [LICENSE](LICENSE).

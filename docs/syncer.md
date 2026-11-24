@@ -45,7 +45,7 @@ flowchart TD
     I -->|ctx done during dispatch| F
     I --> J{per game}
     J -->|ok| K[recordGameSuccess: progress write + OnChange]
-    J -->|error, ctx live| L[SaveGameWarning + recordGameFailure: progress write + OnChange]
+    J -->|error, ctx live| L[recordGameFailure: SaveGameWarning + progress write + OnChange]
     J -->|error, ctx cancelled| M[skip: no warning, no count]
     K --> N[all jobs done]
     L --> N
@@ -143,17 +143,7 @@ Entries may be empty (the game has achievements but none is eligible). That is w
 
 ### What `SaveGameSync` writes
 
-One transaction in `internal/repository/games.go`, per successful game:
-
-- `games` row (name, `has_achievements`, `achievement_status` `ok` or `no_achievements`);
-- `profile_owned_games` playtime (purchased and vetted are left as set by `UpsertOwnedGame`);
-- prunes this profile's `profile_achievements` for the app that are not in the new set list, and the app's `achievements` that are not in it and that no profile still references (all of them when the list is empty);
-- `game_sets` (name, DLC id, order) per set. Rows are only upserted: a set Steam stops reporting keeps its row (see [Surprising behaviour](#surprising-behaviour));
-- `achievements` and `profile_achievements` per set;
-- prunes `profile_games` entries (and their `profile_game_tags`) whose groupid is no longer eligible; flags and snapshots are kept;
-- `profile_games` entry per set, with totals, completion, score and the completion flags;
-- one `game_snapshots` row per set (history);
-- tag recomputation per set (`recomputeGameTagsTx`).
+One transaction in `internal/repository/games.go`; steps in [repository.md](repository.md#savegamesyncgamesyncupdate-error). `game_sets` rows are only upserted (see [Surprising behaviour](#surprising-behaviour)).
 
 ## Set eligibility and entries
 
@@ -198,28 +188,13 @@ The "was" and "newly incomplete" flags (`wasEverCompleted`, `wasEverCompletedNow
 
 `repository.MarkGamePreviouslyCompleted` also sets these flags directly from snapshots and manual flags when the user acts on a card.
 
-### Tag computation hooks
+### Tags
 
-The syncer does not compute tags. `repository` does, in `recomputeGameTagsTx` (`internal/repository/tags.go`), and it runs inside the same transaction as the write that triggers it:
-
-- `SaveGameSync`: once per set, after the entry and snapshot are written.
-- `SaveGameWarning`: once per existing group (or the placeholder group 0), after the warning is written.
-- `SaveCover` (`Repo.SaveCover`): for every entry whose owning image id (`imageAppIDSQL`) equals the saved id, plus every entry of the game with that id as its app id (`entriesForImageApp`), once per cover save. `saveEntries` and `saveGameWithoutAchievements` save covers after `SaveGameSync`, so this is the only write that clears `missing_cover_art` when a cover arrives. Without it the tag would stay until the next game sync.
-- User actions in the repository: `MarkGamePreviouslyCompleted`, `ToggleMissingAchievementsInDLC` and `EnableProfileGame` recompute the tags. `DisableProfileGame` deletes the entry's tags instead.
-
-Thresholds and rules that matter for sync results (verified in `internal/repository/repository.go` and `tags.go`):
-
-- `almost_there` when a started, incomplete entry has a score of at least 40 (`almostThereThreshold`). Otherwise `in_progress`. "Started" is decided by playtime (`playtime_forever > 0`), not by unlocked count.
-- `untouched` when playtime is 0 or less.
-- `no_achievements` when `total == 0` or the game reports no achievements.
-- `completed` when `is_completed`. For a DLC set not owned, no progress tags apply (`dlc_not_owned` returns early).
-- `new_achievements_added`, `missing_achievements_in_dlc` only on incomplete entries.
-- `missing_cover_art` when no cover path is resolved (`effectiveCoverAppIDSQL`).
-- `sync_warning` when the latest sync failed for the entry.
+The syncer does not compute tags; `repository.recomputeGameTagsTx` does, inside the same transaction as `SaveGameSync`, `SaveGameWarning` and `SaveCover`. Because covers are saved after `SaveGameSync`, `SaveCover` is what clears `missing_cover_art` when a cover arrives. Rules and triggers: [repository.md](repository.md#tag-model).
 
 ## Disabled games and "no longer owned"
 
-- `DisabledProfileGameIDs` returns app ids that have a disabled flag (entry-level or `not_owned`) and no entry left enabled. An app with at least one enabled entry stays in the sync, so its enabled sets keep updating.
+- `DisabledProfileGameIDs` returns app ids that have a disabled flag (entry-level or `not_owned`) and no entry left enabled. An app with at least one enabled entry stays in the sync, so its enabled sets keep updating. A disabled flag with no `profile_games` row for the app skips the app only when its reason is `not_owned`.
 - Apps in that list are removed before the workers start and are not counted in `GamesTotal`. A game whose sets are all disabled is therefore not refreshed, which means new DLC sets are only discovered after one of its sets is re-enabled.
 - `DisableMissingOwnedGames` runs after every successful `GetOwnedGames`. For each entry of a game the profile no longer owns it sets `disabled=1` with reason `not_owned`. A `manual` disable keeps its reason, so re-owning a game does not re-enable it. A `not_owned` flag is cleared when the game is owned again. Tags of absent games are deleted.
 - An empty owned list disables every entry of the profile as `not_owned`. `steam.Client.GetOwnedGames` accepts an explicit `game_count` of 0 as a valid empty library, so an empty answer from Steam has this effect.
@@ -238,7 +213,7 @@ Thresholds and rules that matter for sync results (verified in `internal/reposit
 
 Stored and displayed error text is always user-safe. `recordGameFailure` stores `steam.UserMessage(err)` as the game warning, and `fail` stores `steam.UserMessage(err)` as the run error, so a database or filesystem error stores `Something went wrong. See the log file for details.`. `fail` has no special case for cancellation: `steam.UserMessage` gives `The request was canceled.` for `context.Canceled`, also inside a `*url.Error`. The raw error is only logged: a game line through `repository.FormatGameError` with the sentence and the cause (`usererr.LogText`, paths reduced, then `steam.RedactSecrets`), a run line in `app.go` (`full sync failed`) with the same (`logText`), the other sync log lines (`upsert owned game`, `save game warning`, `update sync progress`, `finish sync run`, and so on) and a cover line through `redact.Paths`. Cover refresh errors are never stored. The `partial` run text `N of M games failed to sync` is built from counts, not from error text.
 
-`SaveGameWarning` keeps prior data when the game has entries: it sets `sync_warning` and `last_error` on each existing entry, and does not change totals. If the game has no entries, it creates a group-0 placeholder with `sync_warning` only; this placeholder has no progress and produces no progress tags until a sync succeeds. It also upserts the owned-game row so the playtime is current.
+`SaveGameWarning` keeps prior data: it sets `sync_warning` and `last_error` on existing entries and does not change totals. A game with no entries gets a group-0 placeholder with no progress. Details: [repository.md](repository.md#savegamewarningprofileid-gamerecord-warning-string-error).
 
 A run that ends `partial` still updates `last_synced_at` for the profile when at least one game succeeded. A run where every game failed is `partial` with `games_synced` 0, and the profile's `last_synced_at` is not touched.
 
@@ -250,7 +225,7 @@ Per-game warnings are cleared by the next successful sync of that game (`SaveGam
 - `dispatchSyncJobs` stops handing out work when the context is done and returns `ctx.Err()`.
 - A game interrupted by cancellation is not warned and not counted. Its stored data stays as it was. Steam requests honour the context, so workers stop quickly.
 - After the workers finish, `syncGames` returns `ctx.Err()` when cancellation happened after the last job was handed off. Without this check, the run would end as `success`.
-- Any cancellation makes the run `failed`, with the context error as its text.
+- Any cancellation makes the run `failed`; the stored text is `steam.UserMessage(err)`, i.e. `The request was canceled.`
 
 ## Progress and change notifications
 
@@ -270,14 +245,11 @@ It does not fire when `StartSyncRun` fails. The count tests (`syncer_changed_tes
 
 Covers are refreshed only after a game's data is written successfully, never for a failed game and never for a disabled or skipped one.
 
-- `saveEntries` and `saveGameWithoutAchievements` call `refreshCovers` after `SaveGameSync` returns. The image ids are the game id plus each distinct DLC id among the new entries (`coverImageAppIDs`).
+- `saveEntries` (ids from `coverImageAppIDs`: the game id plus each distinct DLC id) and `saveGameWithoutAchievements` (the game id only) call `refreshCovers` after `SaveGameSync` returns.
 - `refreshCovers` does nothing when `Service.Images` is nil. Failures are logged; they never fail the game.
 - `refreshCover` loads the stored cover row, calls `images.Cache.NeedsRefresh`, and stops when the cover is fresh (no request made).
-- For a base game with a `CapsuleFilename`, `images.Cache.RefreshCover` is tried with the library file name from `GetOwnedGames`. If it returns no error and did not download, the store is asked. If it returns an error, `refreshCover` returns it without a store lookup.
-- For a DLC id, or a base game without a capsule name, `images.Cache.StoreItemAssets` is asked first.
-- The result is saved with `Repo.SaveCover` only when `RefreshCover` succeeds with a result that is not `Skipped`. On the capsule path, a result that did not download is not saved; the store lookup runs instead. When `RefreshCover` errors, returns `Skipped`, or the store lookup errors, nothing is saved (no cover row changes). Errors are logged.
 
-The URL rules, the capsule chain and the freshness intervals are in [covers.md](covers.md).
+The capsule/store decision and save rules: [covers.md](covers.md#sync-side-decision-refreshcover). The URL rules, the capsule chain and the freshness intervals are in [covers.md](covers.md).
 
 ## Surprising behaviour
 
@@ -288,10 +260,6 @@ Maintainers should know about these quirks in the current implementation.
 - **Eligible-entry list empty is written, not skipped.** When a game has achievements but none is eligible, `saveEntries` writes an empty set list. All entries of the game are deleted and the game is `ok` with no entries.
 - **Empty user groups mark DLC sets as not owned.** If `GetUserAchievements` returns no groups (`{"response":{}}`, or EResult 42), every DLC-bound set with no unlocked achievement is flagged `DLCNotOwned`, including sets the profile does not own and sets it does own. No warning is recorded.
 - **Set rows are never pruned by sync, so legacy fallback can be refused for good.** `SaveGameSync` only upserts `game_sets`. Once an app has a non-zero groupid row there, `HasSetData` stays true. Only `ClearProfileData` removes those rows, and only when no profile still has `profile_games` rows for the app. Until then, a `GetGameAchievements` failure for that app is never retried through the legacy API.
-- **`partial` covers total failure.** A run where every game failed is `partial`, not `failed`. Only run-level errors make it `failed`.
-- **Counts appear late.** `games_total` is written with the first progress write, so the first game's progress is the first time the run shows a total.
-- **Two copies of the score formula.** `syncer.suggestionScore` and `repository.suggestionScoreOrFallback` both use `0.5/0.5`. Change both together.
-- **`In progress` depends on playtime.** The tag uses `playtime_forever > 0`. A game with playtime and no unlocked achievements is `in_progress`. The user guide describes the tag in the same terms, "the game has playtime", so the two agree; the tag is not based on unlocked achievements.
 
 ## Tests
 

@@ -1,8 +1,8 @@
 # Architecture
 
-This document explains the Steam Achievement Tracker's architecture: its layers, startup and shutdown sequence, frontend-to-backend communication, and handling of errors, secrets, and concurrency. It describes the code as of writing. The user guide, [../README.md](../README.md), covers user-facing behavior; the code remains the source of truth.
+This document explains the Steam Achievement Tracker's architecture: its layers, startup and shutdown sequence, frontend-to-backend communication, and handling of errors, secrets, and concurrency. The [README](../README.md) covers user-facing behavior.
 
-The app is a Wails v3 desktop application for Linux and Windows 10+ (amd64). The Go backend lives at the repository root (`main.go`, `window.go`, `window_csd_gtk4.go`, `window_csd_other.go`, `app.go`, `covers.go`, `wailslog.go`) and in `internal/`. The Svelte 5 frontend lives in `frontend/` and is embedded into the binary from `frontend/dist`.
+The app is a Wails v3 desktop application for Linux and Windows 10+ (amd64). The Go backend lives at the repository root (`main.go`, `window.go`, `window_csd_gtk4.go`, `window_csd_other.go`, `app.go`, `app_errors.go`, `app_update.go`, `covers.go`, `wailslog.go`) and in `internal/`. The Svelte 5 frontend lives in `frontend/` and is embedded into the binary from `frontend/dist`.
 
 ## Stack
 
@@ -24,7 +24,7 @@ Build steps and the release workflow are in [build-and-release.md](build-and-rel
 | Layer | Where | Role |
 | --- | --- | --- |
 | Wails shell | `main.go`, `window.go`, `window_csd_gtk4.go`, `window_csd_other.go`, `wailslog.go` | Creates the `application.New` app, registers services, embeds assets, opens the window, bridges the Wails logger to `app.log`, emits the sync event. |
-| App service | `app.go` (`App`) | Bound to the frontend. Owns the lifetime context, the cached API key state, the sync goroutine, and the init sequence. Orchestrates every user action. |
+| App service | `app.go`, `app_errors.go`, `app_update.go` (`App`) | Bound to the frontend. Owns the lifetime context, the cached API key state, the sync goroutine, and the init sequence. Orchestrates every user action. |
 | Cover service | `covers.go` (`CoverService`) | Plain `http.Handler` mounted at `/game-covers`. Serves cached cover images from disk. Not bound to the frontend. |
 | Domain and infrastructure | `internal/*` | Paths, database, repository (SQL), Steam client, syncer, image cache, keyring, logging, updater and version stamp. Only `internal/update` imports a Wails package (`pkg/updater`), and never the application shell. |
 | Frontend | `frontend/src/` | Svelte 5 UI. Calls bound methods through generated bindings, and refetches state on the `sync:changed` event. |
@@ -106,17 +106,9 @@ Arrows indicate call direction. `Syncer` reports state changes to `App` through 
 5. The main window is created (1280x980, minimum 900x650) by `setupMainWindow` (`window.go`). The window is frameless: Windows creates it frameless, Linux creates it hidden and decorated, makes it frameless and shows it when the page has loaded. On GTK older than 4.16 under Wayland, an empty hidden titlebar is set first so the compositor draws no title bar (see [app-service.md](app-service.md)). The app's title bar is part of the frontend.
 6. `app.Run()` starts the services. Wails v3.1.0 starts services inside `Run` before pending windows are run, and it attaches each service's `Route` to the asset server at that point.
 
-`ServiceStartup` on `App` then runs the initialization sequence (`ensureInitialized`, in `app.go`):
+`ServiceStartup` on `App` then runs the initialization sequence (`ensureInitialized`, in `app.go`). It resolves and creates the data folders, opens `app.log` and the database (migrating it), cancels runs a previous process left `running`, and caches the Steam Web API key from the keyring. A keyring error other than a missing key is logged (paths reduced to base names); the UI gets only the keyring sentence in `apiKeyError`. The step order and the details of each step are in [app-service.md](app-service.md#initialization-ensureinitialized).
 
-1. `appdata.Resolve()` computes the data, cache, state and log paths from the XDG (or Windows Known Folder) base directories.
-2. `appdata.Ensure()` creates the directories with mode `0700`. On failure, `logging.Fallback()` is called and the error is recorded as the init error.
-3. `logging.Init()` opens `app.log` (lumberjack rotation, 5 MB, 5 backups). From here on, `log.Print` writes to the file.
-4. `db.OpenAndMigrate()` opens the SQLite database (WAL mode, one connection), applies pending migrations, and takes a backup first when the database already has tables and a migration is due. See [database.md](database.md).
-5. `repository.New(db)` wraps the connection. `CancelRunningSyncRuns("app restarted before sync completed")` marks any run still `running` as `canceled`. A failure there is logged only.
-6. The Steam Web API key is read once from the keyring into the cache. `keyring.ErrMissing` means no key. Any other error is logged and kept as `apiKeyError`.
-7. The state is published under `mu`: `initialized = true`, paths, repo, key cache, `initError` cleared.
-
-If any step fails, `initialized` stays false, `initError` holds the message, and the next call to `ensureInitialized` retries the whole sequence. `ServiceStartup` always returns `nil`, so a failed init does not stop the app from starting. The frontend shows the failure from `AppState.InitError`.
+If any step fails, `initialized` stays false, `initError` holds the message, and the next call to `ensureInitialized` retries the whole sequence. `ServiceStartup` always returns `nil`, so a failed init does not stop the app from starting. The frontend shows the failure from `AppState.InitError`. `ServiceStartup` also calls `logUpdateInitFailure` and `startUpdateHousekeeping` (the updater's `RunPostUpdate`) before that return, so both run even when init fails.
 
 After init, `ServiceStartup` starts the update check (a few seconds after startup, and only when the setting is on and the updater is available), then reads the state. If an API key is present and a profile exists, it calls `startSync(false)`, which starts a background sync without forcing one if a sync is already running.
 
@@ -159,7 +151,7 @@ Emit points:
 | Final run status | after `FinishSyncRun` | `finish` through `changed` |
 | Flag cleared | after `syncInProgress` is set to false | `endSync` through `emitSyncChanged` |
 
-`endSync` also runs on the early-exit paths of `startSync`: no repo, no key, a failed active-profile read, no profile, a failed library settings read (the only way building the Steam client fails), or a failed latest-run read. Emission goes through `emitSyncChanged`, which reads the emitter under `mu` and calls it after releasing `mu`. A panic after the sync state is set, including one in the first emit ("Sync accepted"), also runs `endSync` through a deferred guard until the sync goroutine takes over `done`. `endSync` releases `syncWG` with a deferred `Done`, so an emitter panic cannot hang `ServiceShutdown`.
+`endSync` also runs on every early exit of `startSync` after the sync state is set and, through a deferred guard, after a panic before the goroutine takes over (see [app-service.md](app-service.md#sync-orchestration)). Emission goes through `emitSyncChanged`, which reads the emitter under `mu` and calls it after releasing `mu`. `endSync` releases `syncWG` with a deferred `Done`, so a panic in the emitter cannot hang `ServiceShutdown`.
 
 Frontend side (`App.svelte`):
 
@@ -173,7 +165,7 @@ The final event is emitted after the flag is cleared, so the refetch that follow
 
 Exported methods on `*App` make up the frontend API. The binding flow is:
 
-1. Go source: an exported method on `*App` in `app.go`.
+1. Go source: an exported method on `*App` in `app.go` or `app_update.go`.
 2. `wails3 generate bindings` (run by `wails3 dev` and `wails3 build`) writes `frontend/bindings/github.com/gjrud/steam-achievement-tracker/app.js` and `models.js`. The directory is git-ignored and must not be edited.
 3. The frontend imports the functions from that path. Each function calls `$Call.ByID` with a numeric method id. A Go error becomes a rejected promise. A method returning `(T, error)` resolves to the value.
 4. The generator excludes these names from the binding set: `ServiceName`, `ServiceStartup`, `ServiceShutdown`, and `ServeHTTP` (see `internal/generator/collect/service.go` in Wails v3.1.0). Unexported methods are never bound, so helpers such as `setEventEmitter` stay internal.
@@ -209,7 +201,7 @@ The Steam Web API key is the only secret.
 | --- | --- |
 | `initMu` | The init sequence (`initializeOnce`). It is released before `ensureInitialized` loads the update toggle. |
 | `keyMu` | Keyring operations that change the cached key state: `SaveAPIKey`, `refreshAPIKey`, `clearSteamAPIKey`. |
-| `mu` | All other `App` state: paths, repo, key cache, sync flags, cancel func, baseline, emitter. |
+| `mu` | All other mutable `App` state: init flag and error, paths, log file path, repo, key cache, sync flags, cancel func, baseline, emitter, updater, Steam base URL override (tests). |
 | `syncWG` | Running sync goroutines. Waited on by `ServiceShutdown` and `cancelSyncAndWait`. |
 
 Lock order is `initMu`, then `keyMu`, then `mu`. Code never takes `keyMu` while holding `mu`; events are emitted only after `mu` is released. The repository does not take `mu`.
@@ -244,6 +236,7 @@ Nothing else is contacted. The "Get a Steam Web API key" link and the update ban
 | `window_csd_other.go` | No-op `forceClientDecorations` for all other builds | [app-service.md](app-service.md) |
 | `app.go` | `App` service: bound API, init, sync orchestration, state assembly, API key cache | [app-service.md](app-service.md) |
 | `app_update.go` | Glue between `App` and the updater: the six update bindings and the toggle | [app-service.md](app-service.md), [updater.md](updater.md) |
+| `app_errors.go` | Error boundary for bound methods: `callBound`/`callBoundErr` recover panics and return user-facing sentences | [app-service.md](app-service.md#error-boundary) |
 | `internal/update` | In-app updater: GitHub provider, install gate, phase state machine, errors, staging cleanup | [updater.md](updater.md) |
 | `internal/version` | The version stamp (`-ldflags -X`) and the rule that makes it a usable version | [updater.md](updater.md#version-stamp) |
 | `covers.go` | `CoverService`: `/game-covers` HTTP handler for cached covers | [app-service.md](app-service.md), [covers.md](covers.md) |
@@ -253,6 +246,7 @@ Nothing else is contacted. The "Get a Steam Web API key" link and the update ban
 | `internal/keyring` | Steam Web API key storage in the system keyring | [platform.md](platform.md) |
 | `internal/logging` | `app.log` lumberjack writer, rotation, fallback to stderr | [platform.md](platform.md) |
 | `internal/redact` | `redact.Paths`: reduces file paths in `fs.PathError` and `os.LinkError` to base names for logs and UI errors | [covers.md](covers.md) |
+| `internal/usererr` | User-facing sentence errors: `New`, `Wrap`, `Find`, `Raw`, `LogText` | [app-service.md](app-service.md#error-boundary) |
 | `internal/fsretry` | Retried rename and remove for files a process may still hold open (Windows) | [platform.md](platform.md) |
 | `internal/db` | SQLite open, WAL, migrations, pre-migration backups, DSN building | [database.md](database.md) |
 | `internal/repository` | SQL access: profiles, games, sets, achievements, flags, tags, sync runs, settings, covers, dashboard | [repository.md](repository.md) |

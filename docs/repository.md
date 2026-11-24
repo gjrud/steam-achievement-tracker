@@ -19,7 +19,7 @@ func (r *Repository) Close() error
 
 Each exported method's behavior is described in the sections below. In summary:
 
-- Single autocommit statement: `DeactivateProfile`, `TouchProfileSynced`, `SaveLibrarySettings`, `StartSyncRun`, `FinishSyncRun`, `UpdateSyncRunProgress`, `CancelRunningSyncRuns`, `HasSetData`, and all read methods.
+- Single autocommit statement: `DeactivateProfile`, `TouchProfileSynced`, `SaveLibrarySettings`, `SetUpdateChecksEnabled`, `StartSyncRun`, `FinishSyncRun`, `UpdateSyncRunProgress`, `CancelRunningSyncRuns`, `HasSetData`, and all read methods.
 - One transaction: `SaveProfile`, `ClearProfileData` (the deletes; reads happen before it), `UpsertOwnedGame`, `SaveGameSync`, `SaveGameWarning` (warning part; `UpsertOwnedGame` runs first in its own transaction), `MarkGamePreviouslyCompleted`, `DisableMissingOwnedGames`, `DisableProfileGame`, `EnableProfileGame`, `RecomputeGameTags`, `SaveCover`.
 - Not atomic across calls: `ToggleMissingAchievementsInDLC` writes the flag and then recomputes tags in a second transaction. `Dashboard` does its reads in separate statements without a read transaction, so `Summary`, `LatestSyncRun` and the card list can reflect different moments (the card lists themselves come from one `loadGameCards` pass).
 
@@ -43,7 +43,7 @@ Each exported method's behavior is described in the sections below. In summary:
 
 Exported helpers in `repository.go`: `EntryKey(appID, groupID) string` (`"<appid>:<groupid>"`), `DisplayName(gameName, setName, groupID) string`, `FormatGameError(appID, logText) string` (log text only, never stored). `DefaultLibrarySettings() LibrarySettings` is in `settings.go`.
 
-`DisplayName` rules: group 0 is the game name. For a set with a name, if the set name already contains the game name (case-insensitive) it is used as is; otherwise `"<game> – <set>"` (en dash). An unnamed set becomes `"<game> – Set <groupid>"`.
+`DisplayName` rules: group 0 is the game name. For a set with a name, if the set name already contains the game name (case-insensitive) it is used as is; otherwise `"<game> – <set>"` (en dash). An unnamed set becomes `"<game> – Set <groupid>"`. For a named set, an empty game name yields the trimmed set name alone; an unnamed set with an empty game name yields `" – Set <groupid>"` (leading space).
 
 Constant `almostThereThreshold = 40` (score threshold for the `almost_there` tag).
 
@@ -217,7 +217,7 @@ Suggestion sort groups (category order, lower first):
 | `OwnedGamesCount` | Distinct enabled apps that have at least one `profile_games` entry. This is not a count of the Steam library. |
 | `GamesWithAchievementsCount` | As above, with `games.has_achievements = 1`. |
 | `TotalAchievementsUnlocked` | Sum of `unlocked_achievements` over enabled entries whose `dlc_not_owned = 0`. |
-| `TotalUnlockedCount` | Same expression as `TotalAchievementsUnlocked` (duplicate; see notes). |
+| `TotalUnlockedCount` | Same expression as `TotalAchievementsUnlocked`; always equal. Both exported in JSON. |
 | `TotalAchievementsAvailable` | Sum of `total_achievements` over enabled, owned entries. |
 | `NewlyIncompleteGamesCount` | Count of enabled entries with `newly_incomplete = 1` (entries, not distinct games). |
 | `OverallCompletionPercentage` | `TotalAchievementsUnlocked / TotalAchievementsAvailable * 100`, or `0` when available is 0. |
@@ -284,32 +284,14 @@ This is only the backend read order. The frontend re-sorts card tags: `gameTags`
 
 ## Covers (`covers.go`)
 
-Repository side of the cover cache. Files are handled by `internal/images`.
+Repository side of the cover cache; the cover rules are in [covers.md](covers.md). `cached` and the effective cover id (`effectiveCoverAppIDSQL`, which applies the DLC fallback) decide the card's cover URL and `missing_cover_art`.
 
-- `SaveCover(CoverUpdate) error`: rejects `ImageAppID <= 0`. One transaction: upserts `cover_images` (`kind`, `file_name`, `cached` from `CoverUpdate.Cached`, `source_url`; `source_url` is stored as NULL when empty; `checked_at = now`). No file path is passed to or stored by the repository. `downloaded_at` is set to now only when `Downloaded` is true; otherwise the previous value is kept (`coalesce`). Then recomputes tags for the entries returned by `entriesForImageApp`: entries whose owning image id equals the saved id, plus every entry of the game with that id as its app id.
-- `GetCover(imageAppID) (CoverRecord, bool, error)`: returns `ok = false` when no row exists.
-- `ListCovers() (map[int64]CoverRecord, error)`: every cover row, keyed by image id. No production caller exists; only the repository tests use it. The syncer's refresh path uses `GetCover` per image id.
-
-Display URL (`coverURL`, unexported): empty when `cached` is false, `file_name` is empty or `image_appid <= 0`. Otherwise `/game-covers/<image_appid>/<file_name>`, with `?v=<downloaded_at>` when `downloaded_at` is set. The `?v=` value changes only on a new download, which busts the browser cache.
-
-### DLC fallback
-
-A DLC-bound entry (`game_sets.dlcappid <> 0`) displays the DLC's cover when `cover_images` has a row for that DLC id with `cached = 1`. Otherwise it displays the parent game's cover (`effectiveCoverAppIDSQL`). Non-DLC entries always use the game id. The fallback is applied in SQL at read time, so a DLC cover saved later replaces the fallback without a rewrite of the entry.
+- `SaveCover(CoverUpdate) error`: rejects `ImageAppID <= 0`. One transaction upserts `cover_images`: `source_url` is stored as NULL when empty, `checked_at = now`, and `downloaded_at` is set only when `Downloaded` is true (`coalesce` keeps the previous value otherwise). Then recomputes tags for `entriesForImageApp`.
+- `GetCover(imageAppID) (CoverRecord, bool, error)`: `ok = false` when no row exists.
+- `ListCovers() (map[int64]CoverRecord, error)`: test-only; no production caller.
 
 ## Settings notes and other queries
 
 - `HasSetData(appID) (bool, error)` (`sets.go`): true when `game_sets` has a row with `groupid <> 0` for the app, or a `profile_games` entry with `groupid <> 0` exists for it (any profile). The syncer uses it to avoid the legacy single-entry fallback on apps that already have set data.
 - Package-level SQL fragments used across files: `imageAppIDSQL` (the id that owns an entry's store art: DLC id when bound, else game id), `effectiveCoverAppIDSQL` (the id whose cover is displayed), `entryBaseFromSQL` (joins for entries).
 
-## Notes and observations
-
-These notes record current-code behavior that may be unexpected:
-
-- `Summary.TotalUnlockedCount` and `Summary.TotalAchievementsUnlocked` use the same expression and always have equal values. Both are exported in JSON.
-- `Summary.NewlyIncompleteGamesCount` counts entries, not distinct games.
-- `Summary.OwnedGamesCount` counts apps that have at least one profile entry, which is not the same as the owned library. Owned apps without a set or entry are not counted.
-- `game_snapshots` is appended on every sync of every entry and never pruned except by `ClearProfileData`.
-- `DisableMissingOwnedGames` re-enables not-owned entries without recomputing their tags. Tags come back on the next game sync.
-- `ToggleMissingAchievementsInDLC` is two transactions, so a failure in the recompute leaves the flag changed.
-- `SaveGameWarning` writes the owned-game row and the warning in separate transactions.
-- `game_sets` rows are never pruned by sync. Only `ClearProfileData` removes them, and only for apps with no `profile_games` rows at all. A set that Steam stops reporting keeps its row, so `HasSetData` stays true for that app.

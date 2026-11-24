@@ -1,6 +1,6 @@
 # In-app updater
 
-This document describes the in-app updater: how it finds a release, how a user-approved update is downloaded, verified, staged and applied, and what can go wrong. The user-facing rules are in the [user guide](../README.md#updates). The Go code is `internal/update` (the service, the GitHub provider setup, the phase rules, the errors), `internal/version` (the version stamp), and `app_update.go` (the bound methods). The frontend is covered in [frontend.md](frontend.md#update-banner-and-settings).
+This document describes the in-app updater: how it finds a release, how a user-approved update is downloaded, verified, staged and applied, and what can go wrong. The user-facing rules are in the [README](../README.md#updates). The Go code is `internal/update` (the service, the GitHub provider setup, the phase rules, the errors), `internal/version` (the version stamp), and `app_update.go` (the bound methods). The frontend is covered in [frontend.md](frontend.md#update-banner-and-settings).
 
 The updater wraps the framework updater from Wails v3.1.0 (`pkg/updater`, provider `github`). The service never uses the framework's `CheckAndInstall` or `CheckInterval`, because they download without asking. The framework's own UI is off (`updater.WindowNone`). The frontend never subscribes to the framework's `wails:updater:*` events: Go listens to three of them, and the frontend hears only the app's own `update:changed` event.
 
@@ -18,19 +18,13 @@ A build without a valid version stamp (dev builds, Docker builds, untagged local
 
 ## Version stamp
 
-- `internal/version` declares `tag`, a package-level string with no initializer. The production build tasks set it with `-ldflags -X`:
-
-  ```text
-  -X github.com/gjrud/steam-achievement-tracker/internal/version.tag=sat-version:<version>;
-  ```
-
-  The `-X` is part of the single `-ldflags` string in the production branch of `build/linux/Taskfile.yml` (`build:native`) and `build/windows/Taskfile.yml` (`build`). The DEV branch has no `-X`. `<version>` is `PKG_VERSION` from the root `Taskfile.yml`, which has no leading `v`.
-- The Linux task adds the flag only when `PKG_VERSION` is set. The Windows build fails its precondition when `PKG_VERSION` is empty (non-DEV builds).
+- The production build tasks set `internal/version.tag` to `sat-version:<PKG_VERSION>;` through `-ldflags -X`. The flags and the release marker check are in [build-and-release.md](build-and-release.md#version-stamping-and-marker-checks).
 - `version.Current()` reads the stamp. `ParseStamp` needs the `sat-version:` prefix and the `;` suffix, and then `Valid` must accept the rest. `Valid` requires the shape `X.Y.Z` with an optional `-pre` part and no `v` prefix (checked with a regular expression, then `semver.IsValid("v"+v)`). Anything else leaves the updater unavailable. Empty, unlabeled, unterminated, `v`-prefixed and partial versions such as `1.2` are all invalid.
 - `IsPrerelease` is true when the version has a `-`. Pre-releases are never offered (see [Check](#check)).
-- The stamp is a plain string in the binary. Without `-trimpath`, Go records the `-ldflags` string in the build info, and that string contains the marker, so a wrong `-X` path would still pass the release's `grep -aqF`. `-trimpath` leaves it out, so a match proves the variable was set (see [build-and-release.md](build-and-release.md#version-stamping-and-marker-checks)).
 
-To test the updater on a local build, stamp it with an old version: `VERSION=0.0.1` before `wails3 task windows:build` on Windows. On Linux, a plain `wails3 build` binary is notify-only (never Install), and its check fails until the first release that ships the updater (see [Acceptance checks](#acceptance-checks-without-automated-tests)). A stamp equal to or newer than the latest release shows "up to date".
+## Local test build
+
+To test the updater locally, stamp a build with an old version. On Windows: `VERSION=0.0.1` (PowerShell: `$env:VERSION = "0.0.1"`) then `wails3 task windows:build`. On Linux: `VERSION=0.0.1 wails3 package`, then run `bin/steam-achievement-tracker-x86_64.AppImage`. A plain `wails3 build` binary is notify-only (never Install). A stamp equal to or newer than the latest release shows "up to date".
 
 ## Wiring
 
@@ -137,7 +131,7 @@ Anything else is dropped. The result of the operation itself sets every terminal
 
 1. The updater must be available. Host refusals (package installs, unsupported platforms) return their reason without changing the phase.
 2. A notify-only release (the gate, below) returns its reason without changing the phase.
-3. The phase must allow it (`available` or `error`). The phase moves to `downloading`, the install context is created, and the cancel flag is reset.
+3. The phase must allow it (`available` or `error`). From `idle` or `up-to-date`, or with no known release, Install returns "Check for updates first." and changes nothing. Otherwise the phase moves to `downloading`, the install context is created, and the cancel flag is reset.
 4. The install re-runs the check on the install context (with `checkTimeout`, so Cancel aborts it). If the newest release is not the version the user saw, or it is notify-only, or Cancel was pressed during the re-check, nothing is downloaded: the phase returns to `available` with the newest release as found. When the version changed, the banner says so, so the user can review it again. A failed re-check returns to `available` with the check sentence in the snapshot's `error` field. If nothing newer exists, the phase becomes `up-to-date`, even if Cancel was pressed, as long as the re-check itself completed. A Cancel that aborts the re-check returns to `available`.
 5. `Updater.DownloadAndInstall` downloads, verifies and stages the payload. Success moves to `ready`. A cancel moves to `available`. Any other failure moves to `error`.
 
@@ -210,7 +204,7 @@ Categories (`errors.go`):
 | `not-writable` | the staging step returns a permission error (`fs.ErrPermission`) | `update: install: not-writable` | "The app folder is not writable, so the update cannot be installed here. Download the new version from the release page." |
 | `download-failed` | download, checksum or staging fails for any other reason | `update: install: download-failed` | "The update could not be downloaded or verified. Try again." |
 | `restart-failed` | `Restart` returns an error | `update: restart: restart-failed` | "The app could not restart into the update. The update is still ready, so you can try Restart again." |
-| `other` | anything else, including a failed `Updater.Init` and the staged-folder removal at shutdown | `update: unavailable: other`, `update: remove staged update: other` | "The update failed. Try again later." |
+| `other` | anything else, including a failed `Updater.Init` and the staged-folder removal at shutdown | `update: unavailable: other`, `update: remove staged update: other` | `The update failed. Try again later.` (`msgOther`). No current path shows it: a failed `Init` gives the unavailable sentence, and the shutdown removal shows nothing. |
 
 Precedence for a download or install step: our own cancel flag or a cancelled context wins (`cancelled`); then a permission error (`not-writable`); then `download-failed`. The framework's error text is never read beyond the `fs.ErrPermission` check. A cancel after `DownloadAndInstall` returned nil, or during verification and installation (which the framework does not check the context in), ends in `ready`.
 
@@ -253,7 +247,7 @@ Consequences:
 
 `RunPostUpdate` (`internal/update/postupdate.go`) runs on every start of a stamped build, from `ServiceStartup`. It does nothing when the updater is unavailable (dev, Docker and untagged builds, tests). It starts one goroutine per process. No update state is stored: each start works from what is on disk and in the registry.
 
-- Apps & Features (Windows, per-user installed copy only). At once, on every start, the app reads the HKCU uninstall entry that the installer writes: `Software\Microsoft\Windows\CurrentVersion\Uninstall\gjrudSteam Achievement Tracker` (64-bit view). It writes `DisplayVersion` only when the stored value differs from the running version and `DisplayIcon` is the running exe. The value written is the numeric core of the running version. A pre-release part is dropped, as the installer drops it (`1.2.3-rc.1` writes `1.2.3`). A missing key (portable exe) or another install's entry is left alone. The key name must match `UNINST_KEY_NAME` in `build/windows/nsis/wails_tools.nsh`.
+- Apps & Features (Windows, per-user installed copy only). At once, on every start, the app reads the HKCU uninstall entry that the installer writes: `Software\Microsoft\Windows\CurrentVersion\Uninstall\gjrudSteam Achievement Tracker` (64-bit view). It writes `DisplayVersion` only when the stored value differs from the running version and `DisplayIcon` is the running exe. The value written is the numeric core of the running version. A pre-release part is dropped, as the installer drops it (`1.2.3-rc.1` writes `1.2.3`). A missing key (portable exe) or another install's entry is left alone. The key name must match `UNINST_KEY_NAME` in `build/windows/nsis/wails_tools.nsh`. The installer deletes the whole key on uninstall. The app writes no other registry value.
 - Leftover files. Five seconds after startup, or never if the app shuts down first. See [Staging and leftover files](#staging-and-leftover-files).
 
 ## Staging and leftover files
@@ -270,7 +264,7 @@ The framework creates a `wails-update-*` directory next to the target (the exe o
 The startup sweep (`sweepLeftovers`) runs once per start, five seconds after startup (`cleanupDelay`). The delay lets the helper finish its own cleanup of `.bak` and the staging folder first. Each candidate is checked before it is removed:
 
 - `<target>.bak`: a regular file or symlink, never a directory, last modified more than 10 minutes ago (`leftoverMinAge`).
-- on Windows only, `<exe>.old.<digits>` regular files next to the exe. The `<exe>.old.` part matches in any letter case, and the rest must be one or more ASCII digits; any other name stays. There is no age limit: Windows keeps the file until the old process has exited, and its mtime is the old build's time. Elsewhere the match is case-sensitive.
+- on Windows only, `<exe>.old.<digits>` regular files next to the exe. The `<exe>.old.` part matches in any letter case, and the rest must be one or more ASCII digits; any other name stays. There is no age limit: Windows keeps the file until the old process has exited, and its mtime is the old build's time.
 - `wails-update-*` folders next to the target. A folder is removed only when it is flat (regular files only, no subfolders and no symlinks) and neither the folder nor any file in it was changed in the last 10 minutes. It is never the folder that holds the staged payload, and none is removed while an update is downloading, verifying, installing, ready or restarting.
 - `wails-update-<digits>.log` regular files in the OS temp directory (the name must match exactly), once the log was last written more than 10 minutes ago (`leftoverMinAge`). A log from a failed update is therefore removed at the first start at least 10 minutes after it was written; a restart sooner keeps it. The sweep skips the temp logs while the phase is `restarting`, because that log belongs to the live helper.
 
@@ -278,26 +272,24 @@ The age and shape checks cover a second instance of the app. There is no single-
 
 The sweep never removes the target and never removes a tree. For a staging folder that passes the checks, it lists the folder's entries once, removes each listed file by name, then removes the folder with a non-recursive remove. A file added after the listing makes that last remove fail, so the folder and the new file stay and the failure is counted. If a listed file cannot be removed, the folder is not attempted. The sweep does nothing on a Linux package install (no target). Its log lines are counts only (see [Errors and logging](#errors-and-logging)). Nothing is logged when nothing is found.
 
-The NSIS uninstaller still deletes `<exe>.old.*` and `<exe>.bak` in the install folder before its non-recursive `RMDir` (see [platform.md](platform.md#updater-leftovers)). A leftover `wails-update-*` directory inside the install folder would make that `RMDir` fail, and the install folder stays. The startup sweep covers this only when the app starts again after the update.
+A leftover `wails-update-*` directory inside the Windows install folder makes the NSIS uninstaller's non-recursive `RMDir "$INSTDIR"` fail, so the install folder stays (see [platform.md](platform.md#updater-leftovers)). The startup sweep removes such a folder at a later start, once it is flat and unchanged for 10 minutes (rules above).
 
 ## Known limitations
 
 - Update authenticity is not checked. The update is integrity-checked against a sums file from the same release.
-- Only part of the swap and relaunch can be checked before the first release that ships the updater (see [Acceptance checks](#acceptance-checks-without-automated-tests)). The rest, including the AppImage, is tested by that first real update. A bug there reaches users, who would reinstall by hand.
 - No rollback for a new version that starts and then crashes. Reinstall the same or a newer version. An older build refuses a database stamped with a newer schema (`internal/db`), so do not reinstall an older version after a newer one has run.
-- Apps & Features shows the old version from the update until the new version starts once. Then the app writes the numeric core of its version (see [After an update](#after-an-update)). This covers only the per-user (HKCU) installer entry. A machine-wide (HKLM) install is not supported by the updater, so its entry is never changed.
-- The pre-release part of a version is dropped from the Apps & Features version, as the installer drops it. A `1.2.3-rc.1` build shows `1.2.3`.
+- A machine-wide (HKLM) install is not supported by the updater, so its Apps & Features entry is never changed.
 - Portable exes keep their versioned download name (`...-<old>-windows-amd64-portable.exe`), so their name shows the old version. The AppImage asset name has no version, so it is unaffected unless the user renamed the file.
 - Unauthenticated GitHub rate limit: 60 requests per hour per IP. A check costs up to two requests. An Install costs a re-check (up to two) plus the download (one).
 - Installs into a folder that is not writable (for example a machine-wide Windows install) fail at download with the not-writable sentence and the release link. There is no probe before the download.
 - Linux non-AppImage installs, including packages in `/usr/local/bin`, are notify-only.
 - Builds without a valid stamp have no updater.
-- Versions released before the updater shipped cannot update themselves. They must be replaced once by hand.
+- Versions before 1.1.0 have no updater; replace them once by hand.
 - Only stable releases are offered.
 
-## Acceptance checks without automated tests
+## Manual checks
 
-Some behavior depends on a real host, a real release, or timing. These are checked by hand, on a local build stamped with an old version (for example `VERSION=0.0.1`) against the current release:
+Some behavior depends on a real host, a real release, or timing. These are checked by hand, on a local build ([Local test build](#local-test-build)) stamped with an old version against the current release:
 
 1. Windows portable and per-user installed: check, Install with progress, Cancel, verify, Restart now, and the new version runs.
 2. A failed restart: build with `HelperReadyTimeout: time.Nanosecond` (temporary, not committed). Restart fails and the app keeps running. The phase returns to `ready`, the staged folder stays, and Restart now is accepted again (it fails again with the same build). Reverting the change needs a rebuild, which loses the staged update, so download it again with Install.
@@ -306,27 +298,12 @@ Some behavior depends on a real host, a real release, or timing. These are check
 5. A hanging download (for example a throttled network) can be cancelled by the user.
 6. A folder that is not writable shows the not-writable sentence and the release link, and the app keeps working.
 7. A restart while a sync runs: the database is intact after restart. Shutdown finishes within the bound also with a sync that never ends.
-8. On the first release that ships the updater: the AppImage swap and relaunch, and the rollback when the new version cannot start.
+8. AppImage swap and relaunch, and the rollback when the new version cannot start.
 9. Stable and pre-release tags: a `-rc` release is never offered.
-10. Windows per-user installed copy (not the portable exe), updated in place: after the first start of the new version, Apps & Features shows the new version. About 5 s after that start, `<exe>.old.*` is gone. The `wails-update-<pid>.log` from the update stays until a start at least 10 minutes after the log was written, so a quick restart keeps it and a later start removes it. `<exe>.bak` and a `wails-update-*` folder are removed only when they are older than 10 minutes (a successful swap already removed them). Check `%LOCALAPPDATA%\Programs\Steam Achievement Tracker\` and `%TEMP%`.
+10. Per-user installed copy: after the new version's first start, Apps & Features shows it; `<exe>.old.*` is gone about 5 s later.
 
-Every Install-dependent check (items 1 to 7) is Windows-only until the first release that ships the updater. The current release has no `steam-achievement-tracker-linux-x86_64.AppImage`, so on Linux the check fails with "Could not check for updates. Try again later." until a release renames the AppImage. After that release, Linux can be tested with `VERSION=0.0.1 wails3 package`, then running `bin/steam-achievement-tracker-x86_64.AppImage`. The matcher checks release asset names, not the local file name. Item 8 covers the AppImage swap and the rollback.
-
-Code-review checks from the issue, not run by hand: AC 7, a failed `Updater.Init` leaves the updater unavailable and is logged once (`TestInitFailureLogsOnceAfterLoggingIsUp` covers the logging); AC 9, the bindings never return the raw updater error, and no log line holds a full path.
+Linux Install checks need the AppImage build above. The matcher checks release asset names, not the local file name.
 
 ## Tests
 
-| Test file | Covers |
-| --- | --- |
-| `internal/version/version_test.go` | Stamp parsing, valid and invalid versions, pre-release detection. |
-| `internal/update/match_test.go` | `matchAsset` against the real release asset names (portable vs setup, packages, source tarball, `SHA256SUMS`); AppImage target resolution, including an inherited `APPIMAGE`; host and install gate rules (nil verification, wrong digest length); release page URL. |
-| `internal/update/phase_test.go` | Phase guards, cancel rule, framework event guard, refusal sentences. |
-| `internal/update/errors_test.go` | Category precedence and cause-less sentences. |
-| `internal/update/client_test.go` | Provider against `httptest` through `githubConfig(base, client)`: the AppImage and portable selection with digest verification, missing checksum (notify-only), checksum fetch failure, no release, not newer, no asset for the platform. Also the provider config and the HTTP client without a total timeout. |
-| `internal/update/service_test.go` | The service with a fake environment (`fakeEnv`): unavailable without stamp (no log), refusals never reach the framework, pre-release screening (`TestScreenRelease`), the startup toggle read once, settings unreadable, init failure logged once, cancel and shutdown, concurrency with state. |
-| `internal/update/staging_test.go` | The staged-folder path (`stagingDirFor`): only `wails-update-*` directories are removed. |
-| `internal/update/postupdate_test.go` | The startup sweep (`sweepLeftovers`, `RunPostUpdate`): exact names, the Windows-only `.old` rule (case-insensitive on Windows only), the temp log pattern and age gate, the in-flight skip, quiet logging, and no sweep when unavailable or on a Linux package install. Also the pure version helpers (`displayVersion`, `sameFile`, `shouldWriteDisplayVersion`). |
-| `internal/update/postupdate_windows_test.go` | `syncDisplayVersion` against a throwaway HKCU key that the test creates and deletes (Windows only). |
-| `app_update_test.go` | Bound-method refusals without an updater give one sentence; the toggle persists; `GetUpdateState` reads no settings; the shutdown sync bound; a quiet shutdown. |
-
-Frontend: `App.update.test.js`, `lib/update.test.js`, `lib/components/UpdateBanner.test.js` and `UpdateSettings.test.js` use the mocked bindings and `frontend/src/test/update-fixtures.js`. No test calls GitHub.
+The test files and what they cover are listed in [testing.md](testing.md#internalupdate).

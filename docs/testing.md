@@ -1,8 +1,8 @@
 # Testing
 
-This document describes the test strategy, layout, helpers and commands. The user guide ([../README.md](../README.md)) has no testing section. Suite coverage and guidance for adding tests are listed here.
+This document describes the test strategy, layout, helpers and commands. The [README](../README.md) lists only the basic test commands. Suite coverage and guidance for adding tests are listed here.
 
-In brief: Go tests exercise package APIs against real SQLite databases and a real on-disk image cache, while faking only the Steam and GitHub HTTP endpoints. Tests isolate state with temporary directories rather than filesystem mocks. Frontend tests run in jsdom against a mocked Wails binding layer and a mocked runtime; drift checks keep those mocks in step with the Go backend. Mutation testing (gremlins) is a local diagnostic, not a gate.
+In brief: Go tests exercise package APIs against real SQLite databases and a real on-disk image cache, while faking only the Steam and GitHub HTTP endpoints and the OS keyring (go-keyring's in-memory mock). Tests isolate state with temporary directories rather than filesystem mocks. Frontend tests run in jsdom against a mocked Wails binding layer and a mocked runtime; drift checks keep those mocks in step with the Go backend. Mutation testing (gremlins) is a local diagnostic, not a gate.
 
 ## Commands
 
@@ -32,7 +32,7 @@ go vet ./...
 go test -race ./...
 ```
 
-Create the placeholder before generating bindings because the root package embeds `all:frontend/dist`. The frontend build replaces the placeholder with built assets. `go test ./internal/...` does not need `dist` and is useful for a quick backend-only run.
+Create the placeholder before generating bindings because the root package embeds `all:frontend/dist`. The frontend build replaces the placeholder with built assets.
 
 For Go-only checks, `go test ./internal/...` needs no assets. For repo-wide Go checks, if assets are absent, use only the `mkdir -p frontend/dist` and `touch frontend/dist/.gitkeep` steps above, then run the desired Go command. No npm install/build or bindings generation needed. Windows CI uses this Go-only path; see [CI behavior](build-and-release.md#ci-githubworkflowsciyml).
 
@@ -45,6 +45,8 @@ No Go test calls `t.Parallel`. Tests that modify process environment (XDG variab
 | File | Covers |
 | --- | --- |
 | `app_test.go` | The Wails-bound `App` methods: `GetAppState` (key and profile presence, the key never returned), init failures, sync single-flight guards and lifecycle, baseline and run tracking, profile save and validation (SteamID, vanity name, player not found, HTTP errors), clear-data combinations of profile data and key, game actions (disable, enable, previously completed, DLC toggle), cached image removal, `SaveAPIKey` and `RetryAPIKey`, cancel-and-wait. |
+| `app_callbound_test.go` | `callBound` and `callBoundErr`: a panic is recovered, the panic log has secrets scrubbed (`TestSaveAPIKeyPanicLogScrubsKey`), and the frontend gets only the generic sentence. `TestBoundMethodsUseCallBound` parses the root package source: every exported `App` method that returns an error must be one `return callBound(...)` or `callBoundErr(...)` with its own name. |
+| `app_errors_test.go` | `userFacingError` (`TestUserFacingError`): exact text per case, raw text only in the log, no forbidden fragments. `TestBoundMethodsUserFacingErrors` checks the lists `boundErrorMethods` (bound methods that return an error), `lifecycleErrorMethods` (Wails service hooks, not bound) and `noErrorAppMethods` (bound methods that return no error) against the exported `App` methods. |
 | `app_events_test.go` | The `sync:changed` event sequence: events at start, after each write and at the end, and the final event reporting the idle state. An early exit (no API key) still emits the start and end events, `[true false]` (`TestStartSyncEarlyExitEmitsStartAndEnd`). Also an emitter that is absent. |
 | `app_update_test.go` | The update bindings with no updater (one fixed sentence, `GetUpdateState` unavailable), the toggle persisting (and not persisting when unavailable), `GetUpdateState` reading no settings, the toggle loaded when the database opens, and the shutdown bound on a running sync (`syncShutdownWait` shortened) and quiet shutdown. |
 | `covers_test.go` | `CoverService` routing: prefix stripping, rejection of non-positive app ids, paths without a leading slash, invalid cover routes, serving of each cover kind, and a race test that reads app paths while `ensureInitialized` runs. |
@@ -68,6 +70,8 @@ No tests. It is constants only.
 | --- | --- |
 | `db_test.go` | Fresh schema and defaults, no-op backup skipping, backup of an unversioned database with tables, backup contents match the original. |
 | `db_gap_test.go` | Migration failure rolls back to the previous schema, a newer schema is rejected, a failure while recording the version rolls back, a failed migration releases the connection, and file modes of the database and backups. |
+| `compact_test.go` | `shouldCompact`: a fresh database (no user tables) is never compacted; compaction runs only when a `compact` migration (2 and 3 in `migrations`) falls in (version, target]. |
+| `db_cover_path_test.go` | Migration 2 drops the absolute cover path a version 1 database stored, keeps a cached flag, and compacts the file so the old bytes are gone. |
 | `sync_text_migration_test.go` | Migration 3 rewrites raw stored sync text (`profile_games.last_error`, `sync_runs.error`), keeps the app's own sentences and the run summary, maps `context canceled`, leaves NULL and empty values, and is idempotent. |
 | `dsn_test.go` | SQLite URI building: escaping, query parameters kept, and a path with special characters opens correctly. |
 
@@ -91,6 +95,10 @@ No tests. It is constants only.
 
 `logging_test.go`: private file and directory modes (POSIX only), stderr fallback after `Fallback`, a race between concurrent `Writer().Write` and `Init`/`Fallback`, and closing of the previous logger on `Init` and `Fallback` (needed for Windows directory removal). Tests call `Fallback` in cleanup before removing a temp log directory.
 
+### internal/redact
+
+`paths_test.go`: `redact.Paths` reduces a path error to its base name (`TestPathsReducesPathErrorsToBaseName`) and leaves other errors unchanged.
+
 ### internal/repository
 
 | File | Covers |
@@ -107,6 +115,8 @@ The benchmark seeds 250 base apps. Every second app has a DLC set and every fift
 ### internal/steam
 
 `client_test.go` drives the Steam client through `httptest` servers (`newTestServer` returns a client and a close function). It covers owned games (private profiles, purchased and vetted lists, the request parameters), achievements (schema, player and global percentages, set parsing from the fixtures in `testdata/`), EResult and HTTP status errors, transient status retries, redaction of the API key and profile identifiers (SteamID64, vanity name) in transport and status errors, malformed JSON, profile resolution, and the retry schedule. Fixtures in `testdata/` are sample Steam responses for PWS2 (game and user achievements, DLC ownership), Portal 2, TF2, and a game without a schema.
+
+`usermessage_test.go` pins `UserMessage`: the sentence per endpoint (`TestUserMessageByEndpoint`), forbidden-text lists (no endpoint, status, body, eresult, URL or key in any sentence), and `TestUserMessageSentencesListsEveryConstant`, which checks that `UserMessageSentences` lists every `userMsg` constant.
 
 Retry tests call `client.SetRetryBackoff(func(int) time.Duration { return 0 })` to avoid real sleeps. The same method with `nil` restores the default delay, and a test checks the default bounds per attempt. Cancellation during backoff is tested with a long delay.
 
@@ -127,17 +137,23 @@ Retry tests call `client.SetRetryBackoff(func(int) time.Duration { return 0 })` 
 | File | Covers |
 | --- | --- |
 | `match_test.go` | `matchAsset` against the real release asset list (portable vs setup, packages, source tarball, `SHA256SUMS`); `appImageTarget` with a fake environment (`fakeEnv`), including an inherited `APPIMAGE` in a process that is not an AppImage run; `hostRefusal` and `installRefusal` (nil verification, wrong digest length); `releasePageURL`. |
-| `client_test.go` | The GitHub provider against an `httptest` server (`newStubGitHub`, `providerFor`): AppImage and portable selection, digest verification, missing checksum (notify-only), checksum fetch failure, no release, not newer, no asset for the platform. Also the framework config and the HTTP client's timeouts. |
+| `client_test.go` | The GitHub provider against an `httptest` server (`newStubGitHub`, `providerFor`): AppImage and portable selection, digest verification, missing checksum (notify-only), checksum fetch failure, no release, not newer, no asset for the platform. Also the framework config. The HTTP client has per-phase timeouts but no total timeout (`TestHTTPClientHasNoTotalTimeout`). |
 | `phase_test.go` | Phase guards (`canStart`, `cancelable`), the framework event guard, the no-error rule for a framework error event, and the restart refusal sentences. |
 | `service_test.go` | The service with a fake environment (`fakeEnv`): unavailable without a stamp (and no log), refusals that never reach the framework, pre-release screening (`TestScreenRelease`), the startup toggle read once, unreadable settings, init-failure logging, cancel and shutdown, and concurrent state, cancel, event and refusal calls. |
 | `errors_test.go` | `categorize` precedence and that every failure sentence is cause-less. |
 | `staging_test.go` | `stagingDirFor`: only `wails-update-*` directories are eligible for removal. |
 | `postupdate_test.go` | The startup sweep (`sweepLeftovers`) against `t.TempDir()`: exact names, Windows-only `.old` files, the staging-folder shape and 10-minute age gate (`TestSweepStagingDirShape`), `.bak` rules, a late-added staging entry kept (`TestSweepStagingLateEntryKept`), temp log pattern, the 10-minute age gate on temp logs and restart skip, vanished and foreign temp logs (`removeFile` hook), in-flight staging skip, quiet logging, `RunPostUpdate` no-op when unavailable and one sweep when available. Tests age mtimes with `os.Chtimes` and wait on `Service.postDone`, never sleep; `displayVersion`, `sameFile`, `shouldWriteDisplayVersion`. |
-| `postupdate_windows_test.go` | `syncDisplayVersion` against a throwaway HKCU key (`Software\sat-test-<pid>`) that the test creates and deletes. Windows only; compiled with `GOOS=windows go test -c`. |
+| `postupdate_windows_test.go` | `syncDisplayVersion` against a throwaway HKCU key (`Software\sat-test-<pid>`) that the test creates and deletes. Windows only: it runs on the Windows CI leg. On Linux, `GOOS=windows go test -c ./internal/update` only compiles it. |
 
-`internal/version/version_test.go` covers `ParseStamp`, `Valid` and `IsPrerelease`, and that an unstamped test binary has no version.
+Stub GitHub the same way the provider is wired in production: `githubConfig(base, client)` (in `client.go`) with `base` set to an `httptest` server URL and `client` set to an `*http.Client` you control. The provider calls `GET /repos/{owner}/{repo}/releases/latest`, then `SHA256SUMS`, then the asset URL from the release JSON, so the stub's asset `url` values must point at the stub too. Never leave `BaseURL` empty in a test: an empty value means `https://api.github.com`.
 
-Stub GitHub the same way the provider is wired in production: `githubConfig(base, client)` (in `client.go`) with `base` set to an `httptest` server URL and `client` set to an `*http.Client` you control. The provider calls `GET /repos/{owner}/{repo}/releases/latest`, then `SHA256SUMS`, then the asset URL from the release JSON, so the stub's asset `url` values must point at the stub too. Never leave `BaseURL` empty in a test: an empty value means `https://api.github.com`. Do not call `t.Parallel` in tests that set the package variables `startupDelay` or `syncShutdownWait`.
+### internal/usererr
+
+`usererr_test.go`: the user-facing error type. `Find` returns only errors built by `New` or `Wrap`, the cause reaches the log text only (`LogText`), and `json.Marshal` of an error gives `{}` (`TestErrorMarshalsWithoutFields`), so Wails sends no extra fields to the frontend.
+
+### internal/version
+
+`version_test.go` covers `ParseStamp` (and through it `Valid`: leading zeros, build metadata, a `v` prefix), `IsPrerelease`, and that an unstamped test binary has no version.
 
 ## Isolation helpers
 
@@ -197,14 +213,19 @@ Suites:
 | `src/App.test.js` | Setup states, API key flows, profile validation and save, dashboard views and tag filters, search, card covers, Wails call failures in each action, previously completed flag, keyboard shortcuts, clear-data dialog, library settings. |
 | `src/App.sync.test.js` | Event-driven refresh with fake timers: one read per event, coalesced bursts, follow-up reads, reads overtaken by actions, the 2 s retry while a sync runs, retry cancellation on success and unmount, unsubscribe on unmount. |
 | `src/App.incremental.test.js` | Incremental grid with a controllable `IntersectionObserver` stub (`stubIntersectionObserver`): batch size 48, resets, spacer height, viewport-sized growth, focus handoff without scrolling. The observer has no root (the viewport), and the focus handoff is checked by spying on `window.scrollTo` and `scrollIntoView`, since jsdom does not scroll. |
-| `src/App.titlebar.test.js` | The title bar on every screen, the removed dashboard tab row, the document-scroll structure (no inner scroller, the custom scrollbar beside the bar), tab clicks not taking focus, a view change scrolling to the top, Escape and bar presses closing the context menu, the context menu clamped below the bar, and the disabled tabs and gear while the clear-data dialog is open. |
+| `src/App.titlebar.test.js` | The title bar on every screen, no tab row in the dashboard body, the document-scroll structure (no inner scroller, the custom scrollbar beside the bar), tab clicks not taking focus, a view change scrolling to the top, Escape and bar presses closing the context menu, the context menu clamped below the bar, and the disabled tabs and gear while the clear-data dialog is open. |
 | `src/lib/components/ScrollBar.test.js` | The custom scrollbar (jsdom has no layout, so `scrollHeight`, `clientHeight`, `scrollY` and the track's size are mocked): hidden without overflow, thumb size with the 48 px floor and its position, one update per frame on scroll and resize, `ResizeObserver` growth and its absence, thumb drag math (delta * range / travel), clamping, release and cancel, and track-click paging. |
 | `src/lib/format.test.js` | Formatting helpers. |
 | `src/lib/sync.test.js` | `syncBand` for every run status and the announce text. |
 | `src/lib/tag.test.js` | Tag derivation, order, tones, labels, and count consistency between `tagCountsFromGames` and the per-tag reference. |
-| `src/lib/components/*.test.js` | `ApiKeyForm`, `ClearDataConfirmModal`, `ProfileCard` (fake timers for the 30 s refresh), `ScrollBar` (mocked layout: thumb size and position, drag, track paging), `SettingsView`, `SummaryStats`, `TitleBar` (DOM, ARIA, keyboard, window calls, maximise state from the events). |
-| `src/lib/update.test.js`, `src/lib/components/UpdateBanner.test.js`, `src/lib/components/UpdateSettings.test.js`, `src/App.update.test.js` | The in-app update store, banner, Settings section and the update flow in `App.svelte`, all against the mocked update bindings. No test calls GitHub. |
+| `src/lib/components/*.test.js` | `ApiKeyForm`, `ClearDataConfirmModal`, `ProfileCard` (fake timers for the 30 s refresh), `SettingsView`, `SummaryStats`, `TitleBar` (DOM, ARIA, `tabindex="-1"` on the window controls, keyboard, tab and gear clicks, a bar press cancelling focus, window calls, maximise state from the events re-read 120 ms after the last one, listener removal on unmount). |
+| `src/lib/update.test.js` | The update store against the mocked update bindings: reads only on `update:changed`, start and stop, a stale or failed read, `later` (in memory, for the version on screen), install and check (rejections, the notice, a second call ignored), the check hold, cancel, restart, `setChecksEnabled` ordering, and the pure helpers. No test calls GitHub. |
+| `src/lib/components/UpdateBanner.test.js` | One case per phase (available, notify-only, downloading with a known, unknown or no total, verifying, installing, ready, restarting, the failed download, check and install retries), the checking hold, focus after Install, Try again, Later and a removed banner, and the live region (one persistent `role="status"`, no progress announced). |
+| `src/lib/components/UpdateSettings.test.js` | Visibility (hidden when unavailable or before the first read), the startup switch (snap-back to the returned value, a rejected change, busy while saving), Check now (`aria-disabled` while locked, focus kept, no run while locked), the status line, the announcer (only while the banner is hidden), and no duplicate error alert. |
+| `src/App.update.test.js` | Placement: the banner on the dashboard only (not on the init-error or missing-key screens), the Updates section only when the updater is available, an unavailable updater shows nothing, `update:changed` refreshes without a reload, Install passes the version, Check now and the toggle reach their bindings, and the `update:changed` listener is removed on unmount. |
 | `src/test/wails-bindings.test.js` | Drift checks (below). |
+
+`lib/filter.js`, `lib/game.js` and `lib/disabled.js` have no direct test file; the App and component tests exercise them.
 
 Shared helpers (`src/test/app-fixtures.js`; the update tests use `src/test/update-fixtures.js` instead, which has `updateSnapshot`, `latestRelease`, `availableSnapshot`, `fakeUpdateApi`, `loadedStore` and `flush`): state builders (`baseState`, `dashboardState`, `game`, `manyGames`, `syncRun`, `syncingState`, `finishedState`, `missingKeyState`, `profileSetupState`), `emitSyncChanged` (fires `sync:changed` through the runtime mock), and `settle`/`advance` for fake timers.
 
@@ -215,18 +236,18 @@ Rules when writing frontend tests:
 
 ### Title bar manual checks
 
-Vitest covers the bar's DOM, ARIA, keyboard order, the maximise state from the events, the window calls, the modal's disabled tabs and gear, and the custom scrollbar's math. Jsdom loads no CSS and does no layout or window management, so the items below are manual. Run them on a production build (`wails3 build`, not `wails3 dev`: debug builds always show the native context menu) on KDE Wayland and on Windows 11. Record results in the PR.
+Vitest covers the bar's DOM, ARIA, keyboard order, the maximise state from the events, the window calls, the modal's disabled tabs and gear, and the custom scrollbar's math. Jsdom loads no CSS and does no layout or window management, so the items below are manual. Run them on a production build (`wails3 build`, not `wails3 dev`: debug builds always show the native context menu) on KDE Wayland and on Windows 11. Record results with the change.
 
-Go tests (`window_test.go`) cover only the window options per OS. The window itself (`window.go`) is manual, on both OSes, including the Windows frameless creation and, on Linux, the hidden-then-frameless sequence and, on GTK older than 4.16 under Wayland, the empty titlebar set before `Show` (see the GTK 4.14 check below): also check that the window title shows in the taskbar, task switcher and overview, and note any native-frame flash at startup.
+Go tests (`window_test.go`) cover only the window options per OS. The window itself (`window.go`) is manual, on both OSes, including the Windows frameless creation and, on Linux, the hidden-then-frameless sequence and, on GTK older than 4.16 under Wayland, the empty titlebar set before `Show` (see the GTK check below): also check that the window title shows in the taskbar, task switcher and overview, and note any native-frame flash at startup.
 
-- Frameless window: no native title bar; the window is opaque with no app-drawn corner radius, transparency or shadow; platform default decorations. Windows 11 shows the Wails default frameless decorations. If they are missing, record it; the owner decides.
+- Frameless window: no native title bar; the window is opaque with no app-drawn corner radius, transparency or shadow; platform default decorations. Windows 11 shows the Wails default frameless decorations.
 - Bar on every screen (loading, startup error, missing key, profile setup, dashboard): 42 px high, in the order icon, four tabs, gear, controls on the dashboard; icon and controls only on the other screens; no tab row in the dashboard body.
 - Hover, pressed and keyboard focus (`:focus-visible`) are visible on tabs, the gear and the controls, and the focus ring is not clipped at the bar's edges.
 - Maximize state after each of: Windows: Win+Up, Win+Down, snap, the maximize button, drag-restore, startup. KDE: the KWin maximize shortcut, the maximize button, drag-restore, startup. The glyph and the label must match the window.
 - Dragging the empty bar, the icon, or the gap between tabs moves the window. Tabs, the gear and the controls do not start a drag.
-- Resize from each of the 8 zones starts a resize with the edge under the pointer (KDE Wayland: 5 of 5 tries per zone, gate a). A plain click on close fires.
+- Resize from each of the 8 zones starts a resize with the edge under the pointer (KDE Wayland: 5 of 5 tries per zone). A plain click on close fires.
 - Maximized: the bar sits at the top of the screen. On Windows, nothing is under the taskbar.
-- At 900 px wide: the bar does not wrap, the controls stay fully visible, and tab labels are clipped (ellipsis) rather than overlapping. Measure the free drag area and record it.
+- At 900 px wide: the bar does not wrap, the controls stay fully visible, and tab labels are clipped (ellipsis) rather than overlapping. The free drag area stays usable.
 - Escape closes the context menu or the clear-data dialog with focus in the bar.
 - A mousedown on the empty bar leaves focus where it was: in the search box, or in the dialog's input. A tab click does not take focus either (the bar cancels it).
 - Clear-data dialog open: the backdrop starts below the bar; the window controls and the drag area work; the tabs and the gear are disabled.
@@ -247,9 +268,7 @@ Go tests (`window_test.go`) cover only the window options per OS. The window its
 - PgUp, PgDn, Home, End and Space scroll the page natively, also after a tab click (focus stays where it was, since the bar cancels the focus change).
 - Focus under the bar: scroll so a game card sits near the top of the viewport, then Tab to it (or use find-in-page to reach it). Its focus ring must be fully visible below the title bar and its fade, not under them (`html { scroll-padding-top }` in `style.css`).
 - The context menu opens near the bar and stays inside the window. Right-click on the bar shows no native menu in a production build.
-- Linux title (KDE Wayland): the window title shows in the taskbar, the task switcher and the overview. If it does not, record it as the limitation chosen in the spike (E1).
-- Linux GTK 4.14 (the AppImage's bundled GTK) on KDE Wayland, with `forceClientDecorations` (`window_csd_gtk4.go`). Verified: no KWin title bar; window title shows in the taskbar, task switcher and overview; square, opaque corners and no shadow halo (zoomed screenshot); edge resize from all four edges and all four corners; drag on the app title bar (double-click does nothing by design, per the E7 option b decision: Wails' double-click handler is macOS-only; see [frontend.md](frontend.md#title-bar-and-scroll-layout)). Not verified: maximize, restore and tile (snap). Not verified: the GTK >= 4.16 path visually (it should be unchanged; run the same checks there).
-- Linux GTK 4.14 (Ubuntu 24.04 deb, system GTK) on GNOME Wayland (Mutter): expect no visible change from before the step: borderless, square corners, no shadow or inset from the `csd` class, edge resize works. Not verified.
+- GTK older than 4.16 under Wayland (the AppImage's bundled GTK 4.14; the Ubuntu 24.04 deb, with system GTK), with `forceClientDecorations` (`window_csd_gtk4.go`), on KDE (KWin) and GNOME (Mutter): no compositor title bar; the title shows in the taskbar, task switcher and overview; square, opaque corners and no shadow halo; resize from all edges and corners; drag on the app title bar; maximize, restore and tile. Repeat on GTK 4.16 or later.
 
 ### Drift checks (`wails-bindings.test.js`)
 
@@ -260,7 +279,7 @@ These checks keep the hand-written mock aligned with the Go backend:
 3. Every name `App.svelte` imports from the bindings exists in the generated file.
 4. `syncChangedEvent` is the same string in `app.go` and `App.svelte`.
 
-The generated-bindings tests need `frontend/bindings`, which is git-ignored. With `CI` set to `1` or `true` (GitHub Actions sets it), a missing file fails the suite. Locally, the bindings tests are skipped when the file is absent. Generate it with `wails3 generate bindings` from the repository root.
+The generated-bindings tests need `frontend/bindings`, which is git-ignored. With `CI` set to `1` or `true` (GitHub Actions sets it), a missing file fails the suite. Locally, the bindings tests are skipped when the file is absent. Generate it with `wails3 generate bindings` from the repository root. The event-name check reads only sources and always runs.
 
 After changing an exported `App` method: regenerate the bindings, then update `frontend/src/test/wails-app-mock.js` (explicit parameters, same order, no rest arguments).
 
@@ -270,12 +289,10 @@ CI behavior is defined in `.github/workflows/ci.yml` (see [build-and-release.md]
 
 - Linux leg: Node 22 and `npm ci`, Wails CLI, placeholder `frontend/dist`, `wails3 generate bindings`, `npm run build`, `npm test` (so the drift checks run with bindings present), `go vet ./...`, `go test -race ./...`.
 - Windows leg: placeholder `frontend/dist`, `CGO_ENABLED=1`, `go vet ./...`, `go test -race ./...`, and a production build smoke test. It does not run frontend tests and does not generate bindings. The root package still compiles because of the placeholder.
-- The required status check is the `test` job, which passes only when both legs succeed.
-- The release workflow reuses CI (`workflow_call`), so a release runs the same tests.
 
 ## Manual update checks
 
-Some updater behavior depends on a real host, a real release, or timing, so no automated test covers it: the Cancel and busy-rule behavior in the UI, a failed Restart that can be retried, the staged folder removed on close, the not-writable folder, a hanging download, the Windows swap and relaunch, and the first AppImage and rollback checks. The list is in [updater.md](updater.md#acceptance-checks-without-automated-tests). Build a local copy stamped with an old version to test against the current release: `VERSION=0.0.1` with `wails3 task windows:build` on Windows. On Linux, a plain `wails3 build` binary cannot be tested this way (it is notify-only, and its check fails until the first release that ships the updater). Use `VERSION=0.0.1 wails3 package` and run the AppImage once that release exists. Every Install-dependent check is Windows-only until then. Do not commit any temporary change made for a manual check, such as a short `HelperReadyTimeout`.
+Some updater behavior depends on a real host, a real release, or timing, so no automated test covers it: the Cancel and busy-rule behavior in the UI, a failed Restart that can be retried, the staged folder removed on close, the not-writable folder, a hanging download, the Windows swap and relaunch, and the AppImage swap and rollback checks. The list is in [updater.md](updater.md#manual-checks). The local updater-test recipe (stamp an old `VERSION`, run the build) is in [updater.md](updater.md#local-test-build). Do not commit any temporary change made for a manual check, such as a short `HelperReadyTimeout`.
 
 ## Adding tests
 
@@ -287,6 +304,8 @@ Go:
 - For repository behavior, use `testRepositoryPath` (in the `internal/repository` tests) or `openTestRepository` (in the `internal/syncer` tests) so the database is real and temporary.
 - Keep the key out of expected error text. Existing tests check that a key never appears in an error (`TestSaveAPIKeyErrorsNeverContainTheKey`, `TestTransportErrorDoesNotLeakAPIKey`); follow that pattern for any new error path that touches the key.
 - Put cross-platform file mode checks behind `runtime.GOOS != "windows"`.
+- New exported `App` method that returns an error: its body is a single `return callBound(...)` or `callBoundErr(...)` with the method's own name (`TestBoundMethodsUseCallBound` reads the source). List it in `boundErrorMethods` and add a row to the `calls` table in `TestBoundMethodsUserFacingErrors` (`app_errors_test.go`). A Wails lifecycle hook that returns an error (`ServiceStartup`, `ServiceShutdown`) is not bound: list it in `lifecycleErrorMethods` instead. A method that returns no error goes in `noErrorAppMethods`, a deliberate exception (Wails binds every exported method).
+- New Steam user sentence: add a `userMsg` constant in `internal/steam/usermessage.go` and list it in `UserMessageSentences` (`TestUserMessageSentencesListsEveryConstant` fails otherwise). `TestSyncTextSafeSentencesCoverAppSentences` then fails until the sentence is in `syncTextSafeSentences` (`internal/db/db.go`). Append it to that list: no database older than version 3 can hold a new sentence, so appending is safe. Never remove or edit an entry, because migration 3 still runs on older databases; rewriting text that is already stored needs a new migration.
 
 Frontend:
 
