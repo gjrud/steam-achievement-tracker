@@ -326,8 +326,8 @@ DELETE FROM game_snapshots WHERE id NOT IN (
 
 // lookupIndexesSQL adds the indexes for the lookups that would otherwise scan a whole table: the per-app checks in
 // the cleanup and orphan queries, the snapshot checks in MarkGamePreviouslyCompleted and profileGameHistory, the set
-// lookups in HasSetData, and the latest sync run. The game_sets dlcappid index is reserved for the S5 DLC cover lookup
-// split; no current query uses it. The profile-leading primary keys do not serve the appid lookups, and
+// lookups in HasSetData, and the latest sync run. The game_sets dlcappid index serves the DLC branch of the cover
+// lookups (entriesForImageAppSQL, orphanCoverRowsSQL). The profile-leading primary keys do not serve the appid lookups, and
 // profile_achievements(appid, apiname) also serves the foreign key check when an achievements row is deleted.
 const lookupIndexesSQL = `
 CREATE INDEX IF NOT EXISTS idx_profile_achievements_appid_apiname on profile_achievements(appid, apiname);

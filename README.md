@@ -52,7 +52,7 @@ The key is stored in the system keyring under service `steam-achievement-tracker
 
 ### Connect a profile
 
-With a key saved and no profile active, enter a SteamID64, a profile URL with its scheme (`https://steamcommunity.com/profiles/<steamid64>` or `https://steamcommunity.com/id/<name>`), or a vanity name. Click **Validate** to see the Steam name and avatar the app found, then **Save and sync** to make the profile active and start a sync. Only one profile is active at a time.
+With a key saved and no profile active, enter a SteamID64, a profile URL with its scheme (`https://steamcommunity.com/profiles/<steamid64>` or `https://steamcommunity.com/id/<name>`), or a vanity name. A Steam community link also works without its `https://`, such as `steamcommunity.com/id/<name>` or `www.steamcommunity.com/profiles/<steamid64>`. Click **Validate** to see the Steam name and avatar the app found, then **Save and sync** to make the profile active and start a sync. Only one profile is active at a time.
 
 ![Connect a Steam profile](assets/screenshots/connect-profile.webp)
 
@@ -166,7 +166,7 @@ To erase everything, close the app and delete the three folders, the `steam-achi
 
 ## Troubleshooting
 
-- **Profile or vanity name not found**: check the SteamID64, link or name. A link needs its scheme (`https://steamcommunity.com/profiles/<number>` or `.../id/<name>`); without it, the text is treated as a vanity name.
+- **Profile or vanity name not found**: check the SteamID64, link or name. A `steamcommunity.com` or `www.steamcommunity.com` link works with or without `https://` (`.../profiles/<number>` or `.../id/<name>`); other text without a scheme is treated as a vanity name.
 - **Sync fails or shows no games**: the profile must belong to the account that owns the API key. Any privacy setting works.
 - **"Steam Web API key missing"**: enter the key on the setup screen, or click **Retry key lookup** if you stored it outside the app.
 - **The key does not save on Linux**: unlock your Secret Service keyring and try again.

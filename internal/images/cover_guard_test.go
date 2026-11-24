@@ -174,7 +174,7 @@ func TestCoverMaxBytesBoundary(t *testing.T) {
 					t.Fatal("error = nil, want size error")
 				}
 				assertNoFile(t, path)
-				assertNoFile(t, path+".tmp")
+				assertNoTempFiles(t, dir)
 				return
 			}
 			if err != nil {

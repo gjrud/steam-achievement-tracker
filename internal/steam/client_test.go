@@ -1059,8 +1059,9 @@ func TestGetGameAchievementsTypedHTTPStatusError(t *testing.T) {
 		wantText     string
 	}{
 		{name: "non-retryable 404 fails once", statuses: []int{http.StatusNotFound}, wantCode: 404, wantAttempts: 1, wantText: "Steam API " + gameAchievementsPath + " returned 404 Not Found: try later"},
-		{name: "bad gateway is not retried", statuses: []int{http.StatusBadGateway}, wantCode: 502, wantAttempts: 1, wantText: "Steam API " + gameAchievementsPath + " returned 502 Bad Gateway: try later"},
-		{name: "gateway timeout is not retried", statuses: []int{http.StatusGatewayTimeout}, wantCode: 504, wantAttempts: 1, wantText: "Steam API " + gameAchievementsPath + " returned 504 Gateway Timeout: try later"},
+		{name: "bad gateway exhausted", statuses: []int{502, 502, 502, 502}, wantCode: 502, wantAttempts: 4, wantText: "Steam API " + gameAchievementsPath + " returned 502 Bad Gateway"},
+		{name: "gateway timeout exhausted", statuses: []int{504, 504, 504, 504}, wantCode: 504, wantAttempts: 4, wantText: "Steam API " + gameAchievementsPath + " returned 504 Gateway Timeout"},
+		{name: "bad gateway recovers on retry", statuses: []int{502}, wantCode: 0, wantAttempts: 2},
 		{name: "retryable 503 exhausted", statuses: []int{503, 503, 503, 503}, wantCode: 503, wantAttempts: 4, wantText: "Steam API " + gameAchievementsPath + " returned 503 Service Unavailable"},
 	}
 	for _, tc := range tests {
@@ -1069,6 +1070,12 @@ func TestGetGameAchievementsTypedHTTPStatusError(t *testing.T) {
 			defer closeServer()
 
 			_, err := client.GetGameAchievements(context.Background(), 620)
+			if tc.wantCode == 0 {
+				if err != nil || attempts.Load() != tc.wantAttempts {
+					t.Fatalf("err = %v attempts = %d, want success after %d attempts", err, attempts.Load(), tc.wantAttempts)
+				}
+				return
+			}
 			var statusErr *HTTPStatusError
 			if !errors.As(err, &statusErr) {
 				t.Fatalf("err = %#v, want *HTTPStatusError", err)
@@ -1602,7 +1609,9 @@ func TestRequestBuildErrorDoesNotLeakAPIKey(t *testing.T) {
 func TestTransportErrorKeepsCancellationChain(t *testing.T) {
 	started := make(chan struct{}, 16)
 	release := make(chan struct{})
+	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
 		select {
 		case started <- struct{}{}:
 		default:
@@ -1645,6 +1654,9 @@ func TestTransportErrorKeepsCancellationChain(t *testing.T) {
 			t.Fatalf("err = %v, want errors.Is context.Canceled", err)
 		}
 		checkURLError(t, err)
+		if n := hits.Load(); n != 1 {
+			t.Fatalf("attempts = %d, want 1 (Do fails after the context is done, not retried)", n)
+		}
 	})
 
 	t.Run("deadline", func(t *testing.T) {
@@ -1684,7 +1696,7 @@ func testHangUpClient(t *testing.T, hangUps int32) (*Client, *atomic.Int32, func
 }
 
 func TestRetryableStatusesRetriedUntilSuccess(t *testing.T) {
-	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			client, attempts, closeServer := testStatusSequenceClient(t, gameAchievementsPath, []int{status, status}, "1", readFixture(t, "portal2_game_achievements.json"))
 			defer closeServer()
@@ -1701,7 +1713,7 @@ func TestRetryableStatusesRetriedUntilSuccess(t *testing.T) {
 }
 
 func TestRetryableStatusesGiveUpAfterFourAttempts(t *testing.T) {
-	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			client, attempts, closeServer := testStatusSequenceClient(t, gameAchievementsPath, []int{status, status, status, status}, "1", readFixture(t, "portal2_game_achievements.json"))
 			defer closeServer()
@@ -2080,6 +2092,20 @@ func TestResolveProfileInput(t *testing.T) {
 		{name: "vanity URL trailing slash", input: "https://steamcommunity.com/id/gabelogan/", want: vanityID, wantVanity: 1},
 		{name: "vanity URL with query", input: "https://steamcommunity.com/id/gabelogan?l=english", want: vanityID, wantVanity: 1},
 		{name: "bare vanity name", input: "gabelogan", want: vanityID, wantVanity: 1},
+		{name: "scheme-less profile URL", input: "steamcommunity.com/profiles/" + profileID, want: profileID},
+		{name: "scheme-less profile URL with www", input: "www.steamcommunity.com/profiles/" + profileID, want: profileID},
+		{name: "scheme-less profile URL trailing slash", input: "steamcommunity.com/profiles/" + profileID + "/", want: profileID},
+		{name: "scheme-less profile URL with query", input: "steamcommunity.com/profiles/" + profileID + "/?tab=games", want: profileID},
+		{name: "scheme-less profile URL with fragment", input: "steamcommunity.com/profiles/" + profileID + "#games", want: profileID},
+		{name: "scheme-less profile URL upper-case host", input: "STEAMCOMMUNITY.COM/profiles/" + profileID, want: profileID},
+		{name: "scheme-less vanity URL", input: "steamcommunity.com/id/gabelogan", want: vanityID, wantVanity: 1},
+		{name: "scheme-less vanity URL with www", input: "www.steamcommunity.com/id/gabelogan", want: vanityID, wantVanity: 1},
+		{name: "scheme-less vanity URL trailing slash", input: "www.steamcommunity.com/id/gabelogan/", want: vanityID, wantVanity: 1},
+		{name: "scheme-less vanity URL with query", input: "steamcommunity.com/id/gabelogan?l=english", want: vanityID, wantVanity: 1},
+		{name: "scheme-less community host without path", input: "steamcommunity.com/", wantErr: profileErr},
+		{name: "scheme-less groups path", input: "steamcommunity.com/groups/foo", wantErr: profileErr},
+		{name: "scheme-less API key in path is rejected", input: "steamcommunity.com/id/test-key", wantErr: "This looks like your Steam Web API key. Enter your profile URL, SteamID64 or custom name instead."},
+		{name: "scheme-less API key in query is rejected", input: "www.steamcommunity.com/profiles/" + profileID + "?key=test-key", wantErr: "This looks like your Steam Web API key. Enter your profile URL, SteamID64 or custom name instead."},
 		{name: "empty input", input: "", wantErr: "Enter a Steam profile URL, SteamID64 or custom name."},
 		{name: "whitespace input", input: "   ", wantErr: "Enter a Steam profile URL, SteamID64 or custom name."},
 		{name: "URL without profile or id", input: "https://steamcommunity.com/", wantErr: profileErr},

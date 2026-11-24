@@ -65,6 +65,18 @@ func deleteOrphanRowsForAppIDs(tx *sql.Tx, appIDs []int64) error {
 	return err
 }
 
+// orphanCoverRowsSQL selects the cover rows, among one bound JSON array of image app ids, that no entry displays. It is
+// the orphan test of deleteOrphanCoverRows, split like entriesForImageAppSQL so it uses the indexes. A row is kept
+// when some entry has app id = image id (idx_profile_games_appid), or when some entry is bound to it as DLC
+// (idx_game_sets_dlcappid, then the entry via idx_profile_games_appid). Together the two NOT EXISTS cover every entry
+// that displays the image. Package-level so the query-plan tests run the shipped SQL.
+const orphanCoverRowsSQL = `select image_appid from cover_images where image_appid in (select value from json_each(?))
+	and not exists (select 1 from profile_games pg where pg.appid = cover_images.image_appid)
+	and not exists (select 1 from game_sets gs
+		join profile_games pg on pg.appid=gs.appid and pg.groupid=gs.groupid
+		where gs.dlcappid = cover_images.image_appid and gs.dlcappid <> 0)
+	order by image_appid`
+
 // deleteOrphanCoverRows removes cached cover rows for the given image app ids that no remaining entry displays.
 // A game's cover also stays while any entry of that game remains, since its DLC entries fall back to it.
 // It returns the image app ids whose rows were actually deleted; only those have cached files to remove.
@@ -76,10 +88,7 @@ func deleteOrphanCoverRows(tx *sql.Tx, imageAppIDs []int64) ([]int64, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := tx.Query(`select image_appid from cover_images where image_appid in (select value from json_each(?)) and not exists (
-		select 1 from profile_games pg left join game_sets gs on gs.appid=pg.appid and gs.groupid=pg.groupid
-		where `+imageAppIDSQL+` = cover_images.image_appid or pg.appid = cover_images.image_appid
-	) order by image_appid`, idsJSON)
+	rows, err := tx.Query(orphanCoverRowsSQL, idsJSON)
 	if err != nil {
 		return nil, err
 	}

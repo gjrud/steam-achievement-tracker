@@ -361,7 +361,7 @@ Created by migration 4 with `CREATE INDEX IF NOT EXISTS`. Each serves a lookup t
 | `idx_profile_game_tags_appid` | `profile_game_tags(appid)` | Orphan check for `games`. |
 | `idx_game_snapshots_appid` | `game_snapshots(appid)` | Orphan check for `games`. |
 | `idx_game_snapshots_profile_id_appid_groupid_is_completed` | `game_snapshots(profile_id, appid, groupid, is_completed)` | `MarkGamePreviouslyCompleted`, `profileGameHistory`, profile removal, and the latest-row dedupe lookup in `SaveGameSync` (its leading three columns). |
-| `idx_game_sets_dlcappid` | `game_sets(dlcappid)` | Reserved for the S5 DLC cover lookup split. No current query uses it. |
+| `idx_game_sets_dlcappid` | `game_sets(dlcappid)` | DLC branch of the cover lookups: `entriesForImageAppSQL` and `orphanCoverRowsSQL` (`repository/covers.go`, `repository/cleanup.go`). |
 | `idx_sync_runs_profile_id` | `sync_runs(profile_id)` | `LatestSyncRun`, profile removal. |
 
 `TestLookupQueriesUseIndexes` checks the query plans (`EXPLAIN QUERY PLAN` shows `SEARCH ... USING INDEX`). The orphan deletes in `cleanup.go` are checked by `TestCleanupQueriesUseIndexes` in `internal/repository`, against the shipped SQL.

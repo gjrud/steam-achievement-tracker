@@ -645,9 +645,9 @@ func wasCompletedBefore(prev repository.ProfileGameState) bool {
 
 // shouldFallbackToLegacy reports whether a GetGameAchievements failure should switch to the legacy API.
 // Endpoints are undocumented, so a non-transient HTTP status (4xx other than 429, or any other status that is
-// not transient) or an EResult error falls back. Transient statuses (429, 500, 502, 503, 504) never fall back:
-// 429/500/503 were already retried by the client, 502/504 are not retried, and all surface as a normal failure.
-// Transport, context and decode errors surface too.
+// not transient) or an EResult error falls back. Transient statuses (429, 500, 502, 503, 504) never fall back.
+// The client retries all five (429 honors Retry-After), so one reaching here has used up its attempts and
+// surfaces as a normal failure. Transport, context and decode errors surface too.
 func shouldFallbackToLegacy(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
@@ -738,10 +738,19 @@ func (s *Service) saveCover(imageAppID int64, res images.Result) error {
 	// SaveCover overwrites kind, file, cached and source; RefreshCover returns the kept file's values when
 	// it could not download, so the stored cover stays consistent with what is on disk. The file path itself
 	// is not stored: Cached only records that a file exists under the game images directory.
-	return s.Repo.SaveCover(repository.CoverUpdate{
+	err := s.Repo.SaveCover(repository.CoverUpdate{
 		ImageAppID: imageAppID, Kind: res.Kind, FileName: res.FileName, Cached: res.Path != "",
 		SourceURL: res.SourceURL, Downloaded: res.Downloaded,
 	})
+	// A file downloaded in this run under a new name is referenced by no row once the save fails, so it is removed.
+	// When the name is unchanged, the file overwrote the stored one that the row still points at, so it is kept.
+	// A kept file (Downloaded false) was never written in this run and is never touched.
+	if err != nil && res.Downloaded && res.Changed {
+		if rmErr := s.Images.RemoveCover(imageAppID, res.FileName); rmErr != nil {
+			log.Printf("warn: remove cover %d after failed save: %v", imageAppID, redact.Paths(rmErr))
+		}
+	}
+	return err
 }
 
 func (s *Service) storedCover(imageAppID int64) (images.Stored, error) {

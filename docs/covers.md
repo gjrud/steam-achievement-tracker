@@ -46,6 +46,8 @@ The file name is fixed per kind. The file always uses the `.jpg` extension, even
 | Store request attempts | 4 | Attempts 0 to 3. |
 | Store retry backoff | 300 ms, 600 ms, 1200 ms | Before attempts 1, 2, 3 (`storeItemsRetryDelay`). Cancelled by context. |
 | Store response read limit | 4 MiB | Body limit for store responses. |
+| Store error body in error text | 256 bytes | `truncateForLog`: longer bodies are cut on a rune boundary and end in `...`. |
+| Redirect limit | 10 requests per chain (9 redirects followed) | `maxRedirects`, the net/http default, enforced by `checkRedirect`. |
 | Store `country_code` | `US` | Fixed in the store request. |
 
 Asset hosts (`images.go`):
@@ -70,6 +72,8 @@ Runs after a successful game sync: for a game without achievements only the game
 Thus, a base game with a working owned-games capsule requires no store request. A stale DLC cover always requires one store request. A base game with no capsule, or whose capsule URL is not found, requires one store request.
 
 `saveCover` maps `images.Result` to `repository.CoverUpdate` (`Kind`, `FileName`, `Cached` set from `Result.Path != ""`, `SourceURL`, `Downloaded`). `Result.Path` stays in memory and is never persisted. `SaveCover` always writes `checked_at = now`, and writes `downloaded_at = now` only when `Downloaded` is true.
+
+If `SaveCover` fails and the file was downloaded in this run under a new name (`Downloaded && Changed`), `saveCover` removes that file through `images.Cache.RemoveCover` (`fsretry`). Nothing else is removed: a kept file is never touched, and a same-name download is kept because it overwrote the file the stored row still points at. A removal failure is logged at warn level (`warn: remove cover <id> after failed save: ...`, paths redacted). The original `SaveCover` error is returned, so the caller's log line is unchanged.
 
 Note: when the owned capsule is not found but a cached file exists, `RefreshCover` keeps that file and returns `Downloaded = false`. The syncer then still performs the store lookup and a second `RefreshCover`.
 
@@ -129,6 +133,7 @@ The app never guesses file names. It requests only the owned-games `capsule_file
 - Retry: transport errors, HTTP 429, 500 and 503 are retried, up to 4 attempts in total. Other non-2xx responses are not retried. A request-build error and a response body read error are not retried (`doStoreItemsRequest` returns `retry = false` for them). A JSON decode error happens in `fetchStoreItemAssets` after a successful request and is returned at once, without retry.
 - Items with `success != 1` are omitted. `appid` falls back to `id` when zero.
 - A batch error returns the partial map collected so far along with the error.
+- A non-2xx, non-retried response returns `Steam store items returned <status>: <body>`. The body is trimmed and cut to 256 bytes (`maxLoggedBodyBytes`) with `...` appended when cut, on a rune boundary. The syncer logs this error, so the logged text stays short.
 
 The syncer uses only single-id calls, so the batch behaviour is not exercised in production.
 
@@ -136,7 +141,15 @@ The syncer uses only single-id calls, so the batch behaviour is not exercised in
 
 Applied to every candidate response in `fetchCover`, before the body is read:
 
-- Status: 2xx accepted; 404 is "not here" (the next URL is tried); any other status is an error. Redirects are followed by the default client.
+- Status: 2xx accepted; 404 is "not here" (the next URL is tried); any other status is an error. Redirects are followed only under the redirect policy below.
+
+Redirect policy (`checkRedirect`, set as `CheckRedirect` on the client built by `images.New`; the same client serves the store lookup):
+
+- At most `maxRedirects` (10) requests per chain, so 9 redirects are followed. Beyond that the request fails (net/http's default limit).
+- The target must use `https`.
+- The target host (lowercase, without port) must be in `allowedRedirectHosts`: `shared.akamai.steamstatic.com`, `shared.steamstatic.com`, `api.steampowered.com`. Those are the cover CDN hosts (primary and mirror) and the store API host. Any other host is refused.
+- A refused redirect wraps `errRedirectNotAllowed`. For a cover, the candidate is an error and the next URL is tried. For the store lookup, the error is returned at once, without retry.
+- Tests build the cache with `images.New`, swap in a fake transport, and cover: http target refused, unknown host refused, allowed-to-allowed redirect followed, redirect loop stopped at the limit.
 - Content type: after lowercasing and stripping parameters, must be exactly `image/jpeg`, `image/png` or `image/webp`. Anything else is an error. The body is not sniffed.
 - `Content-Length` over `maxCoverBytes` is an error. A missing or unknown length (`-1`) is not rejected before the read; the read limit in `writeCover` applies.
 
@@ -151,13 +164,13 @@ Failures discard the body. No magic-byte check exists: the chosen kind and file 
 `writeCover(imageAppID, fileName, body)`:
 
 1. `MkdirAll(<GameImages>/<id>, 0700)`.
-2. Create `<file>.tmp` with `O_WRONLY|O_CREATE|O_TRUNC`, mode `0600`.
+2. Create a unique temp file `<file>.<random>.tmp` in the same directory with `os.CreateTemp` (mode `0600`). Each write gets its own name, so concurrent writes for one file never share a temp file, and a leftover from an earlier crash is never reused.
 3. Copy the limited body into it. Close the file.
 4. On copy, size or close error: `fsretry.Remove` the temp file and return the error. The temp file is removed after `Close` because Windows cannot delete an open file.
 5. `fsretry.Rename(tmp, final)`. The final file replaces any earlier file of the same name. The temp file is removed if the rename fails.
 6. `Chmod 0600` on the final file (best effort; Windows ignores it).
 
-There is no `fsync` before the rename. A crash between create and rename can leave `<file>.tmp` behind. Nothing removes leftover temp files; the cover tests check that none remain after failed downloads.
+There is no `fsync` before the rename. A crash between create and rename can leave a `<file>.<random>.tmp` behind. Nothing removes leftover temp files (a leftover can be from any earlier run, so none is removed while a write may be in flight); the cover tests check that no `*.tmp` remains after failed downloads (`assertNoTempFiles`).
 
 Directories: `appdata.Ensure` creates `GameImages` with mode `0700` at startup. `writeCover` creates per-id directories with `0700`.
 
@@ -202,7 +215,7 @@ So a DLC set without its own cover shows the parent game's cover, and a DLC cove
 
 When the displayed image URL is empty, `GameCard.svelte` renders a placeholder: the first letter of the game title and a small **Missing cover** label. The image is loaded with `loading="lazy"`.
 
-Ownership for refresh and orphan cleanup uses a different rule (`imageAppIDSQL`): the DLC id for DLC-bound entries, else the game id. This decides which cover row an entry writes to, not what it shows.
+Ownership for refresh uses a different rule. An entry's image app id is the DLC id when its set is bound (`game_sets.dlcappid <> 0`), else the game id. `entriesForImageAppSQL` finds the entries that own a given image id. This decides which cover row an entry writes to, not what it shows.
 
 ## Serving (`CoverService`)
 
@@ -221,7 +234,7 @@ Because the file name is whitelisted and the id is numeric, the handler cannot r
 
 ## Deletion
 
-- `ClearProfileData` deletes `cover_images` rows that no remaining profile entry displays, and returns their ids. A row is kept when another entry of any profile still has the id as its displayed or owning image, or when the game's own id is the entry's app (so DLC entries that fall back still keep the game cover). See [repository.md](repository.md#profile-removal).
+- `ClearProfileData` deletes `cover_images` rows that no remaining profile entry displays, and returns their ids. The rule (`orphanCoverRowsSQL`): a row is kept when some remaining entry has the id as its app id (DLC entries fall back to the game cover, so they keep it), or when some entry is bound to it as DLC (`game_sets.dlcappid <> 0`; an image app id is the DLC id for a bound set, else the game id). See [repository.md](repository.md#profile-removal).
 - `ClearActiveUserData(deleteProfileData=true)` then calls `removeCachedGameImages(GameImages, ids)`, which `RemoveAll`s `<GameImages>/<id>` for each returned id (skipping ids `<= 0`). Failure is returned to the caller, after the database change has already committed.
 - `DeactivateProfile` (Remove profile with data kept) deletes nothing from the cache.
 - `ids` whose directory exists but have no `cover_images` row are not removed by this path.
@@ -235,6 +248,8 @@ Because the file name is whitelisted and the id is numeric, the handler cannot r
 | Store lookup error (transport, decode, non-retried status) | Error returned | Nothing saved. Retried next sync. |
 | Download error but a previous file exists | Previous file kept (`Downloaded = false`) | `checked_at` updated, kind and file kept. |
 | Download succeeds but local write fails | Error from `writeCover` | Nothing saved (`RefreshCover` returns the error, the syncer does not save). |
+| Download succeeds (new name), then `SaveCover` fails | Error from `SaveCover` returned and logged | The new file is removed (`RemoveCover`). The row keeps its previous state, which points at a file that is gone or was already removed. The next sync sees the missing file (`NeedsRefresh`) and refetches. |
+| Download succeeds (same name as stored), then `SaveCover` fails | Error from `SaveCover` returned and logged | The file is kept: it overwrote the file the row names, so the name still resolves. |
 | Stored file deleted from disk | `NeedsRefresh` true | Refetched on next sync. |
 | Oversized or wrong content type | Candidate skipped as error | As for any candidate error. |
 | Cancelled sync context, no file on disk | Context error | Nothing saved. |
@@ -244,6 +259,7 @@ Cover failures are logged by the syncer and never fail a game sync or the sync r
 
 ## Notes
 
+- Shared image app ids: two games can share one image app id (for example a DLC bound to both). When both are refreshed concurrently in one sync, a failed `SaveCover` can remove a file the other worker just wrote (`RemoveCover` on the new name). The row then names a missing file. The next sync's `NeedsRefresh` sees the missing file and re-downloads it. This is known and self-healing.
 - `mirrorSourceURLs` rewrites `cdn.cloudflare.steamstatic.com` URLs. Asset URLs always begin with the akamai base (`assetURL`), so that rewrite never matches in production. The fallback host is derived from the same path.
-- The store retry set (`storeItemsRetryStatus`: 429, 500, 503) is the same set as the Steam client's `retryableSteamStatus`. The syncer's `transientSteamStatus` (429, 500, 502, 503, 504) is not a retry set. It only decides whether a `GetGameAchievements` failure may fall back to the legacy API.
+- The store retry set (`storeItemsRetryStatus`: 429, 500, 503) is separate from the Steam client's `retryableSteamStatus` (429, 500, 502, 503, 504), which the client gained for 502 and 504 and which is not used here. The syncer's `transientSteamStatus` (429, 500, 502, 503, 504) is not a retry set either. It only decides whether a `GetGameAchievements` failure may fall back to the legacy API.
 - `ItemAssets.Type` and `ItemAssets.ParentAppID` are filled by `storeItemsAssets` but nothing in production reads them. Only tests check them.

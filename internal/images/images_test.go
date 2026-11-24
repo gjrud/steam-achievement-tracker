@@ -39,6 +39,8 @@ type route struct {
 	body        string
 	err         error
 	noLength    bool
+	// location, when set, is sent as the Location header (a redirect when status is 3xx).
+	location string
 }
 
 type routeTransport struct {
@@ -60,10 +62,14 @@ func (t *routeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if status == 0 {
 			status = http.StatusOK
 		}
+		header := http.Header{"Content-Type": {r.contentType}}
+		if r.location != "" {
+			header.Set("Location", r.location)
+		}
 		resp := &http.Response{
 			StatusCode:    status,
 			Status:        fmt.Sprintf("%d %s", status, http.StatusText(status)),
-			Header:        http.Header{"Content-Type": {r.contentType}},
+			Header:        header,
 			Body:          io.NopCloser(strings.NewReader(r.body)),
 			ContentLength: int64(len(r.body)),
 			Request:       req,
@@ -610,7 +616,19 @@ func TestRefreshCoverLimitsDownloadedBytes(t *testing.T) {
 		t.Fatal("refresh cover error = nil, want max bytes error")
 	}
 	assertNoFile(t, filepath.Join(imagesDir, "790", LibraryFileName))
-	assertNoFile(t, filepath.Join(imagesDir, "790", LibraryFileName+".tmp"))
+	assertNoTempFiles(t, filepath.Join(imagesDir, "790"))
+}
+
+// assertNoTempFiles fails when dir holds any cover temp file (name.*.tmp), left behind by a failed write.
+func assertNoTempFiles(t *testing.T, dir string) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, "*.tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temp files left in %s: %q", dir, matches)
+	}
 }
 
 func TestRefreshCoverMainChainFallsBackToMain(t *testing.T) {

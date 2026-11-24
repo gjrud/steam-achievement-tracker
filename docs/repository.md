@@ -105,7 +105,7 @@ Per-profile library options are not in `settings`; they are in `profile_library_
    - If the profile was active, set `active_profile_id = ''`.
    - Delete the `profiles` row.
    - `deleteOrphanRowsForAppIDs`: delete `achievements` of those apps that no `profile_achievements` row references; delete `game_sets` of those apps that have no `profile_games` rows at all (any profile); delete `games` of those apps that no `profile_games`, `profile_achievements`, `profile_game_flags`, `profile_owned_games`, `profile_game_tags` or `game_snapshots` row references.
-   - `deleteOrphanCoverRows` over the union of app ids and DLC image ids: delete `cover_images` rows that no remaining `profile_games` entry displays. An image id is still used when some entry's image owner equals it (`imageAppIDSQL`), or when it is the game id of an entry of that game (DLC entries fall back to the game's cover). Returns the deleted ids.
+   - `deleteOrphanCoverRows` over the union of app ids and DLC image ids: delete `cover_images` rows that no remaining `profile_games` entry displays. An image id is still used when some entry has that app id (DLC entries fall back to the game's cover), or when some entry is bound to it as DLC (`game_sets.dlcappid <> 0`). Both checks are index searches (`orphanCoverRowsSQL`). Returns the deleted ids.
 3. Commit.
 
 The caller (`ClearActiveUserData` in `app.go`, documented in [app-service.md](app-service.md)) then removes `<GameImages>/<id>` for the returned ids. Covers still used by another profile remain on disk. Removing the profile also removes its `profile_library_settings` row; re-adding the same SteamID64 starts with `DefaultLibrarySettings()`.
@@ -263,7 +263,7 @@ The UI also shows **Set**, **DLC** and **Unvetted** on cards. These are not stor
 - `SaveGameSync`: each entry it writes.
 - `SaveGameWarning`: each entry it touches.
 - `MarkGamePreviouslyCompleted`, `ToggleMissingAchievementsInDLC`, `EnableProfileGame`: the affected entry (`RecomputeGameTags` or `recomputeGameTagsTx`).
-- `SaveCover`: every entry whose owning image id (`imageAppIDSQL`) equals the saved id, plus every entry of the game with that id as its app id (`entriesForImageApp`).
+- `SaveCover`: every entry whose image app id equals the saved id, plus every entry of the game with that id as its app id (`entriesForImageApp`, via `entriesForImageAppSQL`). An entry's image app id is the DLC id when its set is bound (`game_sets.dlcappid <> 0`), else the game id.
 - `DisableProfileGame` and `DisableMissingOwnedGames`: delete tags directly.
 - `pruneStaleEntries` and `ClearProfileData`: delete tags of removed entries.
 
@@ -290,12 +290,12 @@ This is only the backend read order. The frontend re-sorts card tags: `gameTags`
 
 Repository side of the cover cache; the cover rules are in [covers.md](covers.md). `cached` and the effective cover id (`effectiveCoverAppIDSQL`, which applies the DLC fallback) decide the card's cover URL and `missing_cover_art`.
 
-- `SaveCover(CoverUpdate) error`: rejects `ImageAppID <= 0`. One transaction upserts `cover_images`: `source_url` is stored as NULL when empty, `checked_at = now`, and `downloaded_at` is set only when `Downloaded` is true (`coalesce` keeps the previous value otherwise). Then recomputes tags for `entriesForImageApp`.
+- `SaveCover(CoverUpdate) error`: rejects `ImageAppID <= 0`. One transaction upserts `cover_images`: `source_url` is stored as NULL when empty, `checked_at = now`, and `downloaded_at` is set only when `Downloaded` is true (`coalesce` keeps the previous value otherwise). Then recomputes tags for `entriesForImageApp`, which runs `entriesForImageAppSQL`: a UNION of every entry with app id = the image id and every entry bound to it as DLC (`game_sets.dlcappid`). Both branches use indexes (`idx_profile_games_appid`, `idx_game_sets_dlcappid`); the query plan tests in `covers_lookup_test.go` pin this.
 - `GetCover(imageAppID) (CoverRecord, bool, error)`: `ok = false` when no row exists.
 - `ListCovers() (map[int64]CoverRecord, error)`: test-only; no production caller.
 
 ## Settings notes and other queries
 
 - `HasSetData(appID) (bool, error)` (`sets.go`): true when `game_sets` has a row with `groupid <> 0` for the app, or a `profile_games` entry with `groupid <> 0` exists for it (any profile). The syncer uses it to avoid the legacy single-entry fallback on apps that already have set data.
-- Package-level SQL fragments used across files: `imageAppIDSQL` (the id that owns an entry's store art: DLC id when bound, else game id), `effectiveCoverAppIDSQL` (the id whose cover is displayed), `entryBaseFromSQL` (joins for entries).
+- Package-level SQL fragments used across files: `effectiveCoverAppIDSQL` (the id whose cover is displayed), `entryBaseFromSQL` (joins for entries).
 
