@@ -7,6 +7,8 @@
 [![CodeQL](https://github.com/gjrud/steam-achievement-tracker/actions/workflows/github-code-scanning/codeql/badge.svg?branch=main)](https://github.com/gjrud/steam-achievement-tracker/actions/workflows/github-code-scanning/codeql)
 [![Latest release](https://img.shields.io/github/v/release/gjrud/steam-achievement-tracker?include_prereleases&sort=date&label=release)](https://github.com/gjrud/steam-achievement-tracker/releases)
 
+![Steam Achievement Tracker showing the Not completed view, ranked by how close each game is to completion](assets/screenshots/overview.png)
+
 Steam Achievement Tracker is a Linux and Windows desktop app that tracks your Steam achievement progress. It reads your Steam profile and keeps the results on your computer. It highlights games worth finishing next and makes sync problems visible instead of silently losing old data.
 
 I built this app for personal use, entirely through vibecoding. I have entry-level knowledge of Go, which I often use for personal or work-related CLI tools, but the Svelte/JavaScript frontend is far outside my area of expertise.
@@ -44,7 +46,7 @@ Uninstalling never removes your data, cache, logs, or saved API key.
 
 The key is stored in the system keyring under service `steam-achievement-tracker` and user `steam-web-api-key` (Secret Service on Linux; a generic credential in Windows Credential Manager). Settings cannot change the key. To replace it before a profile is connected, use **Replace key** on the setup screen. Once a profile is connected, remove the profile with **Delete API key** turned on (see [Remove the profile](#remove-the-profile); leave **Delete profile data** off to keep its data), enter the new key, and connect the same profile again.
 
-![API key form, opened with Replace key](assets/screenshots/setup-apikey.gif)
+![API key form, opened with Replace key](assets/screenshots/setup-apikey.webp)
 
 ## Usage
 
@@ -52,7 +54,7 @@ The key is stored in the system keyring under service `steam-achievement-tracker
 
 With a key saved and no profile active, enter a SteamID64, a profile URL with its scheme (`https://steamcommunity.com/profiles/<steamid64>` or `https://steamcommunity.com/id/<name>`), or a vanity name. Click **Validate** to see the Steam name and avatar the app found, then **Save and sync** to make the profile active and start a sync. Only one profile is active at a time.
 
-![Connect a Steam profile](assets/screenshots/connect-profile.gif)
+![Connect a Steam profile](assets/screenshots/connect-profile.webp)
 
 ### Sync and dashboard
 
@@ -72,7 +74,7 @@ A game with DLC or several sets (such as Team Fortress 2's class sets) gets one 
 
 Games ranked by how close they are to being finished, with title search and tag filters. Cards show progress, playtime, tags and cover art. The order uses a suggestion score from your completion percentage and, when Steam provides it, the average unlock rate of the achievements you are missing. Among the normal candidates, games flagged **New achievements added** come first; then come unowned DLC sets, then games flagged **Achievements in DLC**, then games with no achievements.
 
-![Not completed view](assets/screenshots/not-completed.gif)
+![Not completed view](assets/screenshots/not-completed.webp)
 
 | Tag | Meaning |
 | --- | --- |
@@ -103,13 +105,13 @@ Games whose latest refresh failed. Earlier data is kept, and the next sync retri
 
 Games you disabled and games the profile no longer owns. Right-click a card, or a row in **Sync errors**, and choose **Disable game** (or **Disable set**) to hide it from the views and totals and skip it during sync. Click **Re-enable** in **Disabled** to bring it back.
 
-![Disable and re-enable games](assets/screenshots/disable-renable.gif)
+![Disable and re-enable games](assets/screenshots/disable-renable.webp)
 
 ### Flags
 
 The same right-click menu has two flags. **Mark as previously completed** is for a game that was complete before Steam added achievements; it adds the **New achievements added** tag while the game is incomplete. **Flag missing achievements in DLC** is for remaining achievements that belong to DLC or to content you do not plan to count; it adds the **Achievements in DLC** tag. Flags are local bookkeeping stored per profile and can be cleared from the same menu.
 
-![Manually flag games](assets/screenshots/flag-games.gif)
+![Manually flag games](assets/screenshots/flag-games.webp)
 
 ### Library sync options
 
@@ -129,7 +131,7 @@ Changes apply on the next sync. Turning an option off moves the games it exclude
 
 With both off, the profile is only disconnected: its data stays on disk, and connecting the same SteamID64 again restores it. To delete disconnected data, reconnect the profile (this starts a sync) and remove it with **Delete profile data**, or delete all app data by removing the folders (see [Data and privacy](#data-and-privacy)). Neither switch deletes log files.
 
-![Remove active profile](assets/screenshots/clear-data.gif)
+![Remove active profile](assets/screenshots/clear-data.webp)
 
 ## Updates
 
