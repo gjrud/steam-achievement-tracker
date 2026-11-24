@@ -199,7 +199,7 @@ func TestFullSyncPanicInWorkerBookkeepingDoesNotCrashOrHang(t *testing.T) {
 	logs := captureLog(t)
 
 	var events atomic.Int64
-	svc := &Service{Repo: repo, Steam: fake.client, OnChange: func() {
+	svc := &Service{Repo: repo, Steam: fake.client, ProgressInterval: -1, OnChange: func() {
 		if events.Add(1) == 6 {
 			panic("emitter failed on a late event")
 		}

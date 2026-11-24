@@ -11,13 +11,15 @@ import (
 )
 
 // countingService returns a service on repo and client whose OnChange counts its calls. Read the count after FullSync.
+// Throttling is off (ProgressInterval -1), so every finished game writes and fires. Throttled counts are in
+// syncer_progress_throttle_test.go.
 func countingService(repo *repository.Repository, client *steam.Client) (*Service, *atomic.Int32) {
 	var calls atomic.Int32
-	return &Service{Repo: repo, Steam: client, OnChange: func() { calls.Add(1) }}, &calls
+	return &Service{Repo: repo, Steam: client, OnChange: func() { calls.Add(1) }, ProgressInterval: -1}, &calls
 }
 
-// OnChange fires for run start, each game's progress write and the final status write. Games sync on worker
-// goroutines, so the counter is atomic.
+// With throttling off, OnChange fires for run start, each game's progress write and the final status write. Games
+// sync on worker goroutines, so the counter is atomic.
 func TestFullSyncOnChangeFiresForStartProgressAndFinish(t *testing.T) {
 	repo := testRepository(t)
 	profile := testProfile(t, repo)

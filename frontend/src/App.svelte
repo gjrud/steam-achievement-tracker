@@ -76,8 +76,9 @@
   let clearConfirmOpen = false
   let clearConfirmInput = ''
   const menuMargin = 12
-  // Wails event the Go backend emits (no payload) on sync start, after each game's progress write, after the final
-  // status write, and once more after the sync flag clears.
+  // Wails event the Go backend emits (no payload) on sync start, after each progress write (the first game's write is
+  // immediate, later ones at most one per 500 ms, and a trailing flush follows the last game if an update was skipped), after the final status
+  // write, and once more after the sync flag clears.
   const syncChangedEvent = 'sync:changed'
   const refreshRetryDelayMs = 2000
   // The update state is separate from the app state: it follows update:changed and has its own reads. The banner shows

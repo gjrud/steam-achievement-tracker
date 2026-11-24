@@ -20,7 +20,7 @@ func (r *Repository) Close() error
 Each exported method's behavior is described in the sections below. In summary:
 
 - Single autocommit statement: `DeactivateProfile`, `TouchProfileSynced`, `SaveLibrarySettings`, `SetUpdateChecksEnabled`, `StartSyncRun`, `FinishSyncRun`, `UpdateSyncRunProgress`, `CancelRunningSyncRuns`, `HasSetData`, `HasStoredAchievementData`, and all read methods.
-- One transaction: `SaveProfile`, `ClearProfileData` (its reads and deletes), `UpsertOwnedGame`, `SaveGameSync`, `SaveGameWarning` (warning part; `UpsertOwnedGame` runs first in its own transaction), `MarkGamePreviouslyCompleted`, `ToggleMissingAchievementsInDLC`, `DisableMissingOwnedGames`, `DisableProfileGame`, `EnableProfileGame`, `RecomputeGameTags`, `SaveCover`.
+- One transaction: `SaveProfile`, `ClearProfileData` (its reads and deletes), `SaveOwnedGames` (the whole owned list and its not-owned sweep), `UpsertOwnedGame`, `SaveGameSync`, `SaveGameWarning` (warning part; `UpsertOwnedGame` runs first in its own transaction), `MarkGamePreviouslyCompleted`, `ToggleMissingAchievementsInDLC`, `DisableMissingOwnedGames`, `DisableProfileGame`, `EnableProfileGame`, `RecomputeGameTags`, `SaveCover`.
 - Not atomic across calls: `Dashboard` does its reads in separate statements without a read transaction, so `Summary`, `LatestSyncRun` and the card list can reflect different moments (the card lists themselves come from one `loadGameCards` pass).
 
 ## Exported types
@@ -32,7 +32,7 @@ Each exported method's behavior is described in the sections below. In summary:
 | `SyncRun` | `repository.go` | Sync run record: `ID`, `ProfileID`, `StartedAt`, `FinishedAt`, `Status`, `GamesTotal`, `GamesSynced`, `GamesFailed`, `Error`. |
 | `GameCard` | `repository.go` | One dashboard entry (game or set) with flags, tags and cover URL. JSON keys are camelCase. |
 | `Dashboard` | `repository.go` | `Summary`, `LatestSyncRun`, and the four lists `Suggestions`, `Completed`, `Warnings`, `Disabled`. |
-| `GameRecord` | `repository.go` | Owned-game input for `UpsertOwnedGame`: `AppID`, `Name`, `PlaytimeForever`, `Purchased`, `Unvetted`. |
+| `GameRecord` | `repository.go` | Owned-game input for `SaveOwnedGames` and `UpsertOwnedGame`: `AppID`, `Name`, `PlaytimeForever`, `Purchased`, `Unvetted`. |
 | `AchievementRecord` | `repository.go` | Achievement input: `APIName`, `GlobalPercent`, `Unlocked`, `UnlockTime`, `Archived`. |
 | `ProfileGameState` | `repository.go` | State of one entry, including flags; `Exists` is false for history-only reads. |
 | `GameSyncUpdate` | `repository.go` | One game's sync: owned facts plus all eligible `Sets`. An empty `Sets` prunes every entry of the game. |
@@ -129,16 +129,25 @@ Not removed by `ClearProfileData`: `achievements`/`games` rows still referenced 
 
 ## Owned games and sync writes (`games.go`)
 
+### `SaveOwnedGames(profileID, []GameRecord) error`
+
+The owned-list write the syncer uses (`syncer.prepareOwnedGames`, once per sync). One transaction, one `now` for the whole batch:
+
+1. For each game: upserts `games(appid, name)` and upserts `profile_owned_games` with `playtime_forever`, `purchased`, and `vetted = !Unvetted`. The two statements are prepared once on the transaction.
+2. The not-owned sweep over the same ids, as `DisableMissingOwnedGames` does (see below). An empty list flags every entry of the profile as `not_owned`.
+
+Any error rolls back the whole batch, so a failed write leaves the stored library as it was. The syncer fails the run on that error. The method uses only its own transaction: the pool holds one connection, so calling a `Repository` method that begins a transaction from inside it would wait forever.
+
 ### `UpsertOwnedGame(profileID, GameRecord) error`
 
-One transaction: upserts `games(appid, name)`, then upserts `profile_owned_games` with `playtime_forever`, `purchased`, and `vetted = !Unvetted`. Called by `syncer.prepareOwnedGames` once per game of the merged `GetOwnedGames` result, and by `SaveGameWarning`.
+One transaction: upserts `games(appid, name)`, then upserts `profile_owned_games` with `playtime_forever`, `purchased`, and `vetted = !Unvetted`. Uses the same `ownedGameWriter` as `SaveOwnedGames`: the SQL is in the consts `upsertGameNameSQL` and `upsertProfileOwnedSQL`, and the bind arguments are in `ownedGameWriter.write`. Called by `SaveGameWarning`; the syncer no longer calls it.
 
 ### `SaveGameSync(GameSyncUpdate) error`
 
 One transaction for one game. In order:
 
 1. Upsert `games` (name, `has_achievements`, `achievement_status`).
-2. Upsert `profile_owned_games` playtime. On insert `purchased` is `0` and `vetted` takes its default `1`. On conflict only playtime and `updated_at` change, so `purchased` and `vetted` set by `UpsertOwnedGame` are kept.
+2. Upsert `profile_owned_games` playtime. On insert `purchased` is `0` and `vetted` takes its default `1`. On conflict only playtime and `updated_at` change, so `purchased` and `vetted` set by `SaveOwnedGames` (or `UpsertOwnedGame`) are kept.
 3. `pruneProfileAchievements`: delete this profile's achievements of the app that are not in any set; delete unreferenced `achievements` of the app.
 4. `upsertGameSets`: upsert `game_sets` for every set (name, `dlcappid`, `sort_order`). Nothing is deleted: a set Steam stops reporting keeps its row, so `HasSetData` stays true for that app.
 5. For each set: upsert `achievements` (`groupid`, `archived`, `global_percent`) and `profile_achievements` (`unlocked`, `unlock_time`).
@@ -168,7 +177,7 @@ Single read, no transaction. True when the app has an entry with `groupid<>0`, a
 - `ToggleMissingAchievementsInDLC(profileID, appID, groupID) error`: flips `profile_game_flags.missing_achievements_in_dlc` (insert or flip) and runs `recomputeGameTagsTx` in one transaction, so a failed tag write rolls the flip back.
 - `DisableProfileGame(profileID, appID, groupID) error`: one transaction: upserts the flag with `disabled = 1`, `disabled_reason = 'manual'`, and deletes that entry's tags. Sibling sets of the same game are not affected.
 - `EnableProfileGame(profileID, appID, groupID) error`: one transaction: sets `disabled = 0`, `disabled_reason = NULL` on that entry's flag, then recomputes its tags.
-- `DisableMissingOwnedGames(profileID, owned []int64) error`: one transaction, the not-owned sweep.
+- `DisableMissingOwnedGames(profileID, owned []int64) error`: one transaction, the not-owned sweep. The body (`disableMissingOwnedGamesTx`) is also the sweep step of `SaveOwnedGames`, which the syncer calls instead.
   - Entries of apps not in `owned` get a flag with `disabled = 1`, `disabled_reason = 'not_owned'`. On conflict a `manual` reason is kept (`notOwnedReasonSQL`), so a re-own does not re-enable a manually disabled entry.
   - Flags with `disabled_reason = 'not_owned'` for apps in `owned` are re-enabled (`disabled = 0`, reason NULL). Manual disables stay.
   - Tags of entries of apps not in `owned` are deleted. With an empty `owned`, every entry is flagged and all tags of the profile are deleted.

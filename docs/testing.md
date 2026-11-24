@@ -115,6 +115,7 @@ No tests. It is constants only.
 | `settings_test.go` | Library settings defaults, per-profile isolation and cleanup. |
 | `sets_test.go` | `HasSetData`. |
 | `id_lists_test.go` | Lists above SQLite's bound-variable limit (JSON-bound id lists), and `int64sJSON` encoding `nil` and empty lists as `[]`. |
+| `owned_games_batch_test.go` | `SaveOwnedGames`: same stored state as the per-game path (`UpsertOwnedGame` plus `DisableMissingOwnedGames`), a failing write rolls back the whole batch, an empty list flags every entry not_owned, a 40k list in one transaction (time logged, not asserted), other profiles untouched, and a manual disable survives while a re-own clears only `not_owned`. |
 | `snapshots_dedupe_test.go` | `game_snapshots` dedupe: unchanged syncs add no rows, a changed state adds one, completed history survives flips, and the check compares only the latest snapshot. |
 | `cleanup_plan_test.go` | The orphan-delete statements that `ClearProfileData` runs use the migration 4 indexes (`SEARCH ... USING [COVERING] INDEX`). |
 | `profile_removal_timing_test.go` | Removing one of two profiles with 100k achievement rows each, through `ClearProfileData`; generous 60 s bound, time logged. Skipped under `-short`. |
@@ -134,9 +135,10 @@ Retry tests call `client.SetRetryBackoff(func(int) time.Duration { return 0 })` 
 | File | Covers |
 | --- | --- |
 | `syncer_test.go` | Full sync flows against `fakeSteamServer` (built with `newFakeSteamServer`). The fake serves owned games, game and user achievements, and store items. A `redirectTransport` sends Steam URLs to it. Covers partial failure, recovery, cancellation, the API-key redaction in warnings, disabled and no-longer-owned games, concurrency limits, set entries, DLC ownership changes, covers (base and DLC, stale and fresh, store fallback), no filesystem path in any table after a cover sync, and the legacy fallback rules. |
-| `syncer_changed_test.go` | The `Service` change notification (`changed`) fires at start, progress and finish, also when writes fail, and not when the run cannot start. It is nil-safe. |
+| `syncer_changed_test.go` | The `Service` change notification (`changed`) fires at start, progress (throttled by `ProgressInterval`; see [syncer.md](syncer.md#progress-and-change-notifications)) and finish, also when writes fail, and not when the run cannot start. It is nil-safe. |
 | `syncer_entries_test.go` | `buildSetEntries` rules: completion boundary, missing average, synthesized sets in group order. |
-| `syncer_faults_test.go` | Database write failures are logged and the sync continues: upserts, disable-missing, warnings, finish, progress, profile touch, and cover refresh. |
+| `syncer_faults_test.go` | Database write failures: the owned-list save (upserts and the not-owned sweep) fails the run and rolls back, with nothing written and no game synced. Warnings, finish, progress, profile touch and cover refresh failures are logged and the sync continues. |
+| `syncer_progress_throttle_test.go` | Progress throttle on a fake clock (no sleeps): first write unthrottled, interval gating, trailing flush after a finish failure and after a cancel, a failing progress write logged and not retried per game, and the interval default. The counter snapshot taken after the clock read under `progressMu` is pinned deterministically by `TestProgressSnapshotIsTakenAfterClockRead`. `TestProgressWritesNeverGoBackwards` (four workers, throttling off) is a timing-dependent smoke test and does not pin the ordering alone. |
 | `syncer_retry_test.go` | Owned-games failure fails the run and keeps existing data; retryable game status exhaustion gives a partial run; retries that succeed. |
 
 `openTestRepository` opens a real repository under isolated paths. Fixtures (`storeFixture`, `groupFixture`, `achFixture`, `gameFailure`) are built inline.

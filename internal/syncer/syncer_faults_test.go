@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -48,8 +49,9 @@ func faultyRepository(t *testing.T) (*repository.Repository, appdata.Paths, *rep
 	return repo, paths, testProfile(t, repo)
 }
 
-// An owned game whose upsert fails is logged; the sync goes on with the other games and the run succeeds.
-func TestFullSyncOwnedGameUpsertFailureIsLoggedAndSyncContinues(t *testing.T) {
+// A DB error while the owned list is saved fails the run and writes nothing. The list is one transaction: game 60 is
+// written first, then game 50's write fails, so game 60's rows must roll back too. No game is synced.
+func TestFullSyncOwnedGameUpsertFailureFailsRunAndRollsBack(t *testing.T) {
 	repo, paths, profile := faultyRepository(t)
 	seedGameSync(t, repo, profile.ID, 50)
 	if err := repo.DisableProfileGame(profile.ID, 50, 0); err != nil {
@@ -60,24 +62,43 @@ func TestFullSyncOwnedGameUpsertFailureIsLoggedAndSyncContinues(t *testing.T) {
 		`create trigger block_game_update before update on games when new.appid = 50 begin select raise(abort, 'games blocked'); end`,
 	)
 	fake := newFakeSteamServer(t, []steam.OwnedGame{
-		{AppID: 50, Name: "Disabled Game", PlaytimeForever: 1},
 		{AppID: 60, Name: "Synced Game", PlaytimeForever: 3},
+		{AppID: 50, Name: "Disabled Game", PlaytimeForever: 1},
 	})
 	fake.schema[60] = []string{}
 	logs := captureLog(t)
 
-	result := runFullSyncOK(t, repo, fake, profile)
-	requireSyncResult(t, result, expectedSyncResult{status: "success", total: 1, synced: 1, failed: 0})
-	if !strings.Contains(logs.String(), "upsert owned game 50:") {
-		t.Fatalf("log = %q, want upsert failure for game 50", logs.String())
+	result, err := (&Service{Repo: repo, Steam: fake.client}).FullSync(context.Background(), *profile)
+	if err == nil {
+		t.Fatal("FullSync err = nil, want the owned-list write error")
+	}
+	requireSyncResult(t, result, expectedSyncResult{status: "failed", total: 0, synced: 0, failed: 0, hasError: true})
+	if result.Error == nil || *result.Error != genericFailureText {
+		t.Fatalf("result error = %v, want the generic sentence", result.Error)
+	}
+	if !strings.Contains(logs.String(), "save owned games:") {
+		t.Fatalf("log = %q, want the owned-list save failure", logs.String())
+	}
+	if got := fake.count("game", 60); got != 0 {
+		t.Fatalf("achievement calls for game 60 = %d, want 0 after the run failed", got)
+	}
+	if n := faultInt(t, paths, `select count(*) from games where appid=60`); n != 0 {
+		t.Fatalf("games row for 60 = %d, want rolled back", n)
+	}
+	if n := faultInt(t, paths, `select count(*) from profile_owned_games where profile_id=? and appid=60`, profile.ID); n != 0 {
+		t.Fatalf("profile_owned_games row for 60 = %d, want rolled back", n)
 	}
 	if disabled := requireGameCards(t, repo, profile.ID, "disabled"); len(disabled) != 1 || disabled[0].AppID != 50 {
-		t.Fatalf("disabled cards = %#v, want manually disabled game 50 still disabled", disabled)
+		t.Fatalf("disabled cards = %#v, want manually disabled game 50 unchanged", disabled)
+	}
+	run := requireLatestRun(t, repo, profile.ID)
+	if run.Status != "failed" || run.Error == nil || *run.Error != genericFailureText {
+		t.Fatalf("sync run = %#v, want failed with the generic sentence", run)
 	}
 }
 
-// A failing DisableMissingOwnedGames is logged; the run goes on and the game no longer owned is not flagged.
-func TestFullSyncDisableMissingOwnedGamesFailureIsLoggedAndSyncContinues(t *testing.T) {
+// A DB error on the not-owned sweep also fails the run and rolls back the owned-list writes of the same batch.
+func TestFullSyncDisableMissingOwnedGamesFailureFailsRunAndRollsBack(t *testing.T) {
 	repo, paths, profile := faultyRepository(t)
 	seedGameSync(t, repo, profile.ID, 50)
 	addTriggers(t, paths,
@@ -87,14 +108,71 @@ func TestFullSyncDisableMissingOwnedGamesFailureIsLoggedAndSyncContinues(t *test
 	fake.schema[60] = []string{}
 	logs := captureLog(t)
 
-	result := runFullSyncOK(t, repo, fake, profile)
-	requireSyncResult(t, result, expectedSyncResult{status: "success", total: 1, synced: 1, failed: 0})
-	if !strings.Contains(logs.String(), "disable missing games:") {
-		t.Fatalf("log = %q, want disable failure", logs.String())
+	result, err := (&Service{Repo: repo, Steam: fake.client}).FullSync(context.Background(), *profile)
+	if err == nil {
+		t.Fatal("FullSync err = nil, want the not-owned sweep error")
+	}
+	requireSyncResult(t, result, expectedSyncResult{status: "failed", total: 0, synced: 0, failed: 0, hasError: true})
+	if result.Error == nil || *result.Error != genericFailureText {
+		t.Fatalf("result error = %v, want the generic sentence", result.Error)
+	}
+	if !strings.Contains(logs.String(), "save owned games:") {
+		t.Fatalf("log = %q, want the owned-list save failure", logs.String())
+	}
+	if got := fake.count("game", 60); got != 0 {
+		t.Fatalf("achievement calls for game 60 = %d, want 0 after the run failed", got)
+	}
+	if n := faultInt(t, paths, `select count(*) from games where appid=60`); n != 0 {
+		t.Fatalf("games row for 60 = %d, want rolled back", n)
+	}
+	if n := faultInt(t, paths, `select count(*) from profile_owned_games where profile_id=? and appid=60`, profile.ID); n != 0 {
+		t.Fatalf("profile_owned_games row for 60 = %d, want rolled back", n)
 	}
 	if disabled := requireGameCards(t, repo, profile.ID, "disabled"); len(disabled) != 0 {
-		t.Fatalf("disabled cards = %#v, want none after failed not-owned flagging", disabled)
+		t.Fatalf("disabled cards = %#v, want none: the failed sweep flagged nothing", disabled)
 	}
+	run := requireLatestRun(t, repo, profile.ID)
+	if run.Status != "failed" || run.Error == nil || *run.Error != genericFailureText {
+		t.Fatalf("sync run = %#v, want failed with the generic sentence", run)
+	}
+}
+
+// A game whose achievement calls fail is a per-game warning, not a run failure: the owned list is saved in full, the
+// other game syncs, and the run ends partial.
+func TestFullSyncGameFailureWarnsAndSavesOwnedListInFull(t *testing.T) {
+	repo, paths, profile := faultyRepository(t)
+	fake := newFakeSteamServer(t, []steam.OwnedGame{
+		{AppID: 70, Name: "Private Game", PlaytimeForever: 3, Purchased: true},
+		{AppID: 60, Name: "Synced Game", PlaytimeForever: 4},
+	})
+	fake.schema[70] = []string{"ACH_ONE"}
+	fake.playerError[70] = "profile is private"
+	fake.gameFailure[70] = gameFailure{status: http.StatusForbidden}
+	fake.schema[60] = []string{}
+
+	requireSyncResult(t, runFullSyncOK(t, repo, fake, profile), expectedSyncResult{status: "partial", total: 2, synced: 1, failed: 1, hasError: true})
+	requireWarningCard(t, repo, profile.ID, 70, "Steam did not provide achievements for this game.")
+	if n := faultInt(t, paths, `select count(*) from profile_owned_games where profile_id=? and appid in (60,70) and playtime_forever in (3,4)`, profile.ID); n != 2 {
+		t.Fatalf("profile_owned_games rows for both games = %d, want 2", n)
+	}
+	if n := faultInt(t, paths, `select purchased from profile_owned_games where profile_id=? and appid=70`, profile.ID); n != 1 {
+		t.Fatalf("purchased flag for game 70 = %d, want 1 from the owned list", n)
+	}
+}
+
+// faultInt runs a single-int query on a separate connection to the test database, after the sync has finished.
+func faultInt(t *testing.T, paths appdata.Paths, query string, args ...any) int {
+	t.Helper()
+	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?_busy_timeout=5000", paths.DB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(query, args...).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 // A game failure whose warning cannot be saved is logged. The run is still partial and no warning row exists.
