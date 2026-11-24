@@ -74,7 +74,7 @@ func TestFullSyncClearsWarningAfterRecovery(t *testing.T) {
 	requireCompletedCard(t, repo, profile.ID, 20)
 }
 
-func TestFullSyncCancellationPersistsFailedRun(t *testing.T) {
+func TestFullSyncCancellationPersistsCanceledRun(t *testing.T) {
 	repo := testRepository(t)
 	profile := testProfile(t, repo)
 	owned := make([]steam.OwnedGame, 20)
@@ -111,8 +111,8 @@ func TestFullSyncCancellationPersistsFailedRun(t *testing.T) {
 		t.Fatalf("err = %v, want context canceled", out.err)
 	}
 	result := out.result
-	if result.Status != "failed" || result.Error == nil || result.GamesTotal != len(owned) {
-		t.Fatalf("result = %#v, want failed canceled sync with total games", result)
+	if result.Status != "canceled" || result.Error == nil || result.GamesTotal != len(owned) {
+		t.Fatalf("result = %#v, want canceled sync with total games", result)
 	}
 	if result.GamesSynced != 0 || result.GamesFailed != 0 {
 		t.Fatalf("result = %#v, want no synced and no failed games for an interrupted sync", result)
@@ -121,8 +121,8 @@ func TestFullSyncCancellationPersistsFailedRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run == nil || run.Status != "failed" || run.Error == nil || *run.Error != "The request was canceled." {
-		t.Fatalf("sync run = %#v, want persisted failed cancellation", run)
+	if run == nil || run.Status != "canceled" || run.Error == nil || *run.Error != "The request was canceled." {
+		t.Fatalf("sync run = %#v, want persisted cancellation", run)
 	}
 	// Games interrupted in flight are not failures: no warning rows, and the stored data is kept.
 	requireNoWarningCards(t, repo, profile.ID)
@@ -133,8 +133,9 @@ func TestFullSyncCancellationPersistsFailedRun(t *testing.T) {
 }
 
 // Cancel after every game is already handed to a worker: dispatch has no error to return, so the interrupted
-// in-flight games must still end the run as failed with the cancellation, and the profile must not be touched.
-func TestFullSyncCancelAfterAllGamesDispatchedFailsRun(t *testing.T) {
+// in-flight games must still end the run as canceled with the cancellation. No game synced here, so the profile
+// must not be touched.
+func TestFullSyncCancelAfterAllGamesDispatchedEndsCanceled(t *testing.T) {
 	repo := testRepository(t)
 	profile := testProfile(t, repo)
 	owned := make([]steam.OwnedGame, 4) // at most the worker count, so every game is in flight when canceled
@@ -170,15 +171,15 @@ func TestFullSyncCancelAfterAllGamesDispatchedFailsRun(t *testing.T) {
 		t.Fatalf("err = %v, want context canceled", out.err)
 	}
 	result := out.result
-	if result.Status != "failed" || result.Error == nil || result.GamesTotal != len(owned) {
-		t.Fatalf("result = %#v, want failed canceled sync with total games", result)
+	if result.Status != "canceled" || result.Error == nil || result.GamesTotal != len(owned) {
+		t.Fatalf("result = %#v, want canceled sync with total games", result)
 	}
 	if result.GamesSynced != 0 || result.GamesFailed != 0 {
 		t.Fatalf("result = %#v, want no synced and no failed games for an interrupted sync", result)
 	}
 	run := requireLatestRun(t, repo, profile.ID)
-	if run.Status != "failed" || run.Error == nil || *run.Error != "The request was canceled." {
-		t.Fatalf("sync run = %#v, want persisted failed cancellation", run)
+	if run.Status != "canceled" || run.Error == nil || *run.Error != "The request was canceled." {
+		t.Fatalf("sync run = %#v, want persisted cancellation", run)
 	}
 	if run.GamesSynced != 0 || run.GamesFailed != 0 {
 		t.Fatalf("sync run counters = %#v, want no synced and no failed games", run)
@@ -281,12 +282,12 @@ func TestFullSyncCancelDuringOwnedGamesStoresConstantError(t *testing.T) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 	want := "The request was canceled."
-	if result.Error == nil || *result.Error != want {
-		t.Fatalf("result = %#v, want error %q", result, want)
+	if result.Status != "canceled" || result.Error == nil || *result.Error != want {
+		t.Fatalf("result = %#v, want canceled run with error %q", result, want)
 	}
 	run := requireLatestRun(t, repo, profile.ID)
-	if run.Status != "failed" || run.Error == nil || *run.Error != want {
-		t.Fatalf("sync run = %#v, want failed run with error %q", run, want)
+	if run.Status != "canceled" || run.Error == nil || *run.Error != want {
+		t.Fatalf("sync run = %#v, want canceled run with error %q", run, want)
 	}
 	for _, raw := range []string{"http", "key=", "IPlayerService", "test-key"} {
 		if strings.Contains(*run.Error, raw) {
@@ -461,7 +462,10 @@ func TestFullSyncDisablesNoLongerOwnedGames(t *testing.T) {
 	seedGameSync(t, repo, profile.ID, 50)
 	seedGameSync(t, repo, profile.ID, 60)
 	fake := newFakeSteamServer(t, []steam.OwnedGame{{AppID: 60, Name: "Still Owned", PlaytimeForever: 30}})
-	fake.schema[60] = []string{}
+	// Game 60 keeps its stored achievement; a real schema (not an empty one, which would now be a warning) keeps it synced.
+	fake.schema[60] = []string{"ACH"}
+	fake.player[60] = map[string]bool{"ACH": true}
+	fake.global[60] = map[string]float64{"ACH": 42}
 
 	result, err := (&Service{Repo: repo, Steam: fake.client}).FullSync(context.Background(), *profile)
 	if err != nil {
@@ -481,8 +485,10 @@ func TestFullSyncDisablesNoLongerOwnedGames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(completed) != 0 {
-		t.Fatalf("completed cards = %#v, want disabled old completed game hidden", completed)
+	for _, card := range completed {
+		if card.AppID == 50 {
+			t.Fatalf("completed cards = %#v, want disabled old completed game hidden", completed)
+		}
 	}
 }
 

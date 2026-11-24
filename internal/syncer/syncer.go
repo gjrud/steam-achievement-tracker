@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"time"
@@ -51,13 +52,32 @@ type fullSyncRun struct {
 	mu      sync.Mutex
 }
 
-func (s *Service) FullSync(ctx context.Context, profile repository.Profile) (Result, error) {
+// FullSync runs one sync of the profile's library. A panic in the run ends it as failed (its stored error is the
+// generic sentence; the panic is logged). A panic inside one game is recovered per game (see syncGameSafely) and
+// does not reach this function.
+func (s *Service) FullSync(ctx context.Context, profile repository.Profile) (result Result, err error) {
+	var run *fullSyncRun
+	defer func() {
+		p := recover()
+		if p == nil {
+			return
+		}
+		log.Printf("sync run panic: %s", panicStackText(p))
+		err = newPanicError(p)
+		if run == nil {
+			// No run row exists yet: nothing to finish, so the caller gets the error and the generic sentence.
+			text := steam.UserMessage(err)
+			result = Result{Status: "failed", Error: &text}
+			return
+		}
+		result, err = run.fail(err)
+	}()
 	runID, err := s.Repo.StartSyncRun(profile.ID)
 	if err != nil {
 		return Result{}, err
 	}
 	s.changed()
-	run := &fullSyncRun{s: s, profile: profile, runID: runID, result: Result{Status: "success"}}
+	run = &fullSyncRun{s: s, profile: profile, runID: runID, result: Result{Status: "success"}}
 
 	owned, err := s.prepareOwnedGames(ctx, profile)
 	if err != nil {
@@ -75,6 +95,26 @@ func (s *Service) FullSync(ctx context.Context, profile repository.Profile) (Res
 	run.finalize()
 	run.finish()
 	return run.result, nil
+}
+
+// panicError is a recovered panic. Its text carries the panic value for the log only. Stored and shown, it is the
+// generic sentence from steam.UserMessage: a panic is an internal failure, not a Steam answer.
+type panicError struct {
+	value any
+}
+
+func newPanicError(value any) error {
+	return &panicError{value: value}
+}
+
+func (e *panicError) Error() string {
+	return fmt.Sprintf("panic: %v", e.value)
+}
+
+// panicStackText formats a recovered panic value and its stack for the log. Secrets are scrubbed by pattern, as for
+// other logged text. Paths are kept as-is, like callBound and logSyncPanic; release builds use -trimpath.
+func panicStackText(p any) string {
+	return steam.RedactSecrets(fmt.Sprintf("%v\n%s", p, debug.Stack()))
 }
 
 func (s *Service) prepareOwnedGames(ctx context.Context, profile repository.Profile) ([]steam.OwnedGame, error) {
@@ -131,16 +171,40 @@ func (r *fullSyncRun) syncGames(ctx context.Context, games []steam.OwnedGame) er
 func (r *fullSyncRun) syncWorker(ctx context.Context, jobs <-chan steam.OwnedGame, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for game := range jobs {
-		if err := r.s.syncGame(ctx, r.profile, game); err != nil {
-			// Interrupted by cancellation, not a game failure: no warning, and the game keeps its stored data.
-			// On a failed (canceled) run, games interrupted mid-sync count as neither synced nor failed.
-			if ctx.Err() == nil {
-				r.recordGameFailure(game, err)
-			}
-			continue
-		}
-		r.recordGameSuccess()
+		r.syncJob(ctx, game)
 	}
+}
+
+// syncJob runs one game and its bookkeeping. The bookkeeping (recordGameFailure, recordGameSuccess) runs on this
+// goroutine and calls the repository and OnChange, so a panic there would crash the process unless it is caught
+// here. The guard only logs. It does not record a game failure: that bookkeeping may be what panicked.
+func (r *fullSyncRun) syncJob(ctx context.Context, game steam.OwnedGame) {
+	defer func() {
+		if p := recover(); p != nil {
+			log.Printf("appid %d: worker panic: %s", game.AppID, panicStackText(p))
+		}
+	}()
+	if err := r.syncGameSafely(ctx, game); err != nil {
+		// Interrupted by cancellation, not a game failure: no warning, and the game keeps its stored data.
+		// On a failed (canceled) run, games interrupted mid-sync count as neither synced nor failed.
+		if ctx.Err() == nil {
+			r.recordGameFailure(game, err)
+		}
+		return
+	}
+	r.recordGameSuccess()
+}
+
+// syncGameSafely runs syncGame for one game. A panic becomes this game's error, so the worker goes on with the next
+// game. A worker that died instead would leave dispatchSyncJobs blocked on the unbuffered jobs channel.
+func (r *fullSyncRun) syncGameSafely(ctx context.Context, game steam.OwnedGame) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			log.Printf("appid %d: sync panic: %s", game.AppID, panicStackText(p))
+			err = newPanicError(p)
+		}
+	}()
+	return r.s.syncGame(ctx, r.profile, game)
 }
 
 func dispatchSyncJobs(ctx context.Context, jobs chan<- steam.OwnedGame, games []steam.OwnedGame) error {
@@ -205,11 +269,20 @@ func (r *fullSyncRun) touchProfileSynced() {
 	}
 }
 
+// fail ends the run with err. A user cancel (or app shutdown) ends it as "canceled", not "failed". A deadline or any other
+// error ends it as "failed". The stored error is the user-safe sentence (The request was canceled., for a cancel). A run
+// that synced at least one game still counts as a sync of the profile.
 func (r *fullSyncRun) fail(err error) (Result, error) {
 	// The stored run error is exposed in AppState, so it gets the user-safe sentence. The caller logs the raw err.
 	errText := steam.UserMessage(err)
 	r.result.Status = "failed"
+	if errors.Is(err, context.Canceled) {
+		r.result.Status = "canceled"
+	}
 	r.result.Error = &errText
+	if r.result.GamesSynced > 0 {
+		r.touchProfileSynced()
+	}
 	r.finish()
 	return r.result, err
 }
@@ -276,8 +349,19 @@ func (s *Service) syncGameLegacy(ctx context.Context, profile repository.Profile
 	return s.saveEntries(ctx, profile, game, entries, now)
 }
 
-// saveGameWithoutAchievements stores the game as no_achievements with its group-0 entry only.
+// saveGameWithoutAchievements stores the game as no_achievements with its group-0 entry only. An empty schema is
+// also what a failed or partial answer from Steam looks like, so when the profile already has achievement data for
+// the app it is not taken as "no achievements": nothing is pruned, and the sync fails for this game with
+// steam.ErrNoAchievementsReturned (a warning, so the run ends partial). A developer who really removed every
+// achievement therefore keeps the warning on every sync.
 func (s *Service) saveGameWithoutAchievements(ctx context.Context, profile repository.Profile, game steam.OwnedGame, now string) error {
+	stored, err := s.Repo.HasStoredAchievementData(profile.ID, game.AppID)
+	if err != nil {
+		return err
+	}
+	if stored {
+		return steam.ErrNoAchievementsReturned
+	}
 	prev, err := s.Repo.ProfileGame(profile.ID, game.AppID, 0)
 	if err != nil {
 		return err

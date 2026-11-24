@@ -240,13 +240,36 @@ func (r *Repository) MarkGamePreviouslyCompleted(profileID, appID, groupID int64
 
 func (r *Repository) ToggleMissingAchievementsInDLC(profileID, appID, groupID int64) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := r.db.Exec(`insert into profile_game_flags(profile_id, appid, groupid, missing_achievements_in_dlc, created_at, updated_at)
-		values(?,?,?,?,?,?)
-		on conflict(profile_id, appid, groupid) do update set missing_achievements_in_dlc=case when missing_achievements_in_dlc=1 then 0 else 1 end, updated_at=excluded.updated_at`, profileID, appID, groupID, 1, now, now)
+	tx, err := r.db.Begin()
 	if err != nil {
 		return err
 	}
-	return r.RecomputeGameTags(profileID, appID, groupID)
+	defer tx.Rollback()
+	if _, err := tx.Exec(`insert into profile_game_flags(profile_id, appid, groupid, missing_achievements_in_dlc, created_at, updated_at)
+		values(?,?,?,?,?,?)
+		on conflict(profile_id, appid, groupid) do update set missing_achievements_in_dlc=case when missing_achievements_in_dlc=1 then 0 else 1 end, updated_at=excluded.updated_at`, profileID, appID, groupID, 1, now, now); err != nil {
+		return err
+	}
+	// The flag and the tags it drives change together: a failed tag write must not leave the flag toggled.
+	if err := r.recomputeGameTagsTx(tx, profileID, appID, groupID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// HasStoredAchievementData reports whether the profile has achievement data stored for the app: an entry of the app
+// with groupid<>0 (a DLC or extra set), an entry with achievements, or the shared game row marked as having
+// achievements. The syncer uses it to tell an empty schema from Steam (which may be a failed answer) from a game that
+// really has none.
+func (r *Repository) HasStoredAchievementData(profileID, appID int64) (bool, error) {
+	var found int
+	err := r.db.QueryRow(`select exists(select 1 from games where appid=? and has_achievements=1)
+		or exists(select 1 from profile_games where profile_id=? and appid=? and (groupid<>0 or total_achievements>0))`,
+		appID, profileID, appID).Scan(&found)
+	if err != nil {
+		return false, err
+	}
+	return found == 1, nil
 }
 
 // notOwnedReasonSQL is the disabled_reason written by the not-owned sweep on conflict. An entry already

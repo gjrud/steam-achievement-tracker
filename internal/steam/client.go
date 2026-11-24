@@ -376,7 +376,7 @@ func (c *Client) GetPlayerAchievements(ctx context.Context, steamID64 string, ap
 		if payload.PlayerStats.Error != "" {
 			return nil, usererr.Wrap("Steam did not provide achievements for this game.", errors.New(c.redactText(payload.PlayerStats.Error)))
 		}
-		return nil, usererr.New("Steam did not return achievements for this game. Try again later.")
+		return nil, ErrNoAchievementsReturned
 	}
 	ach := make([]PlayerAchievement, 0, len(payload.PlayerStats.Achievements))
 	for _, a := range payload.PlayerStats.Achievements {
@@ -419,6 +419,11 @@ const (
 	eresultOK      = 1
 	eresultNoMatch = 42
 )
+
+// ErrNoAchievementsReturned is the user-facing error for an achievement answer that carries no data. The syncer
+// returns it too, when Steam sends an empty schema for an app whose data is already stored. It is one shared value:
+// its text is the same sentence wherever it is shown.
+var ErrNoAchievementsReturned = usererr.New("Steam did not return achievements for this game. Try again later.")
 
 // HTTPStatusError is a non-2xx Steam response. Code is the HTTP status code. Error() text is
 // unchanged from the earlier string errors; callers classify with errors.As, not by message.

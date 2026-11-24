@@ -19,9 +19,9 @@ func (r *Repository) Close() error
 
 Each exported method's behavior is described in the sections below. In summary:
 
-- Single autocommit statement: `DeactivateProfile`, `TouchProfileSynced`, `SaveLibrarySettings`, `SetUpdateChecksEnabled`, `StartSyncRun`, `FinishSyncRun`, `UpdateSyncRunProgress`, `CancelRunningSyncRuns`, `HasSetData`, and all read methods.
-- One transaction: `SaveProfile`, `ClearProfileData` (the deletes; reads happen before it), `UpsertOwnedGame`, `SaveGameSync`, `SaveGameWarning` (warning part; `UpsertOwnedGame` runs first in its own transaction), `MarkGamePreviouslyCompleted`, `DisableMissingOwnedGames`, `DisableProfileGame`, `EnableProfileGame`, `RecomputeGameTags`, `SaveCover`.
-- Not atomic across calls: `ToggleMissingAchievementsInDLC` writes the flag and then recomputes tags in a second transaction. `Dashboard` does its reads in separate statements without a read transaction, so `Summary`, `LatestSyncRun` and the card list can reflect different moments (the card lists themselves come from one `loadGameCards` pass).
+- Single autocommit statement: `DeactivateProfile`, `TouchProfileSynced`, `SaveLibrarySettings`, `SetUpdateChecksEnabled`, `StartSyncRun`, `FinishSyncRun`, `UpdateSyncRunProgress`, `CancelRunningSyncRuns`, `HasSetData`, `HasStoredAchievementData`, and all read methods.
+- One transaction: `SaveProfile`, `ClearProfileData` (its reads and deletes), `UpsertOwnedGame`, `SaveGameSync`, `SaveGameWarning` (warning part; `UpsertOwnedGame` runs first in its own transaction), `MarkGamePreviouslyCompleted`, `ToggleMissingAchievementsInDLC`, `DisableMissingOwnedGames`, `DisableProfileGame`, `EnableProfileGame`, `RecomputeGameTags`, `SaveCover`.
+- Not atomic across calls: `Dashboard` does its reads in separate statements without a read transaction, so `Summary`, `LatestSyncRun` and the card list can reflect different moments (the card lists themselves come from one `loadGameCards` pass).
 
 ## Exported types
 
@@ -99,8 +99,8 @@ Per-profile library options are not in `settings`; they are in `profile_library_
 
 `ClearProfileData(profileID)` follows this sequence:
 
-1. Outside the transaction: check whether the profile is active; collect every app id the profile references (`profileAppIDs`: union over `profile_games`, `profile_achievements`, `profile_game_flags`, `profile_game_tags`, `game_snapshots`, `profile_owned_games`); collect the DLC image ids of its sets (`profileDLCImageAppIDs`).
-2. One transaction:
+1. One transaction. Every read below runs on the transaction, never on `r.db`, because the database has one connection (`SetMaxOpenConns(1)`) and a read on `r.db` inside an open transaction waits forever. The reads are: check whether the profile is active (`activeProfile(tx)`); collect every app id the profile references (`profileAppIDs(tx, ...)`: union over `profile_games`, `profile_achievements`, `profile_game_flags`, `profile_game_tags`, `game_snapshots`, `profile_owned_games`); collect the DLC image ids of its sets (`profileDLCImageAppIDs(tx, ...)`). Reading inside the transaction means a sync cannot insert shared rows between the candidate reads and the deletes.
+2. Still in the transaction:
    - Delete the profile's rows from `profile_achievements`, `profile_game_flags`, `profile_owned_games`, `profile_game_tags`, `game_snapshots`, `profile_games`, `sync_runs`, `profile_library_settings`.
    - If the profile was active, set `active_profile_id = ''`.
    - Delete the `profiles` row.
@@ -155,13 +155,17 @@ Used when a game's sync fails. Calls `UpsertOwnedGame` first (its own transactio
 - If there are none: inserts a `groupid 0` placeholder with `sync_warning = 1` and `last_synced_at` NULL.
 - Recomputes tags for every affected entry.
 
+### `HasStoredAchievementData(profileID, appID) (bool, error)`
+
+Single read, no transaction. True when the app has an entry with `groupid<>0`, an entry with `total_achievements>0` (both for this profile), or the shared `games.has_achievements=1` row. `games.has_achievements` is cross-profile, so the answer can come from another profile's data. The syncer's empty-schema guard (`saveGameWithoutAchievements`, see [syncer.md](syncer.md)) calls it to tell an empty schema from Steam, which may be a failed answer, from a game that really has none.
+
 ### Flag methods
 
 - `MarkGamePreviouslyCompleted(profileID, appID, groupID) error`: toggles `profile_game_flags.manual_was_completed` (insert with 1, or flip on conflict). Then recomputes on `profile_games`:
   - `was_completed = 1` if `is_completed = 1`, or a completed `game_snapshots` row exists for the entry, or the manual flag is set.
   - `newly_incomplete = 1` if `is_completed = 0` and (a completed snapshot exists or the manual flag is set).
   - Recomputes tags. If no `profile_games` row exists, returns `sql.ErrNoRows` and the transaction is rolled back, so the flag change is not kept.
-- `ToggleMissingAchievementsInDLC(profileID, appID, groupID) error`: flips `profile_game_flags.missing_achievements_in_dlc` (insert or flip), then `RecomputeGameTags`. Not in one transaction (see above).
+- `ToggleMissingAchievementsInDLC(profileID, appID, groupID) error`: flips `profile_game_flags.missing_achievements_in_dlc` (insert or flip) and runs `recomputeGameTagsTx` in one transaction, so a failed tag write rolls the flip back.
 - `DisableProfileGame(profileID, appID, groupID) error`: one transaction: upserts the flag with `disabled = 1`, `disabled_reason = 'manual'`, and deletes that entry's tags. Sibling sets of the same game are not affected.
 - `EnableProfileGame(profileID, appID, groupID) error`: one transaction: sets `disabled = 0`, `disabled_reason = NULL` on that entry's flag, then recomputes its tags.
 - `DisableMissingOwnedGames(profileID, owned []int64) error`: one transaction, the not-owned sweep.

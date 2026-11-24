@@ -12,7 +12,7 @@ These docs are for developers: readers who want to understand the app's internal
 - [database.md](database.md): SQLite opening, WAL mode, migrations, pre-migration backups, and the schema.
 - [repository.md](repository.md): the SQL access layer: profiles, games, sets, flags, tags, sync runs, settings, and dashboard assembly.
 - [covers.md](covers.md): cover sources, the fallback order, the on-disk cache layout, and refresh rules.
-- [platform.md](platform.md): per-OS paths, the system keyring, logging and rotation, and Windows specifics.
+- [platform.md](platform.md): per-OS paths, the system keyring, logging and rotation, the single-instance lock, and Windows specifics.
 - [frontend.md](frontend.md): the Svelte 5 UI, its state and refresh logic, and the component layout.
 - [build-and-release.md](build-and-release.md): prerequisites, local build commands, Wails and Task build files, packaging, CI, the release workflow, and the procedure for cutting a release.
 - [testing.md](testing.md): the Go and frontend test suites, test isolation helpers, and the diagnostic tools.

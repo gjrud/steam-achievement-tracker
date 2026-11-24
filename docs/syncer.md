@@ -99,7 +99,9 @@ sequenceDiagram
 6. `finalize` sets status `partial` when any game failed, and calls `TouchProfileSynced` when at least one game succeeded.
 7. `finish` writes the final status, error and counts with `Repo.FinishSyncRun`, then calls `OnChange`.
 
-Failure of the whole run goes through `fail(err)`: status `failed`, the stored error text from `steam.UserMessage(err)` (a cancelled run stores `The request was canceled.`), then `finish`. The raw `err` is returned to the caller, which logs it.
+Failure of the whole run goes through `fail(err)`: status `canceled` when `errors.Is(err, context.Canceled)`, otherwise `failed`. The stored error text is `steam.UserMessage(err)` (a cancelled run stores `The request was canceled.`). A run that synced at least one game touches the profile's `last_synced_at` here too, as `finalize` does. Then `finish`. The raw `err` is returned to the caller, which logs it.
+
+A panic is a run failure too. `FullSync` recovers it in a deferred function and ends the run through `fail`, as `failed` with the generic sentence `Something went wrong. See the log file for details.` A panic in one game is recovered per game (see [Worker pool](#worker-pool-and-per-game-failures)). The panic value and a stack trace go to the log only, with secrets scrubbed by `steam.RedactSecrets` (paths are kept, as in `callBound`; release builds use `-trimpath`).
 
 `GamesTotal` reaches the row through `UpdateSyncRunProgress`, called after each game finishes, and through `FinishSyncRun`. Thus, `games_total` remains 0 while the first game is in progress and becomes visible only afterward. A run with no syncable games, or one that fails before any game finishes, gets its total only from `FinishSyncRun`.
 
@@ -112,10 +114,10 @@ Status values stored in `sync_runs.status`:
 | `running` | `Repo.StartSyncRun` | Row created at start of `FullSync`. Stays until `FinishSyncRun`. |
 | `success` | `finalize` (default) | No failed game and no run-level error. A run with zero syncable games is also `success`. |
 | `partial` | `finalize` | At least one game failed (`GamesFailed > 0`), including when every game failed. `Error` reads `N of M games failed to sync`. |
-| `failed` | `fail` | Run-level error: `GetOwnedGames` or the disabled-game lookup failed, or the context was cancelled during dispatch or after all games were dispatched. `Error` is `steam.UserMessage(err)`, which gives `The request was canceled.` on cancel. |
-| `canceled` | `Repo.CancelRunningSyncRuns` at app start | Not written by the syncer. It marks rows still `running` after an unclean exit. |
+| `failed` | `fail` | Run-level error that is not a cancel: `GetOwnedGames` or the disabled-game lookup failed, a deadline passed, or the run panicked. `Error` is `steam.UserMessage(err)`. |
+| `canceled` | `fail` (a cancel during the run, see [Cancellation](#cancellation)); `Repo.CancelRunningSyncRuns` at app start | `fail` writes it for `context.Canceled`, in dispatch or after all games were dispatched. `Error` is `The request was canceled.`. `CancelRunningSyncRuns` marks rows still `running` after an unclean exit, with the app's own reason. |
 
-A cancelled sync therefore ends as `failed`, not `canceled`. Games interrupted by cancellation are not counted and do not get warnings (see [Cancellation](#cancellation)).
+Games interrupted by cancellation are not counted and do not get warnings. A canceled run that synced games keeps `games_synced` and touches the profile's `last_synced_at`.
 
 If `FinishSyncRun` itself fails, the error is logged and the row stays `running`. The app then reports that run as `failed` with a stale-run message, without changing the row (see [app-service.md](app-service.md)).
 
@@ -124,6 +126,8 @@ If `FinishSyncRun` itself fails, the error is logged and the row stays `running`
 - Workers run `syncWorker`, which calls `syncGame` for each job. A nil error calls `recordGameSuccess`.
 - A non-nil error when the context is still live calls `recordGameFailure`: it formats the warning (`repository.FormatGameError`) with the cause of the error (`usererr.LogText`, paths reduced, then `steam.RedactSecrets` so a key or SteamID64 in the cause is not logged) and logs it, calls `Repo.SaveGameWarning` with `steam.UserMessage(err)` (the user-safe sentence shown in Sync errors), increments `GamesFailed`, and writes progress.
 - A non-nil error when the context is cancelled is neither a success nor a failure: no warning, no count. The game keeps its stored data.
+- `syncGameSafely` wraps `syncGame` in a `recover`. A panic becomes that game's error (`panicError`, text `panic: <value>` for the log only) and goes through the same `recordGameFailure` path, so the worker continues with the next game. A worker that died would leave `dispatchSyncJobs` blocked on the unbuffered jobs channel. The panic is logged with its stack, with secrets scrubbed.
+- `syncJob` wraps one job (the sync and its bookkeeping: `recordGameFailure` and `recordGameSuccess` call the repository and `OnChange`) in a second, log-only `recover`. A panic there is logged as `appid <id>: worker panic:` and records no game failure, so the worker takes the next game and the run still finishes. If the panic happens inside `recordGameFailure` before the failure is counted, that game counts as neither synced nor failed and the run can still end `success` without a warning.
 - The mutex guards only the counters. `updateProgress` writes to the repository and calls `OnChange` outside the lock.
 
 ## Per-game refresh
@@ -134,7 +138,7 @@ If `FinishSyncRun` itself fails, the error is logged and the row stays `running`
    - `shouldFallbackToLegacy` decides whether to switch to the legacy path. It returns true only for an `*steam.HTTPStatusError` whose code is not transient (429, 500, 502, 503, 504 are transient), or for an `*steam.EResultError`. Transport, context and decode errors never fall back. Unrelated errors return `achievement schema: <err>`.
    - Fallback is refused when the game already has set data (`Repo.HasSetData`), because the legacy path writes one group-0 entry and prunes all others. In that case the error surfaces and existing entries are kept.
    - Otherwise `syncGameLegacy` runs: `GetSchemaForGame`, `GetPlayerAchievements`, `GetGlobalAchievementPercentages`, one group-0 entry from `buildAchievementStats`. Legacy code is marked for removal together with the legacy client methods. If `GetSchemaForGame` returns an empty list, `syncGameLegacy` calls `saveGameWithoutAchievements` (step 2).
-2. If the schema has no achievements (EResult 42 or an empty list), `saveGameWithoutAchievements` writes the game as `no_achievements` with a group-0 entry only, then refreshes the game's cover.
+2. If the schema has no achievements (EResult 42 or an empty list), `saveGameWithoutAchievements` first checks for stored data. It is any entry of the game with `groupid<>0`, any entry with achievements (`total_achievements>0`), or `games.has_achievements=1` (`Repository.HasStoredAchievementData`). If there is stored data, nothing is written or pruned and the game fails with `steam.ErrNoAchievementsReturned` (`Steam did not return achievements for this game. Try again later.`): a warning, so the run ends `partial`. Without stored data it writes the game as `no_achievements` with a group-0 entry only, then refreshes the game's cover. The legacy path uses the same guard.
 3. `Steam.GetUserAchievements(steamID64, appID)`. Failure returns `user achievements: <err>`.
 4. `buildSetEntries(appID, schema, user)` builds one `setEntry` per eligible set (see below).
 5. `saveEntries` builds a `repository.SetSyncUpdate` per entry, comparing each against its previous state (`Repo.ProfileGame`), then calls `Repo.SaveGameSync` in one transaction, then refreshes the covers of the game and its entries' image ids.
@@ -211,11 +215,13 @@ The syncer does not compute tags; `repository.recomputeGameTagsTx` does, inside 
 | Store or cover error | Logged by the cover refresh. Game sync still succeeds. |
 | `SaveGameSync` error | Game warning; the transaction is rolled back, so the previous data stays. |
 
-Stored and displayed error text is always user-safe. `recordGameFailure` stores `steam.UserMessage(err)` as the game warning, and `fail` stores `steam.UserMessage(err)` as the run error, so a database or filesystem error stores `Something went wrong. See the log file for details.`. `fail` has no special case for cancellation: `steam.UserMessage` gives `The request was canceled.` for `context.Canceled`, also inside a `*url.Error`. The raw error is only logged: a game line through `repository.FormatGameError` with the sentence and the cause (`usererr.LogText`, paths reduced, then `steam.RedactSecrets`), a run line in `app.go` (`full sync failed`) with the same (`logText`), the other sync log lines (`upsert owned game`, `save game warning`, `update sync progress`, `finish sync run`, and so on) and a cover line through `redact.Paths`. Cover refresh errors are never stored. The `partial` run text `N of M games failed to sync` is built from counts, not from error text.
+Stored and displayed error text is always user-safe. `recordGameFailure` stores `steam.UserMessage(err)` as the game warning, and `fail` stores `steam.UserMessage(err)` as the run error, so a database or filesystem error stores `Something went wrong. See the log file for details.`. `fail` picks the status (`canceled` for `context.Canceled`), and `steam.UserMessage` gives `The request was canceled.` for it, also inside a `*url.Error`. A panic stores the generic sentence (see [Run statuses](#run-statuses)). The raw error is only logged: a game line through `repository.FormatGameError` with the sentence and the cause (`usererr.LogText`, paths reduced, then `steam.RedactSecrets`), a run line in `app.go` (`full sync failed`) with the same (`logText`), the other sync log lines (`upsert owned game`, `save game warning`, `update sync progress`, `finish sync run`, and so on) and a cover line through `redact.Paths`. Cover refresh errors are never stored. The `partial` run text `N of M games failed to sync` is built from counts, not from error text.
 
 `SaveGameWarning` keeps prior data: it sets `sync_warning` and `last_error` on existing entries and does not change totals. A game with no entries gets a group-0 placeholder with no progress. Details: [repository.md](repository.md#savegamewarningprofileid-gamerecord-warning-string-error).
 
-A run that ends `partial` still updates `last_synced_at` for the profile when at least one game succeeded. A run where every game failed is `partial` with `games_synced` 0, and the profile's `last_synced_at` is not touched.
+A run that ends `partial` still updates `last_synced_at` for the profile when at least one game succeeded. A run where every game failed is `partial` with `games_synced` 0, and the profile's `last_synced_at` is not touched. A `failed` or `canceled` run touches it the same way, when at least one game succeeded before the run ended.
+
+**Side effect of the empty-schema guard:** a game whose developer really removed every achievement, with stored data, stays `partial` on every sync (one warning per entry, `Steam did not return achievements for this game. Try again later.`). Its stored entries are kept, and the warning clears only when Steam returns a schema again. Because `games.has_achievements` is shared across profiles, a newly added profile also gets that permanent warning for such a game (as a placeholder entry), not only profiles with stored data. The fix would be to store a "schema removed" state once Steam confirms an empty schema twice in a row; that is not implemented.
 
 Per-game warnings are cleared by the next successful sync of that game (`SaveGameSync` writes `sync_warning` 0 for each entry it writes). The tests for this are `TestFullSyncClearsWarningAfterRecovery` and `TestFullSyncRecordsPartialFailureAndKeepsSuccessfulGame` in `syncer_test.go`.
 
@@ -225,7 +231,8 @@ Per-game warnings are cleared by the next successful sync of that game (`SaveGam
 - `dispatchSyncJobs` stops handing out work when the context is done and returns `ctx.Err()`.
 - A game interrupted by cancellation is not warned and not counted. Its stored data stays as it was. Steam requests honour the context, so workers stop quickly.
 - After the workers finish, `syncGames` returns `ctx.Err()` when cancellation happened after the last job was handed off. Without this check, the run would end as `success`.
-- Any cancellation makes the run `failed`; the stored text is `steam.UserMessage(err)`, i.e. `The request was canceled.`
+- A cancellation (`context.Canceled`, also inside a `*url.Error`) makes the run `canceled`; the stored text is `steam.UserMessage(err)`, i.e. `The request was canceled.`
+- A deadline (`context.DeadlineExceeded`) is not a user cancel: the run is `failed`, with the network sentence (`Could not reach Steam. ...`). No code path sets a deadline on the sync today.
 
 ## Progress and change notifications
 
@@ -255,7 +262,7 @@ The capsule/store decision and save rules: [covers.md](covers.md#sync-side-decis
 
 Maintainers should know about these quirks in the current implementation.
 
-- **An empty achievement schema wipes the game's entries.** `GetGameAchievements` with an `x-eresult` of 1 (or no header) and a body without achievements, such as `{"response":{}}`, is decoded as "no achievements". `syncGame` then takes the `saveGameWithoutAchievements` path, which deletes this profile's unlock rows for the game (`profile_achievements`), deletes the shared `achievements` rows of the game only where no profile references them, and deletes all of the game's entries except group 0. No warning is recorded. The same holds for an empty 2xx body. `GetOwnedGames` guards against this, `GetGameAchievements` does not.
+- **An empty achievement schema on a game with stored data is a warning, not "no achievements".** `GetGameAchievements` with an `x-eresult` of 42, or a body without achievements, is decoded as an empty schema. When the profile has stored data for the app, the game keeps its entries and gets a warning (see step 2 above). Only a game with no stored data is saved as `no_achievements`. The guard is not a full answer: an empty response from a game that really has no achievements, once stored, stays a warning (see the side effect in [Sync runs](#run-statuses)).
 - **An unusable user-achievement response reads as zero progress.** `GetUserAchievements` with `{"response":{}}` (EResult 1 or 42) returns no unlocks. Entries are then written with 0 unlocked achievements and are not warned.
 - **Eligible-entry list empty is written, not skipped.** When a game has achievements but none is eligible, `saveEntries` writes an empty set list. All entries of the game are deleted and the game is `ok` with no entries.
 - **Empty user groups mark DLC sets as not owned.** If `GetUserAchievements` returns no groups (`{"response":{}}`, or EResult 42), every DLC-bound set with no unlocked achievement is flagged `DLCNotOwned`, including sets the profile does not own and sets it does own. No warning is recorded.
@@ -270,6 +277,8 @@ Maintainers should know about these quirks in the current implementation.
 | `syncer_retry_test.go` | Retryable statuses from `GetGameAchievements`: success after retry, exhausted retries as partial without legacy fallback. Also a `GetOwnedGames` failure that keeps existing data. |
 | `syncer_entries_test.go` | Pure functions: completed boundary, missing-average calculation, synthesized default sets. |
 | `syncer_changed_test.go` | `OnChange` call count and nil safety. |
+| `syncer_panic_test.go` | Panics in one game (warning, others synced), in more games than workers (no dead worker, bounded by a timeout), outside games (run `failed`, generic sentence), and in a worker's bookkeeping (an `OnChange` emitter that panics on a late event: no crash, the run finishes with every game counted, all workers drain). The planted key and SteamID64 must not reach the log. |
+| `syncer_lifecycle_test.go` | Empty schema after stored data (entries kept, warning, `partial`), legacy-path empty schema, extra-set-only stored data, a first empty schema still `no_achievements`; a 403 is a per-game warning, never `failed`; cancel mid-run ends `canceled` with `games_synced` kept and the profile touched; a deadline ends `failed`. |
 
 The fake server mirrors the Steam endpoints used by `internal/steam`. Retry backoff is set to zero. The image cache uses a transport that rewrites Steam and CDN hosts to the fake server. See [testing.md](testing.md).
 

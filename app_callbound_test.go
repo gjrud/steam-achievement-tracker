@@ -217,3 +217,25 @@ func boundOpName(call *ast.CallExpr) string {
 	}
 	return s
 }
+
+// The sync goroutine defers logSyncPanic and then done (startSync), so logSyncPanic runs first and recovers. Here the
+// same order is run by hand: the panic is logged, scrubbed, and does not escape, and done still runs afterwards.
+func TestLogSyncPanicLogsScrubbedAndDoneStillRuns(t *testing.T) {
+	const key = "0123456789ABCDEF0123456789ABCDEF"
+	const steamID = "76561198000000000"
+	logs := captureLog(t)
+	var order []string
+	func() {
+		defer func() { order = append(order, "done") }()
+		defer logSyncPanic()
+		order = append(order, "run")
+		panic(fmt.Errorf("sync broke with %s for %s", key, steamID))
+	}()
+	if got, want := strings.Join(order, ","), "run,done"; got != want {
+		t.Fatalf("order = %q, want %q", got, want)
+	}
+	if !strings.Contains(logs.String(), "full sync: panic:") {
+		t.Fatalf("log = %q, want the sync panic line", logs.String())
+	}
+	assertPanicLogScrubbed(t, logs.String(), key, steamID)
+}

@@ -25,7 +25,7 @@ I built this app for personal use, entirely through vibecoding. I have entry-lev
 
 ## Requirements
 
-- **Linux:** a desktop session with the GTK 4 and WebKitGTK 6.0 runtime libraries, and a Secret Service provider such as GNOME Keyring, unlocked while you use the app. The deb, rpm, and Arch packages install the libraries. If the AppImage fails to start, install them (on Debian and Ubuntu: `libgtk-4-1` and `libwebkitgtk-6.0-4`). No package installs a Secret Service provider.
+- **Linux:** a desktop session (with a D-Bus session bus) with the GTK 4 and WebKitGTK 6.0 runtime libraries, and a Secret Service provider such as GNOME Keyring, unlocked while you use the app. The deb, rpm, and Arch packages install the libraries. If the AppImage fails to start, install them (on Debian and Ubuntu: `libgtk-4-1` and `libwebkitgtk-6.0-4`). No package installs a Secret Service provider.
 - **Windows:** Windows 10 or 11, 64-bit. Windows 10 may need the [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/); the installer adds it when missing, the portable exe does not.
 - **Both:** a Steam Web API key from the account that owns the profile, and network access to Steam and, for update checks, GitHub. The profile can have any privacy setting, including private.
 
@@ -170,6 +170,8 @@ To erase everything, close the app and delete the three folders, the `steam-achi
 - **Sync fails or shows no games**: the profile must belong to the account that owns the API key. Any privacy setting works.
 - **"Steam Web API key missing"**: enter the key on the setup screen, or click **Retry key lookup** if you stored it outside the app.
 - **The key does not save on Linux**: unlock your Secret Service keyring and try again.
+- **Starting the app again does not open a second window**: only one copy runs. A second launch brings the open window to the front (on Windows its taskbar button may flash instead) and exits.
+- **The app exits at startup on Linux and shows no window**: the app needs a D-Bus session bus to make sure only one copy runs. Without one it exits before the keyring check, and the D-Bus error goes to stderr, not the log file. Launched from the desktop, nothing is shown: run it from a terminal to see the error.
 - **Startup error screen**: the message names the problem. The log file, shown on the screen, has the details.
 - **App does not start on Windows 10**: install the WebView2 Runtime first.
 - **Covers are blank**: they download on the next sync. If Steam has no image, the card keeps the placeholder until a later sync finds one.
