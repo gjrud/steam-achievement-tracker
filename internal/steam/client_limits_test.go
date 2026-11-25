@@ -466,11 +466,16 @@ func errorLogText(t *testing.T, client *Client) string {
 	return statusErr.body
 }
 
-// secretEnd returns the first or last 4 bytes of secret that text still contains, or "" when neither is there.
+// secretEnd returns the longest prefix or suffix of secret, at least 4 bytes long, that text still contains, or ""
+// when none is there. Any leaked prefix or suffix of 4 bytes or more contains the first or last 4 bytes, so this
+// finds every such leak; it reports the longest one, so a failure shows the most of the secret that got out. A
+// middle fragment is not checked. Secrets shorter than 4 bytes are never reported.
 func secretEnd(text, secret string) string {
-	for _, part := range []string{secret[:4], secret[len(secret)-4:]} {
-		if strings.Contains(text, part) {
-			return part
+	for n := len(secret); n >= 4; n-- {
+		for _, part := range []string{secret[:n], secret[len(secret)-n:]} {
+			if strings.Contains(text, part) {
+				return part
+			}
 		}
 	}
 	return ""
@@ -676,6 +681,122 @@ func TestTornTail(t *testing.T) {
 				t.Fatalf("tornTail(%q, %d) with key %q = %q, want %q", tc.body, limit, tc.apiKey, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestDropPartialRune: dropPartialRune looks back at most utf8.UTFMax bytes for the last rune start. It cuts at that
+// start only when utf8.FullRune says the bytes from it are not a complete rune. FullRune also reports complete for an
+// invalid lead (0xC0, 0xC1, 0xF5..0xFF) and for a second byte outside the lead's range (0xE0 0x80, 0xED 0xA0), so
+// those are kept. A lone continuation byte is not a start, so it is never the cut point.
+func TestDropPartialRune(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "empty", in: "", want: ""},
+		{name: "ASCII only", in: "abc", want: "abc"},
+		{name: "single ASCII byte", in: "a", want: "a"},
+		{name: "complete 2-byte rune", in: "aé", want: "aé"},
+		{name: "complete 3-byte rune", in: "a€", want: "a€"},
+		{name: "complete 4-byte rune", in: "a\U0001F600", want: "a\U0001F600"},
+		{name: "2-byte lead only", in: "a\xc3", want: "a"},
+		{name: "3-byte lead only", in: "a\xe2", want: "a"},
+		{name: "3-byte lead and one continuation", in: "a\xe2\x82", want: "a"},
+		{name: "4-byte lead only", in: "a\xf0", want: "a"},
+		{name: "4-byte lead and one continuation", in: "a\xf0\x9f", want: "a"},
+		{name: "4-byte lead and two continuations", in: "a\xf0\x9f\x98", want: "a"},
+		{name: "truncated rune only", in: "\xe2\x82", want: ""},
+		{name: "truncated rune preceded by ASCII", in: "x.\xe2\x82", want: "x."},
+		{name: "complete rune then truncated rune", in: "€\xe2\x82", want: "€"},
+		{name: "truncated rune then complete rune", in: "\xe2\x82€", want: "\xe2\x82€"},
+		{name: "two truncated runes: only the last is cut", in: "\xe2\x82\xe2\x82", want: "\xe2\x82"},
+		{name: "ASCII after a lead is invalid, not partial", in: "\xe2A", want: "\xe2A"},
+		{name: "lone continuation byte is kept", in: "a\x80", want: "a\x80"},
+		{name: "lone continuation after complete rune", in: "€\x80", want: "€\x80"},
+		{name: "0xFF is complete as an invalid byte", in: "a\xff", want: "a\xff"},
+		{name: "0xC0 is complete as an invalid byte", in: "a\xc0", want: "a\xc0"},
+		{name: "0xC1 is complete as an invalid byte", in: "a\xc1", want: "a\xc1"},
+		{name: "0xF5 is complete as an invalid byte", in: "a\xf5", want: "a\xf5"},
+		{name: "overlong 0xE0 0x80 is complete", in: "a\xe0\x80", want: "a\xe0\x80"},
+		{name: "surrogate 0xED 0xA0 is complete", in: "a\xed\xa0", want: "a\xed\xa0"},
+		{name: "0xF4 0x90 above U+10FFFF is complete", in: "a\xf4\x90", want: "a\xf4\x90"},
+		{name: "valid 0xE0 0xA0 is incomplete", in: "a\xe0\xa0", want: "a"},
+		{name: "complete 4-byte rune kept", in: "\xf0\x9f\x98\x80", want: "\xf0\x9f\x98\x80"},
+		{name: "0xF0 lead beyond the lookback window is kept", in: "\xf0\x80\x80\x80\x80", want: "\xf0\x80\x80\x80\x80"},
+		{name: "0xE2 lead beyond the lookback window is kept", in: "\xe2\x80\x80\x80\x80", want: "\xe2\x80\x80\x80\x80"},
+		{name: "more than UTFMax trailing continuations", in: "x\xe2" + "\x80\x80\x80\x80\x80", want: "x\xe2\x80\x80\x80\x80\x80"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := string(dropPartialRune([]byte(tc.in)))
+			if got != tc.want {
+				t.Fatalf("dropPartialRune(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			checkDropPartialRuneInvariants(t, tc.in, got)
+		})
+	}
+}
+
+// TestDropPartialRuneInvariantsExhaustive: every single byte appended to a few heads, and every byte string of up to
+// utf8.UTFMax+1 bytes over a small alphabet of lead, continuation and ASCII bytes, must give a result that is a prefix
+// of the input with at most utf8.UTFMax-1 bytes removed.
+func TestDropPartialRuneInvariantsExhaustive(t *testing.T) {
+	for b := 0; b < 256; b++ {
+		for _, head := range []string{"", "a", "\xe2\x82", "€"} {
+			in := head + string([]byte{byte(b)})
+			checkDropPartialRuneInvariants(t, in, string(dropPartialRune([]byte(in))))
+		}
+	}
+	alphabet := []byte{'a', 0x80, 0xBF, 0xC2, 0xE0, 0xE2, 0xED, 0xF0, 0xF4, 0xFF}
+	var walk func(prefix []byte, depth int)
+	walk = func(prefix []byte, depth int) {
+		in := string(prefix)
+		checkDropPartialRuneInvariants(t, in, string(dropPartialRune(prefix)))
+		if depth == utf8.UTFMax+1 {
+			return
+		}
+		for _, c := range alphabet {
+			walk(append(append([]byte(nil), prefix...), c), depth+1)
+		}
+	}
+	walk(nil, 0)
+}
+
+// checkDropPartialRuneInvariants checks the rules every dropPartialRune result must meet: got is a prefix of in and
+// at most utf8.UTFMax-1 bytes were removed. The second holds because a start byte with utf8.UTFMax or more bytes from
+// it is always complete for utf8.FullRune. When something was cut, the removed tail s is one incomplete rune: it
+// starts with a rune start byte, holds no other rune start, and is not FullRune. When nothing was cut, the last rune
+// start within utf8.UTFMax bytes of the end, if any, must be complete.
+func checkDropPartialRuneInvariants(t *testing.T, in, got string) {
+	t.Helper()
+	if !strings.HasPrefix(in, got) {
+		t.Fatalf("dropPartialRune(%q) = %q, not a prefix of the input", in, got)
+	}
+	if removed := len(in) - len(got); removed > utf8.UTFMax-1 {
+		t.Fatalf("dropPartialRune(%q) = %q removed %d bytes, want at most %d", in, got, removed, utf8.UTFMax-1)
+	}
+	if s := in[len(got):]; s != "" {
+		if !utf8.RuneStart(s[0]) {
+			t.Fatalf("dropPartialRune(%q) = %q: removed tail %q does not start at a rune start", in, got, s)
+		}
+		for i := 1; i < len(s); i++ {
+			if utf8.RuneStart(s[i]) {
+				t.Fatalf("dropPartialRune(%q) = %q: removed tail %q holds a second rune start", in, got, s)
+			}
+		}
+		if utf8.FullRune([]byte(s)) {
+			t.Fatalf("dropPartialRune(%q) = %q: removed tail %q is a complete rune", in, got, s)
+		}
+		return
+	}
+	for i := len(in) - 1; i >= 0 && i >= len(in)-utf8.UTFMax; i-- {
+		if utf8.RuneStart(in[i]) {
+			if !utf8.FullRune([]byte(in[i:])) {
+				t.Fatalf("dropPartialRune(%q) = %q: kept an incomplete rune %q at the end", in, got, in[i:])
+			}
+			return
+		}
 	}
 }
 

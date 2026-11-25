@@ -179,6 +179,8 @@ Shared Steam app metadata. Not per profile.
 
 Achievement-set catalogue of a game. One row per `(appid, groupid)`. Not per profile.
 
+Lifecycle: a sync upserts the rows it reports and deletes this app's rows it no longer reports, unless a `profile_games` row (any profile) still references the set. See `SaveGameSync` step 6 in [repository.md](repository.md#savegamesyncgamesyncupdate-error).
+
 | Column | Type | Null | Key | Default | Notes |
 | --- | --- | --- | --- | --- | --- |
 | `appid` | integer | no | PK (part), FK to `games.appid` | | |
@@ -355,7 +357,7 @@ Created by migration 4 with `CREATE INDEX IF NOT EXISTS`. Each serves a lookup t
 | Index | Columns | Used by |
 | --- | --- | --- |
 | `idx_profile_achievements_appid_apiname` | `profile_achievements(appid, apiname)` | Orphan checks for `achievements` and `games`, and the foreign key check when an `achievements` row is deleted. |
-| `idx_profile_games_appid` | `profile_games(appid)` | `HasSetData`, the `game_sets` orphan delete, the `games` orphan check, and the foreign key check when a `games` row is deleted. |
+| `idx_profile_games_appid` | `profile_games(appid)` | `HasSetData`, the `game_sets` orphan delete, the stale `game_sets` prune in `SaveGameSync`, the `games` orphan check, and the foreign key check when a `games` row is deleted. |
 | `idx_profile_owned_games_appid` | `profile_owned_games(appid)` | Orphan check for `games`. |
 | `idx_profile_game_flags_appid` | `profile_game_flags(appid)` | Orphan check for `games`. |
 | `idx_profile_game_tags_appid` | `profile_game_tags(appid)` | Orphan check for `games`. |

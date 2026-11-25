@@ -91,7 +91,8 @@
   let clearConfirmOpen = $state(false)
   let clearConfirmInput = $state('')
   const menuMargin = 12
-  // Payload-less Wails event from the Go backend: sync start, progress writes (at most one per 500 ms), the end of the run.
+  // Payload-less Wails event from the Go backend: sync start, progress writes (at most one per 500 ms, plus a trailing
+  // flush only if a skipped update is still unwritten), and the end of the run.
   const syncChangedEvent = 'sync:changed'
   // Timed from each requestRefresh call, not from when the read starts (a queued read can start later).
   const syncEventGapMs = 300

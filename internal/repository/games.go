@@ -131,6 +131,9 @@ func (r *Repository) SaveGameSync(update GameSyncUpdate) error {
 	if err := pruneStaleEntries(tx, update.ProfileID, update.AppID, groupIDs(update.Sets)); err != nil {
 		return err
 	}
+	if err := pruneStaleGameSets(tx, update.AppID, groupIDs(update.Sets)); err != nil {
+		return err
+	}
 	for _, set := range update.Sets {
 		if err := upsertEntry(tx, update.ProfileID, update.AppID, set, now); err != nil {
 			return err
@@ -227,6 +230,24 @@ func pruneStaleEntries(tx *sql.Tx, profileID, appID int64, keep []int64) error {
 		return err
 	}
 	_, err := tx.Exec(`delete from profile_games where `+where, args...)
+	return err
+}
+
+// pruneStaleGameSetsSQL deletes the app's game_sets rows whose groupid the sync no longer reports and that no profile
+// entry references. The primary key (appid, groupid) serves the appid lookup. profile_games is probed through
+// idx_profile_games_appid (appid=?), with groupid filtered per row. It runs after pruneStaleEntries, so this profile's
+// own stale entries are gone.
+const pruneStaleGameSetsSQL = `delete from game_sets where appid=? and groupid not in (select value from json_each(?))
+	and not exists (select 1 from profile_games pg where pg.appid=game_sets.appid and pg.groupid=game_sets.groupid)`
+
+// pruneStaleGameSets removes game_sets rows of the app that the sync no longer reports (keep). A row another profile
+// still references stays until that profile syncs. An empty keep list prunes every unreferenced row of the app.
+func pruneStaleGameSets(tx *sql.Tx, appID int64, keep []int64) error {
+	keepJSON, err := int64sJSON(keep)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(pruneStaleGameSetsSQL, appID, keepJSON)
 	return err
 }
 

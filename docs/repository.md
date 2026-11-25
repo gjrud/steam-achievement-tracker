@@ -149,12 +149,12 @@ One transaction for one game. In order:
 1. Upsert `games` (name, `has_achievements`, `achievement_status`).
 2. Upsert `profile_owned_games` playtime. On insert `purchased` is `0` and `vetted` takes its default `1`. On conflict only playtime and `updated_at` change, so `purchased` and `vetted` set by `SaveOwnedGames` (or `UpsertOwnedGame`) are kept.
 3. `pruneProfileAchievements`: delete this profile's achievements of the app that are not in any set; delete unreferenced `achievements` of the app.
-4. `upsertGameSets`: upsert `game_sets` for every set (name, `dlcappid`, `sort_order`). Nothing is deleted: a set Steam stops reporting keeps its row, so `HasSetData` stays true for that app.
+4. `upsertGameSets`: upsert `game_sets` for every set (name, `dlcappid`, `sort_order`). Nothing is deleted here.
 5. For each set: upsert `achievements` (`groupid`, `archived`, `global_percent`) and `profile_achievements` (`unlocked`, `unlock_time`).
-6. `pruneStaleEntries`: delete `profile_game_tags` and `profile_games` of this app whose `groupid` is not in the new set list. `profile_game_flags` and `game_snapshots` are kept.
+6. `pruneStaleEntries`: delete `profile_game_tags` and `profile_games` of this app whose `groupid` is not in the new set list. `profile_game_flags` and `game_snapshots` are kept. Then `pruneStaleGameSets`: delete `game_sets` of this app whose `groupid` is not in the new set list and that no `profile_games` row (any profile) references. A set another profile still holds stays until that profile syncs. `HasSetData` turns false once the app has no `game_sets` or `profile_games` row with `groupid <> 0`.
 7. For each set: upsert `profile_games` (all stats and flags from the update); insert a `game_snapshots` row only when the latest snapshot's (total, unlocked, is_completed) differs from this update or none exists; `recomputeGameTagsTx`.
 
-An empty `Sets` removes all entries of the app (step 6 keeps none). The syncer uses that for games whose eligible sets are empty. `WasCompleted` and `NewlyIncomplete` come from the caller; this method does not derive them.
+An empty `Sets` removes all entries of the app (step 6 keeps none) and every `game_sets` row of the app that no profile references. The syncer uses that for games whose eligible sets are empty. `WasCompleted` and `NewlyIncomplete` come from the caller; this method does not derive them.
 
 ### `SaveGameWarning(profileID, GameRecord, warning string) error`
 

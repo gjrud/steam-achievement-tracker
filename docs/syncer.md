@@ -162,7 +162,7 @@ Entries may be empty (the game has achievements but none is eligible). That is w
 
 ### What `SaveGameSync` writes
 
-One transaction in `internal/repository/games.go`; steps in [repository.md](repository.md#savegamesyncgamesyncupdate-error). `game_sets` rows are only upserted (see [Surprising behaviour](#surprising-behaviour)).
+One transaction in `internal/repository/games.go`; steps in [repository.md](repository.md#savegamesyncgamesyncupdate-error). `game_sets` rows are upserted, and pruned once no profile references them (see [Surprising behaviour](#surprising-behaviour)).
 
 ## Set eligibility and entries
 
@@ -289,7 +289,7 @@ Maintainers should know about these quirks in the current implementation.
 - **An unusable user-achievement response reads as zero progress.** `GetUserAchievements` with `{"response":{}}` (EResult 1 or 42) returns no unlocks. Entries are then written with 0 unlocked achievements and are not warned.
 - **Eligible-entry list empty is written, not skipped.** When a game has achievements but none is eligible, `saveEntries` writes an empty set list. All entries of the game are deleted and the game is `ok` with no entries.
 - **Empty user groups mark DLC sets as not owned.** If `GetUserAchievements` returns no groups (`{"response":{}}`, or EResult 42), every DLC-bound set with no unlocked achievement is flagged `DLCNotOwned`, including sets the profile does not own and sets it does own. No warning is recorded.
-- **Set rows are never pruned by sync, so legacy fallback can be refused for good.** `SaveGameSync` only upserts `game_sets`. Once an app has a non-zero groupid row there, `HasSetData` stays true. Only `ClearProfileData` removes those rows, and only when no profile still has `profile_games` rows for the app. Until then, a `GetGameAchievements` failure for that app is never retried through the legacy API.
+- **A set another profile still holds keeps `HasSetData` true, so legacy fallback is refused until that profile syncs.** `SaveGameSync` deletes a `game_sets` row the sync no longer reports only when no `profile_games` row (any profile) references it. Until the last such reference is synced away, a `GetGameAchievements` failure for that app is not retried through the legacy API. `ClearProfileData` also removes `game_sets` rows of apps no profile references.
 
 ## Tests
 

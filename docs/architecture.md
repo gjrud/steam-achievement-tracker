@@ -147,7 +147,7 @@ Emit points:
 | --- | --- | --- |
 | Sync accepted | before the goroutine starts | `startSync` through `emitSyncChanged` |
 | Run row created | after `StartSyncRun` | `FullSync` through `Service.changed` |
-| Per-game progress | after a progress write: the first game's, then at most one per 500 ms, and a trailing flush when the workers are done if an update was skipped. Throttled updates emit nothing. | `updateProgress` and `flushProgress` through `changed` |
+| Per-game progress | after a progress write: the first game's, then at most one per 500 ms, and a trailing flush when the workers are done, only if a skipped update is still unwritten. Throttled updates emit nothing. | `updateProgress` and `flushProgress` through `changed` |
 | Final run status | after `FinishSyncRun` | `finish` through `changed` |
 | Flag cleared | after `syncInProgress` is set to false | `endSync` through `emitSyncChanged` |
 

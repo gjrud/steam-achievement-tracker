@@ -58,6 +58,14 @@ func TestCleanupQueriesUseIndexes(t *testing.T) {
 	assertSubqueryUsesIndex(t, repo.db, "game_sets orphan check", deleteOrphanGameSetsSQL,
 		"pg", "idx_profile_games_appid", idsJSON)
 
+	// The SaveGameSync prune binds (appid, keep JSON array of groupids), not an app id list.
+	keepJSON, err := int64sJSON([]int64{0, 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSubqueryUsesIndex(t, repo.db, "game_sets prune check", pruneStaleGameSetsSQL,
+		"pg", "idx_profile_games_appid", int64(42), keepJSON)
+
 	// One assertion per NOT EXISTS subquery of deleteOrphanGamesSQL, by alias.
 	for _, sub := range []struct{ alias, index string }{
 		{"pg", "idx_profile_games_appid"},

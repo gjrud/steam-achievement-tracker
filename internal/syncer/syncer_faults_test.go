@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -160,6 +161,86 @@ func TestFullSyncGameFailureWarnsAndSavesOwnedListInFull(t *testing.T) {
 	}
 }
 
+// cancelAfterOwnedListTransport cancels the sync context once the last GetOwnedGames request (the vetted list, sent
+// after the full and purchased lists) has been read in full. The body is buffered before the cancel, so the owned
+// list is complete and GetOwnedGames returns normally. The cancel lands before SaveOwnedGames, which takes no context.
+type cancelAfterOwnedListTransport struct {
+	next   http.RoundTripper
+	cancel context.CancelFunc
+}
+
+func (t cancelAfterOwnedListTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.next.RoundTrip(req)
+	if err != nil || req.URL.Path != "/IPlayerService/GetOwnedGames/v0001/" || req.URL.Query().Get("skip_unvetted_apps") != "true" {
+		return resp, err
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	t.cancel()
+	return resp, nil
+}
+
+// A cancel that lands after the owned list is fetched but before it is saved. SaveOwnedGames takes no context, so the
+// whole list still commits in full. No game is synced, so the run ends canceled with no games counted, no game
+// rows, and the profile untouched. Every game is cut off before its first request, so the outcome does not depend on
+// dispatch timing. (A cancel inside the save transaction itself has no hook here.)
+func TestFullSyncCancelBeforeOwnedListSaveStoresFullListAndEndsCanceled(t *testing.T) {
+	repo, paths, profile := faultyRepository(t)
+	owned := []steam.OwnedGame{
+		{AppID: 80, Name: "Game 80", PlaytimeForever: 11},
+		{AppID: 81, Name: "Game 81", PlaytimeForever: 12},
+		{AppID: 82, Name: "Game 82", PlaytimeForever: 13},
+	}
+	fake := newFakeSteamServer(t, owned)
+	for _, game := range owned {
+		fake.schema[game.AppID] = []string{}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	fake.client.HTTPClient = &http.Client{Transport: cancelAfterOwnedListTransport{next: http.DefaultTransport, cancel: cancel}}
+
+	result, err := (&Service{Repo: repo, Steam: fake.client}).FullSync(ctx, *profile)
+	if err != context.Canceled {
+		t.Fatalf("err = %v, want context canceled", err)
+	}
+	if result.Status != "canceled" || result.Error == nil || *result.Error != "The request was canceled." {
+		t.Fatalf("result = %#v, want canceled run with the cancel sentence", result)
+	}
+	if result.GamesTotal != len(owned) || result.GamesSynced != 0 || result.GamesFailed != 0 {
+		t.Fatalf("result = %#v, want total %d and no synced or failed games", result, len(owned))
+	}
+	run := requireLatestRun(t, repo, profile.ID)
+	if run.Status != "canceled" || run.GamesSynced != 0 || run.GamesFailed != 0 || run.FinishedAt == nil {
+		t.Fatalf("sync run = %#v, want finished canceled run with no synced or failed games", run)
+	}
+	// The owned list is committed in full, with each game's own playtime, even though the run was canceled.
+	playtimes := faultPlaytimes(t, paths, profile.ID)
+	if len(playtimes) != len(owned) {
+		t.Fatalf("profile_owned_games rows = %d, want the full list of %d", len(playtimes), len(owned))
+	}
+	for _, game := range owned {
+		if got, ok := playtimes[game.AppID]; !ok || got != game.PlaytimeForever {
+			t.Fatalf("profile_owned_games playtime for app %d = %d (present %v), want %d", game.AppID, got, ok, game.PlaytimeForever)
+		}
+	}
+	// No per-game sync happened: no achievement calls reached the server, no game rows, no synced timestamp.
+	for _, game := range owned {
+		if got := fake.count("game", game.AppID); got != 0 {
+			t.Fatalf("achievement calls for game %d = %d, want 0 after the cancel", game.AppID, got)
+		}
+	}
+	if n := faultInt(t, paths, `select count(*) from profile_games where profile_id=?`, profile.ID); n != 0 {
+		t.Fatalf("profile_games rows = %d, want 0: no game was synced", n)
+	}
+	if last := currentProfile(t, repo).LastSyncedAt; last != nil {
+		t.Fatalf("profile last synced = %s, want unset: no game synced", *last)
+	}
+}
+
 // faultInt runs a single-int query on a separate connection to the test database, after the sync has finished.
 func faultInt(t *testing.T, paths appdata.Paths, query string, args ...any) int {
 	t.Helper()
@@ -173,6 +254,35 @@ func faultInt(t *testing.T, paths appdata.Paths, query string, args ...any) int 
 		t.Fatal(err)
 	}
 	return n
+}
+
+// faultPlaytimes maps each appid of the profile's owned list to its playtime, read on a separate connection after the
+// sync has finished.
+func faultPlaytimes(t *testing.T, paths appdata.Paths, profileID int64) map[int64]int {
+	t.Helper()
+	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?_busy_timeout=5000", paths.DB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`select appid, playtime_forever from profile_owned_games where profile_id=?`, profileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	out := map[int64]int{}
+	for rows.Next() {
+		var appID int64
+		var playtime int
+		if err := rows.Scan(&appID, &playtime); err != nil {
+			t.Fatal(err)
+		}
+		out[appID] = playtime
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 // A game failure whose warning cannot be saved is logged. The run is still partial and no warning row exists.
