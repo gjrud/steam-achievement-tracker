@@ -19,9 +19,9 @@ func (r *Repository) Close() error
 
 Each exported method's behavior is described in the sections below. In summary:
 
-- Single autocommit statement: `DeactivateProfile`, `TouchProfileSynced`, `SaveLibrarySettings`, `SetUpdateChecksEnabled`, `StartSyncRun`, `FinishSyncRun`, `UpdateSyncRunProgress`, `CancelRunningSyncRuns`, `HasSetData`, and all read methods.
-- One transaction: `SaveProfile`, `ClearProfileData` (the deletes; reads happen before it), `UpsertOwnedGame`, `SaveGameSync`, `SaveGameWarning` (warning part; `UpsertOwnedGame` runs first in its own transaction), `MarkGamePreviouslyCompleted`, `DisableMissingOwnedGames`, `DisableProfileGame`, `EnableProfileGame`, `RecomputeGameTags`, `SaveCover`.
-- Not atomic across calls: `ToggleMissingAchievementsInDLC` writes the flag and then recomputes tags in a second transaction. `Dashboard` does its reads in separate statements without a read transaction, so `Summary`, `LatestSyncRun` and the card list can reflect different moments (the card lists themselves come from one `loadGameCards` pass).
+- Single autocommit statement: `DeactivateProfile`, `TouchProfileSynced`, `SaveLibrarySettings`, `SetUpdateChecksEnabled`, `StartSyncRun`, `FinishSyncRun`, `UpdateSyncRunProgress`, `CancelRunningSyncRuns`, `HasSetData`, `HasStoredAchievementData`, and all read methods.
+- One transaction: `SaveProfile`, `ClearProfileData` (its reads and deletes), `SaveOwnedGames` (the whole owned list and its not-owned sweep), `UpsertOwnedGame`, `SaveGameSync`, `SaveGameWarning` (warning part; `UpsertOwnedGame` runs first in its own transaction), `MarkGamePreviouslyCompleted`, `ToggleMissingAchievementsInDLC`, `DisableMissingOwnedGames`, `DisableProfileGame`, `EnableProfileGame`, `RecomputeGameTags`, `SaveCover`.
+- Not atomic across calls: `Dashboard` does its reads in separate statements without a read transaction, so `Summary`, `LatestSyncRun` and the card list can reflect different moments (the card lists themselves come from one `loadGameCards` pass).
 
 ## Exported types
 
@@ -32,7 +32,7 @@ Each exported method's behavior is described in the sections below. In summary:
 | `SyncRun` | `repository.go` | Sync run record: `ID`, `ProfileID`, `StartedAt`, `FinishedAt`, `Status`, `GamesTotal`, `GamesSynced`, `GamesFailed`, `Error`. |
 | `GameCard` | `repository.go` | One dashboard entry (game or set) with flags, tags and cover URL. JSON keys are camelCase. |
 | `Dashboard` | `repository.go` | `Summary`, `LatestSyncRun`, and the four lists `Suggestions`, `Completed`, `Warnings`, `Disabled`. |
-| `GameRecord` | `repository.go` | Owned-game input for `UpsertOwnedGame`: `AppID`, `Name`, `PlaytimeForever`, `Purchased`, `Unvetted`. |
+| `GameRecord` | `repository.go` | Owned-game input for `SaveOwnedGames` and `UpsertOwnedGame`: `AppID`, `Name`, `PlaytimeForever`, `Purchased`, `Unvetted`. |
 | `AchievementRecord` | `repository.go` | Achievement input: `APIName`, `GlobalPercent`, `Unlocked`, `UnlockTime`, `Archived`. |
 | `ProfileGameState` | `repository.go` | State of one entry, including flags; `Exists` is false for history-only reads. |
 | `GameSyncUpdate` | `repository.go` | One game's sync: owned facts plus all eligible `Sets`. An empty `Sets` prunes every entry of the game. |
@@ -99,13 +99,13 @@ Per-profile library options are not in `settings`; they are in `profile_library_
 
 `ClearProfileData(profileID)` follows this sequence:
 
-1. Outside the transaction: check whether the profile is active; collect every app id the profile references (`profileAppIDs`: union over `profile_games`, `profile_achievements`, `profile_game_flags`, `profile_game_tags`, `game_snapshots`, `profile_owned_games`); collect the DLC image ids of its sets (`profileDLCImageAppIDs`).
-2. One transaction:
+1. One transaction. Every read below runs on the transaction, never on `r.db`, because the database has one connection (`SetMaxOpenConns(1)`) and a read on `r.db` inside an open transaction waits forever. The reads are: check whether the profile is active (`activeProfile(tx)`); collect every app id the profile references (`profileAppIDs(tx, ...)`: union over `profile_games`, `profile_achievements`, `profile_game_flags`, `profile_game_tags`, `game_snapshots`, `profile_owned_games`); collect the DLC image ids of its sets (`profileDLCImageAppIDs(tx, ...)`). Reading inside the transaction means a sync cannot insert shared rows between the candidate reads and the deletes.
+2. Still in the transaction:
    - Delete the profile's rows from `profile_achievements`, `profile_game_flags`, `profile_owned_games`, `profile_game_tags`, `game_snapshots`, `profile_games`, `sync_runs`, `profile_library_settings`.
    - If the profile was active, set `active_profile_id = ''`.
    - Delete the `profiles` row.
    - `deleteOrphanRowsForAppIDs`: delete `achievements` of those apps that no `profile_achievements` row references; delete `game_sets` of those apps that have no `profile_games` rows at all (any profile); delete `games` of those apps that no `profile_games`, `profile_achievements`, `profile_game_flags`, `profile_owned_games`, `profile_game_tags` or `game_snapshots` row references.
-   - `deleteOrphanCoverRows` over the union of app ids and DLC image ids: delete `cover_images` rows that no remaining `profile_games` entry displays. An image id is still used when some entry's image owner equals it (`imageAppIDSQL`), or when it is the game id of an entry of that game (DLC entries fall back to the game's cover). Returns the deleted ids.
+   - `deleteOrphanCoverRows` over the union of app ids and DLC image ids: delete `cover_images` rows that no remaining `profile_games` entry displays. An image id is still used when some entry has that app id (DLC entries fall back to the game's cover), or when some entry is bound to it as DLC (`game_sets.dlcappid <> 0`). Both checks are index searches (`orphanCoverRowsSQL`). Returns the deleted ids.
 3. Commit.
 
 The caller (`ClearActiveUserData` in `app.go`, documented in [app-service.md](app-service.md)) then removes `<GameImages>/<id>` for the returned ids. Covers still used by another profile remain on disk. Removing the profile also removes its `profile_library_settings` row; re-adding the same SteamID64 starts with `DefaultLibrarySettings()`.
@@ -129,23 +129,32 @@ Not removed by `ClearProfileData`: `achievements`/`games` rows still referenced 
 
 ## Owned games and sync writes (`games.go`)
 
+### `SaveOwnedGames(profileID, []GameRecord) error`
+
+The owned-list write the syncer uses (`syncer.prepareOwnedGames`, once per sync). One transaction, one `now` for the whole batch:
+
+1. For each game: upserts `games(appid, name)` and upserts `profile_owned_games` with `playtime_forever`, `purchased`, and `vetted = !Unvetted`. The two statements are prepared once on the transaction.
+2. The not-owned sweep over the same ids, as `DisableMissingOwnedGames` does (see below). An empty list flags every entry of the profile as `not_owned`.
+
+Any error rolls back the whole batch, so a failed write leaves the stored library as it was. The syncer fails the run on that error. The method uses only its own transaction: the pool holds one connection, so calling a `Repository` method that begins a transaction from inside it would wait forever.
+
 ### `UpsertOwnedGame(profileID, GameRecord) error`
 
-One transaction: upserts `games(appid, name)`, then upserts `profile_owned_games` with `playtime_forever`, `purchased`, and `vetted = !Unvetted`. Called by `syncer.prepareOwnedGames` once per game of the merged `GetOwnedGames` result, and by `SaveGameWarning`.
+One transaction: upserts `games(appid, name)`, then upserts `profile_owned_games` with `playtime_forever`, `purchased`, and `vetted = !Unvetted`. Uses the same `ownedGameWriter` as `SaveOwnedGames`: the SQL is in the consts `upsertGameNameSQL` and `upsertProfileOwnedSQL`, and the bind arguments are in `ownedGameWriter.write`. Called by `SaveGameWarning`; the syncer no longer calls it.
 
 ### `SaveGameSync(GameSyncUpdate) error`
 
 One transaction for one game. In order:
 
 1. Upsert `games` (name, `has_achievements`, `achievement_status`).
-2. Upsert `profile_owned_games` playtime. On insert `purchased` is `0` and `vetted` takes its default `1`. On conflict only playtime and `updated_at` change, so `purchased` and `vetted` set by `UpsertOwnedGame` are kept.
+2. Upsert `profile_owned_games` playtime. On insert `purchased` is `0` and `vetted` takes its default `1`. On conflict only playtime and `updated_at` change, so `purchased` and `vetted` set by `SaveOwnedGames` (or `UpsertOwnedGame`) are kept.
 3. `pruneProfileAchievements`: delete this profile's achievements of the app that are not in any set; delete unreferenced `achievements` of the app.
-4. `upsertGameSets`: upsert `game_sets` for every set (name, `dlcappid`, `sort_order`). Nothing is deleted: a set Steam stops reporting keeps its row, so `HasSetData` stays true for that app.
+4. `upsertGameSets`: upsert `game_sets` for every set (name, `dlcappid`, `sort_order`). Nothing is deleted here.
 5. For each set: upsert `achievements` (`groupid`, `archived`, `global_percent`) and `profile_achievements` (`unlocked`, `unlock_time`).
-6. `pruneStaleEntries`: delete `profile_game_tags` and `profile_games` of this app whose `groupid` is not in the new set list. `profile_game_flags` and `game_snapshots` are kept.
-7. For each set: upsert `profile_games` (all stats and flags from the update); insert a `game_snapshots` row; `recomputeGameTagsTx`.
+6. `pruneStaleEntries`: delete `profile_game_tags` and `profile_games` of this app whose `groupid` is not in the new set list. `profile_game_flags` and `game_snapshots` are kept. Then `pruneStaleGameSets`: delete `game_sets` of this app whose `groupid` is not in the new set list and that no `profile_games` row (any profile) references. A set another profile still holds stays until that profile syncs. `HasSetData` turns false once the app has no `game_sets` or `profile_games` row with `groupid <> 0`.
+7. For each set: upsert `profile_games` (all stats and flags from the update); insert a `game_snapshots` row only when the latest snapshot's (total, unlocked, is_completed) differs from this update or none exists; `recomputeGameTagsTx`.
 
-An empty `Sets` removes all entries of the app (step 6 keeps none). The syncer uses that for games whose eligible sets are empty. `WasCompleted` and `NewlyIncomplete` come from the caller; this method does not derive them.
+An empty `Sets` removes all entries of the app (step 6 keeps none) and every `game_sets` row of the app that no profile references. The syncer uses that for games whose eligible sets are empty. `WasCompleted` and `NewlyIncomplete` come from the caller; this method does not derive them.
 
 ### `SaveGameWarning(profileID, GameRecord, warning string) error`
 
@@ -155,16 +164,20 @@ Used when a game's sync fails. Calls `UpsertOwnedGame` first (its own transactio
 - If there are none: inserts a `groupid 0` placeholder with `sync_warning = 1` and `last_synced_at` NULL.
 - Recomputes tags for every affected entry.
 
+### `HasStoredAchievementData(profileID, appID) (bool, error)`
+
+Single read, no transaction. True when the app has an entry with `groupid<>0`, an entry with `total_achievements>0` (both for this profile), or the shared `games.has_achievements=1` row. `games.has_achievements` is cross-profile, so the answer can come from another profile's data. The syncer's empty-schema guard (`saveGameWithoutAchievements`, see [syncer.md](syncer.md)) calls it to tell an empty schema from Steam, which may be a failed answer, from a game that really has none.
+
 ### Flag methods
 
 - `MarkGamePreviouslyCompleted(profileID, appID, groupID) error`: toggles `profile_game_flags.manual_was_completed` (insert with 1, or flip on conflict). Then recomputes on `profile_games`:
   - `was_completed = 1` if `is_completed = 1`, or a completed `game_snapshots` row exists for the entry, or the manual flag is set.
   - `newly_incomplete = 1` if `is_completed = 0` and (a completed snapshot exists or the manual flag is set).
   - Recomputes tags. If no `profile_games` row exists, returns `sql.ErrNoRows` and the transaction is rolled back, so the flag change is not kept.
-- `ToggleMissingAchievementsInDLC(profileID, appID, groupID) error`: flips `profile_game_flags.missing_achievements_in_dlc` (insert or flip), then `RecomputeGameTags`. Not in one transaction (see above).
+- `ToggleMissingAchievementsInDLC(profileID, appID, groupID) error`: flips `profile_game_flags.missing_achievements_in_dlc` (insert or flip) and runs `recomputeGameTagsTx` in one transaction, so a failed tag write rolls the flip back.
 - `DisableProfileGame(profileID, appID, groupID) error`: one transaction: upserts the flag with `disabled = 1`, `disabled_reason = 'manual'`, and deletes that entry's tags. Sibling sets of the same game are not affected.
 - `EnableProfileGame(profileID, appID, groupID) error`: one transaction: sets `disabled = 0`, `disabled_reason = NULL` on that entry's flag, then recomputes its tags.
-- `DisableMissingOwnedGames(profileID, owned []int64) error`: one transaction, the not-owned sweep.
+- `DisableMissingOwnedGames(profileID, owned []int64) error`: one transaction, the not-owned sweep. The body (`disableMissingOwnedGamesTx`) is also the sweep step of `SaveOwnedGames`, which the syncer calls instead.
   - Entries of apps not in `owned` get a flag with `disabled = 1`, `disabled_reason = 'not_owned'`. On conflict a `manual` reason is kept (`notOwnedReasonSQL`), so a re-own does not re-enable a manually disabled entry.
   - Flags with `disabled_reason = 'not_owned'` for apps in `owned` are re-enabled (`disabled = 0`, reason NULL). Manual disables stay.
   - Tags of entries of apps not in `owned` are deleted. With an empty `owned`, every entry is flagged and all tags of the profile are deleted.
@@ -259,7 +272,7 @@ The UI also shows **Set**, **DLC** and **Unvetted** on cards. These are not stor
 - `SaveGameSync`: each entry it writes.
 - `SaveGameWarning`: each entry it touches.
 - `MarkGamePreviouslyCompleted`, `ToggleMissingAchievementsInDLC`, `EnableProfileGame`: the affected entry (`RecomputeGameTags` or `recomputeGameTagsTx`).
-- `SaveCover`: every entry whose owning image id (`imageAppIDSQL`) equals the saved id, plus every entry of the game with that id as its app id (`entriesForImageApp`).
+- `SaveCover`: every entry whose image app id equals the saved id, plus every entry of the game with that id as its app id (`entriesForImageApp`, via `entriesForImageAppSQL`). An entry's image app id is the DLC id when its set is bound (`game_sets.dlcappid <> 0`), else the game id.
 - `DisableProfileGame` and `DisableMissingOwnedGames`: delete tags directly.
 - `pruneStaleEntries` and `ClearProfileData`: delete tags of removed entries.
 
@@ -286,12 +299,12 @@ This is only the backend read order. The frontend re-sorts card tags: `gameTags`
 
 Repository side of the cover cache; the cover rules are in [covers.md](covers.md). `cached` and the effective cover id (`effectiveCoverAppIDSQL`, which applies the DLC fallback) decide the card's cover URL and `missing_cover_art`.
 
-- `SaveCover(CoverUpdate) error`: rejects `ImageAppID <= 0`. One transaction upserts `cover_images`: `source_url` is stored as NULL when empty, `checked_at = now`, and `downloaded_at` is set only when `Downloaded` is true (`coalesce` keeps the previous value otherwise). Then recomputes tags for `entriesForImageApp`.
+- `SaveCover(CoverUpdate) error`: rejects `ImageAppID <= 0`. One transaction upserts `cover_images`: `source_url` is stored as NULL when empty, `checked_at = now`, and `downloaded_at` is set only when `Downloaded` is true (`coalesce` keeps the previous value otherwise). Then recomputes tags for `entriesForImageApp`, which runs `entriesForImageAppSQL`: a UNION of every entry with app id = the image id and every entry bound to it as DLC (`game_sets.dlcappid`). Both branches use indexes (`idx_profile_games_appid`, `idx_game_sets_dlcappid`); the query plan tests in `covers_lookup_test.go` pin this.
 - `GetCover(imageAppID) (CoverRecord, bool, error)`: `ok = false` when no row exists.
 - `ListCovers() (map[int64]CoverRecord, error)`: test-only; no production caller.
 
 ## Settings notes and other queries
 
 - `HasSetData(appID) (bool, error)` (`sets.go`): true when `game_sets` has a row with `groupid <> 0` for the app, or a `profile_games` entry with `groupid <> 0` exists for it (any profile). The syncer uses it to avoid the legacy single-entry fallback on apps that already have set data.
-- Package-level SQL fragments used across files: `imageAppIDSQL` (the id that owns an entry's store art: DLC id when bound, else game id), `effectiveCoverAppIDSQL` (the id whose cover is displayed), `entryBaseFromSQL` (joins for entries).
+- Package-level SQL fragments used across files: `effectiveCoverAppIDSQL` (the id whose cover is displayed), `entryBaseFromSQL` (joins for entries).
 

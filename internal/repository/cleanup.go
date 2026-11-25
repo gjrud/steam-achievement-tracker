@@ -32,33 +32,50 @@ func pruneProfileAchievements(tx *sql.Tx, profileID, appID int64, achievements [
 	return err
 }
 
-func deleteOrphanRowsForAppIDs(tx *sql.Tx, appIDs []int64) error {
-	if len(appIDs) == 0 {
-		return nil
-	}
-	pl := make([]string, len(appIDs))
-	args := make([]any, 0, len(appIDs))
-	for i, appID := range appIDs {
-		pl[i] = "?"
-		args = append(args, appID)
-	}
-	inClause := strings.Join(pl, ",")
-	if _, err := tx.Exec(`delete from achievements where appid in (`+inClause+`) and not exists (
+// Orphan-delete statements for deleteOrphanRowsForAppIDs. Each takes one bound JSON array of app ids (int64sJSON) as
+// its only argument. They are package-level so the query-plan tests run the shipped SQL.
+const (
+	deleteOrphanAchievementsSQL = `delete from achievements where appid in (select value from json_each(?)) and not exists (
 		select 1 from profile_achievements pa where pa.appid=achievements.appid and pa.apiname=achievements.apiname
-	)`, args...); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`delete from game_sets where appid in (`+inClause+`) and not exists (select 1 from profile_games pg where pg.appid=game_sets.appid)`, args...); err != nil {
-		return err
-	}
-	_, err := tx.Exec(`delete from games where appid in (`+inClause+`) and not exists (select 1 from profile_games pg where pg.appid=games.appid)
+	)`
+	deleteOrphanGameSetsSQL = `delete from game_sets where appid in (select value from json_each(?)) and not exists (select 1 from profile_games pg where pg.appid=game_sets.appid)`
+	deleteOrphanGamesSQL    = `delete from games where appid in (select value from json_each(?)) and not exists (select 1 from profile_games pg where pg.appid=games.appid)
 		and not exists (select 1 from profile_achievements pa where pa.appid=games.appid)
 		and not exists (select 1 from profile_game_flags f where f.appid=games.appid)
 		and not exists (select 1 from profile_owned_games po where po.appid=games.appid)
 		and not exists (select 1 from profile_game_tags t where t.appid=games.appid)
-		and not exists (select 1 from game_snapshots s where s.appid=games.appid)`, args...)
+		and not exists (select 1 from game_snapshots s where s.appid=games.appid)`
+)
+
+func deleteOrphanRowsForAppIDs(tx *sql.Tx, appIDs []int64) error {
+	if len(appIDs) == 0 {
+		return nil
+	}
+	idsJSON, err := int64sJSON(appIDs)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(deleteOrphanAchievementsSQL, idsJSON); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(deleteOrphanGameSetsSQL, idsJSON); err != nil {
+		return err
+	}
+	_, err = tx.Exec(deleteOrphanGamesSQL, idsJSON)
 	return err
 }
+
+// orphanCoverRowsSQL selects the cover rows, among one bound JSON array of image app ids, that no entry displays. It is
+// the orphan test of deleteOrphanCoverRows, split like entriesForImageAppSQL so it uses the indexes. A row is kept
+// when some entry has app id = image id (idx_profile_games_appid), or when some entry is bound to it as DLC
+// (idx_game_sets_dlcappid, then the entry via idx_profile_games_appid). Together the two NOT EXISTS cover every entry
+// that displays the image. Package-level so the query-plan tests run the shipped SQL.
+const orphanCoverRowsSQL = `select image_appid from cover_images where image_appid in (select value from json_each(?))
+	and not exists (select 1 from profile_games pg where pg.appid = cover_images.image_appid)
+	and not exists (select 1 from game_sets gs
+		join profile_games pg on pg.appid=gs.appid and pg.groupid=gs.groupid
+		where gs.dlcappid = cover_images.image_appid and gs.dlcappid <> 0)
+	order by image_appid`
 
 // deleteOrphanCoverRows removes cached cover rows for the given image app ids that no remaining entry displays.
 // A game's cover also stays while any entry of that game remains, since its DLC entries fall back to it.
@@ -67,16 +84,11 @@ func deleteOrphanCoverRows(tx *sql.Tx, imageAppIDs []int64) ([]int64, error) {
 	if len(imageAppIDs) == 0 {
 		return nil, nil
 	}
-	pl := make([]string, len(imageAppIDs))
-	args := make([]any, 0, len(imageAppIDs))
-	for i, id := range imageAppIDs {
-		pl[i] = "?"
-		args = append(args, id)
+	idsJSON, err := int64sJSON(imageAppIDs)
+	if err != nil {
+		return nil, err
 	}
-	rows, err := tx.Query(`select image_appid from cover_images where image_appid in (`+strings.Join(pl, ",")+`) and not exists (
-		select 1 from profile_games pg left join game_sets gs on gs.appid=pg.appid and gs.groupid=pg.groupid
-		where `+imageAppIDSQL+` = cover_images.image_appid or pg.appid = cover_images.image_appid
-	) order by image_appid`, args...)
+	rows, err := tx.Query(orphanCoverRowsSQL, idsJSON)
 	if err != nil {
 		return nil, err
 	}

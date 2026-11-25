@@ -32,7 +32,7 @@ func TestCoverPathMigrationDropsPathAndCompactsFiles(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 3)
+	assertUserVersion(t, conn, latestVersion())
 	assertMigration(t, conn, 2)
 	assertMigration(t, conn, 3)
 	assertColumns(t, conn, "cover_images", coverImagesColumns)

@@ -5,7 +5,11 @@ import {__emitWailsEvent, RuntimeError} from './wails-runtime-mock.js'
 
 export const failureMessage = 'Wails call failed'
 
-// emitSyncChanged plays the backend's sync:changed event. The app refetches GetAppState on each one.
+// SYNC_EVENT_GAP_MS matches App.svelte's syncEventGapMs. A sync:changed event that comes sooner after the last
+// event read waits for the gap to end, so tests that emit twice advance by this between the emits.
+export const SYNC_EVENT_GAP_MS = 300
+
+// emitSyncChanged plays the backend's sync:changed event. The app refetches GetAppState on each one, spaced by SYNC_EVENT_GAP_MS.
 export function emitSyncChanged() {
   __emitWailsEvent('sync:changed')
 }

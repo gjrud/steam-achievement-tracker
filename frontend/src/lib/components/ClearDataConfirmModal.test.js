@@ -1,6 +1,7 @@
 import {cleanup, fireEvent, render, screen} from '@testing-library/svelte'
 import userEvent from '@testing-library/user-event'
-import {afterEach, describe, expect, test, vi} from 'vitest'
+import {tick} from 'svelte'
+import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest'
 import ClearDataConfirmModal from './ClearDataConfirmModal.svelte'
 
 const CONFIRM_TEXT = '76561198000000000'
@@ -204,36 +205,11 @@ describe('ClearDataConfirmModal typed confirmation', () => {
   })
 })
 
-describe('ClearDataConfirmModal focus', () => {
-  test('moves focus into the dialog on open', () => {
+describe('ClearDataConfirmModal dialog', () => {
+  test('the dialog is described by its explanation text', () => {
     renderModal()
 
-    expect(screen.getByRole('dialog')).toHaveFocus()
-  })
-
-  test('returns focus to the element that opened it on close', () => {
-    const opener = document.createElement('button')
-    document.body.append(opener)
-    opener.focus()
-    const {unmount} = renderModal()
-    expect(opener).not.toHaveFocus()
-
-    unmount()
-
-    expect(opener).toHaveFocus()
-    opener.remove()
-  })
-
-  test('does not move focus to an opener that has left the page', () => {
-    const opener = document.createElement('button')
-    document.body.append(opener)
-    opener.focus()
-    const {unmount} = renderModal()
-    opener.remove()
-
-    unmount()
-
-    expect(document.activeElement).toBe(document.body)
+    expect(screen.getByRole('dialog')).toHaveAccessibleDescription('This removes the active profile from the app. Nothing else is deleted unless you turn it on.')
   })
 })
 
@@ -265,5 +241,64 @@ describe('ClearDataConfirmModal cancel', () => {
 
     expect(onCancel).toHaveBeenCalledOnce()
     expect(onConfirm).not.toHaveBeenCalled()
+  })
+})
+
+describe('ClearDataConfirmModal copy feedback', () => {
+  const copyButton = () => screen.getByRole('button', {name: /confirmation value$/})
+  // copyTimerCalls lists the setTimeout calls that use the copy feedback delay (1.6 s).
+  const copyTimerCalls = (spy) => spy.mock.calls.filter(([, ms]) => ms === 1600)
+
+  beforeEach(() => {
+    Object.defineProperty(navigator, 'clipboard', {value: {writeText: vi.fn(async () => {})}, configurable: true})
+  })
+
+  afterEach(() => {
+    delete navigator.clipboard
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
+
+  test('shows Copied and then resets after 1.6 seconds', async () => {
+    vi.useFakeTimers()
+    renderModal()
+
+    await fireEvent.click(copyButton())
+    expect(screen.getByRole('button', {name: 'Copied confirmation value'})).toBeInTheDocument()
+
+    vi.advanceTimersByTime(1600)
+    await tick()
+    expect(screen.getByRole('button', {name: 'Copy confirmation value'})).toBeInTheDocument()
+  })
+
+  test('clears the copy feedback timer when the modal is destroyed', async () => {
+    vi.useFakeTimers()
+    const setSpy = vi.spyOn(globalThis, 'setTimeout')
+    const clearSpy = vi.spyOn(globalThis, 'clearTimeout')
+    const {unmount} = renderModal()
+
+    await fireEvent.click(copyButton())
+    const index = setSpy.mock.calls.findIndex(([, ms]) => ms === 1600)
+    const handle = setSpy.mock.results[index].value
+
+    unmount()
+    expect(clearSpy).toHaveBeenCalledWith(handle)
+  })
+
+  test('arms no copy timer when the modal is destroyed before the copy finishes', async () => {
+    vi.useFakeTimers()
+    const setSpy = vi.spyOn(globalThis, 'setTimeout')
+    let finishCopy
+    navigator.clipboard.writeText.mockImplementation(() => new Promise((resolve) => {
+      finishCopy = resolve
+    }))
+    const {unmount} = renderModal()
+
+    await fireEvent.click(copyButton())
+    unmount()
+    finishCopy()
+    for (let i = 0; i < 3; i++) await Promise.resolve()
+
+    expect(copyTimerCalls(setSpy)).toHaveLength(0)
   })
 })

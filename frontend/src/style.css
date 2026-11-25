@@ -27,8 +27,8 @@ html {
   min-height: 100%;
   background: #0b141f;
   color: #f4fbff;
-  /* html is the scroller. Keyboard focus, find-in-page and scrollIntoView stop short of the fixed title bar and its
-     fade, so a target near the top of the viewport is not left under them. */
+  /* html is the scroller. Focusing an element (type-to-search focuses the search box), find-in-page and scrollIntoView
+     stop short of the fixed title bar and its fade, so a target near the top of the viewport is not left under them. */
   scroll-padding-top: calc(var(--title-bar-height) + var(--title-fade-height));
 }
 

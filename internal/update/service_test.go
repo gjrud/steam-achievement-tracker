@@ -4,7 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
 	"log"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +18,7 @@ import (
 
 	"github.com/gjrud/steam-achievement-tracker/internal/usererr"
 	"github.com/wailsapp/wails/v3/pkg/updater"
+	"github.com/wailsapp/wails/v3/pkg/updater/providers/github"
 )
 
 func mustSentence(t *testing.T, err error, want string) {
@@ -809,5 +815,244 @@ func TestCanceledForReadsFlagAndContext(t *testing.T) {
 	cancel()
 	if !s.canceledFor(ctx) {
 		t.Fatal("cancelled context alone must count as cancelled")
+	}
+}
+
+// fakeHost is the framework's Host for tests. Each framework event goes to onEmit, which runs on the goroutine that
+// emits it, so a test can act at a chosen step of an install. Windows and quit are no-ops.
+type fakeHost struct {
+	onEmit func(name string)
+}
+
+func (h *fakeHost) Emit(name string, _ ...any) bool {
+	if h.onEmit != nil {
+		h.onEmit(name)
+	}
+	return true
+}
+
+func (h *fakeHost) OnEvent(string, func(any)) func() { return func() {} }
+
+func (h *fakeHost) OpenWindow(updater.WindowOptions) updater.WindowHandle { return nil }
+
+func (h *fakeHost) Quit() {}
+
+// installStub serves a release whose every asset is size bytes, so the size checks of an install are exact.
+func installStub(t *testing.T, size int) *httptest.Server {
+	t.Helper()
+	stub := &stubGitHub{tag: "v0.3.0", withSums: true}
+	srv := newStubGitHub(t, stub)
+	for name := range stub.bodies {
+		stub.bodies[name] = bytes.Repeat([]byte{'x'}, size)
+	}
+	return srv
+}
+
+// stagedService returns a service whose framework updater is really configured against srv, with a client capped at
+// limit bytes. Install runs for real: check, download, digest verification and staging. The framework stages next to
+// the test binary, in a wails-update-* folder; the test cleanup runs Shutdown, which removes it if it is still staged.
+// onEmit sees every framework event (see fakeHost). Install needs a linux or windows amd64 host, the platforms the
+// matcher supports.
+func stagedService(t *testing.T, srv *httptest.Server, limit int64, onEmit func(name string)) *Service {
+	t.Helper()
+	if (runtime.GOOS != "linux" && runtime.GOOS != "windows") || runtime.GOARCH != "amd64" {
+		t.Skip("the install tests need a linux or windows amd64 host")
+	}
+	p, err := github.New(githubConfig(srv.URL, newLimitedClient(limit)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := updater.New(&fakeHost{onEmit: onEmit})
+	if err := u.Init(updaterConfig("0.2.0", p)); err != nil {
+		t.Fatal(err)
+	}
+	s := testService(t, Deps{Updater: u})
+	// t.Cleanup runs last-in first-out: this registered before Shutdown, so it runs after it. It removes whatever the
+	// framework still has staged, so a failed assertion cannot leave a wails-update-* folder next to the test binary.
+	t.Cleanup(func() {
+		if dir := stagingDirFor(u.DownloadedPath()); dir != "" {
+			_ = os.RemoveAll(dir)
+		}
+	})
+	t.Cleanup(s.Shutdown)
+	return s
+}
+
+// primeAvailable puts the service where the user has seen version 0.3.0 and can install it.
+func primeAvailable(s *Service) {
+	s.mu.Lock()
+	s.phase = PhaseAvailable
+	s.latest = &latestRelease{version: "0.3.0"}
+	s.mu.Unlock()
+}
+
+// Shutdown during the framework's verify step: the framework does not check the context there, so the install
+// returns nil with Shutdown already run. The staged folder must not survive that, and the phase must end idle.
+func TestShutdownDuringFinaliseRemovesStagedUpdate(t *testing.T) {
+	var s *Service
+	srv := installStub(t, 64)
+	s = stagedService(t, srv, maxDownloadBytes, func(name string) {
+		if name == updater.EventVerifying {
+			s.Shutdown()
+		}
+	})
+	primeAvailable(s)
+	if err := s.Install("0.3.0"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	staged := s.deps.Updater.DownloadedPath()
+	if staged == "" {
+		t.Fatal("the framework staged nothing")
+	}
+	if _, err := os.Stat(filepath.Dir(staged)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("staged folder survived Shutdown during finalise: stat err %v", err)
+	}
+	if snap := s.State(); snap.Phase != PhaseIdle || snap.Latest != nil {
+		t.Fatalf("snapshot after shutdown during finalise = phase %s, latest %+v", snap.Phase, snap.Latest)
+	}
+}
+
+// A Cancel during verification is not stopped by the framework, which does not check the context there: the install
+// completes, ends in ready and keeps the staged update. The folder is removed only by a later Shutdown. A Cancel after
+// ready is a no-op: it finds no cancelable phase.
+func TestCancelDuringVerifyEndsReadyKeepsStaged(t *testing.T) {
+	var s *Service
+	srv := installStub(t, 64)
+	s = stagedService(t, srv, maxDownloadBytes, func(name string) {
+		if name == updater.EventVerifying {
+			if err := s.Cancel(); err != nil {
+				t.Errorf("Cancel: %v", err)
+			}
+		}
+	})
+	primeAvailable(s)
+	if err := s.Install("0.3.0"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if snap := s.State(); snap.Phase != PhaseReady {
+		t.Fatalf("phase after cancel during verify = %s, want ready", snap.Phase)
+	}
+	dir := filepath.Dir(s.deps.Updater.DownloadedPath())
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("staged folder removed by a cancel: %v", err)
+	}
+	s.Shutdown()
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("staged folder kept by Shutdown while ready: stat err %v", err)
+	}
+}
+
+// A download one byte over the client's size cap fails through the framework as a download error: the install ends
+// in error with the download sentence, and the framework leaves nothing staged.
+func TestInstallOverSizeCapIsDownloadFailed(t *testing.T) {
+	srv := installStub(t, 8193)
+	s := stagedService(t, srv, 8192, nil)
+	primeAvailable(s)
+	mustSentence(t, s.Install("0.3.0"), msgDownloadFailed)
+	snap := s.State()
+	if snap.Phase != PhaseError || snap.Error != msgDownloadFailed {
+		t.Fatalf("snapshot = phase %s, error %q", snap.Phase, snap.Error)
+	}
+	if staged := s.deps.Updater.DownloadedPath(); staged != "" {
+		t.Fatalf("an over-cap download left a staged payload: %q", staged)
+	}
+}
+
+// A download of exactly the size cap is accepted and staged. Shutdown then removes the staged folder.
+func TestInstallAtSizeCapStagesThenShutdownRemoves(t *testing.T) {
+	srv := installStub(t, 8192)
+	s := stagedService(t, srv, 8192, nil)
+	primeAvailable(s)
+	if err := s.Install("0.3.0"); err != nil {
+		t.Fatalf("Install at the cap: %v", err)
+	}
+	if snap := s.State(); snap.Phase != PhaseReady {
+		t.Fatalf("phase = %s, want ready", snap.Phase)
+	}
+	dir := filepath.Dir(s.deps.Updater.DownloadedPath())
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("staged folder missing before shutdown: %v", err)
+	}
+	s.Shutdown()
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("staged folder survived shutdown: stat err %v", err)
+	}
+	if snap := s.State(); snap.Phase != PhaseIdle {
+		t.Fatalf("phase after shutdown = %s, want idle", snap.Phase)
+	}
+}
+
+// overCapJSONService serves a release whose JSON body (a 16 KiB release body) is over the 8 KiB cap the service's
+// client uses, while every asset (64 bytes) is under it. Only the release JSON can trip the cap.
+func overCapJSONService(t *testing.T) *Service {
+	t.Helper()
+	stub := &stubGitHub{tag: "v0.3.0", withSums: true, notes: strings.Repeat("n", 16<<10)}
+	srv := newStubGitHub(t, stub)
+	for name := range stub.bodies {
+		stub.bodies[name] = bytes.Repeat([]byte{'x'}, 64)
+	}
+	return stagedService(t, srv, 8192, nil)
+}
+
+// A release JSON over the client's cap fails a manual check: the phase is error with the check sentence, and the log
+// records check-failed.
+func TestCheckOverSizeCapJSONIsCheckFailed(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	s := overCapJSONService(t)
+	mustSentence(t, s.CheckNow(), msgCheckFailed)
+	snap := s.State()
+	if snap.Phase != PhaseError || snap.Error != msgCheckFailed {
+		t.Fatalf("snapshot = phase %s, error %q", snap.Phase, snap.Error)
+	}
+	if !strings.Contains(buf.String(), "update: check failed: check-failed") {
+		t.Fatalf("log = %q, want the check-failed category", buf.String())
+	}
+}
+
+// A release JSON over the cap fails an Install's re-check: the install ends in available with the check sentence in the
+// error field, nothing is downloaded, and the log records check-failed for the install.
+func TestInstallOverSizeCapJSONIsCheckFailedAndAvailable(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	s := overCapJSONService(t)
+	primeAvailable(s)
+	mustSentence(t, s.Install("0.3.0"), msgCheckFailed)
+	snap := s.State()
+	if snap.Phase != PhaseAvailable || snap.Error != msgCheckFailed {
+		t.Fatalf("snapshot = phase %s, error %q", snap.Phase, snap.Error)
+	}
+	if staged := s.deps.Updater.DownloadedPath(); staged != "" {
+		t.Fatalf("a failed re-check left a staged payload: %q", staged)
+	}
+	if !strings.Contains(buf.String(), "update: install: check-failed") {
+		t.Fatalf("log = %q, want the install check-failed category", buf.String())
+	}
+}
+
+// The asset download is redirected to plain http. The client's redirect policy refuses it, so the download fails through
+// the framework: the install ends in error with the download sentence and stages nothing. The redirect target serves
+// the right bytes, so a policy that allowed http would stage the update and fail this test.
+func TestInstallInsecureAssetRedirectIsDownloadFailed(t *testing.T) {
+	stub := &stubGitHub{tag: "v0.3.0", withSums: true, insecureRedirect: true}
+	srv := newStubGitHub(t, stub)
+	for name := range stub.bodies {
+		stub.bodies[name] = bytes.Repeat([]byte{'x'}, 64)
+	}
+	s := stagedService(t, srv, maxDownloadBytes, nil)
+	primeAvailable(s)
+	mustSentence(t, s.Install("0.3.0"), msgDownloadFailed)
+	snap := s.State()
+	if snap.Phase != PhaseError || snap.Error != msgDownloadFailed {
+		t.Fatalf("snapshot = phase %s, error %q", snap.Phase, snap.Error)
+	}
+	if staged := s.deps.Updater.DownloadedPath(); staged != "" {
+		t.Fatalf("a refused redirect left a staged payload: %q", staged)
 	}
 }

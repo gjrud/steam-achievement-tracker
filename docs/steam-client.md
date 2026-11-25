@@ -18,6 +18,7 @@ type Client struct {
     ExcludePlayedFreeGames bool // include_played_free_games=false on library requests
 
     retryBackoff func(attempt int) time.Duration // unexported; see SetRetryBackoff
+    retrySleep   func(ctx context.Context, d time.Duration) error // unexported; nil waits on a timer, tests replace it
 }
 ```
 
@@ -74,10 +75,10 @@ No data is sent to non-Steam services.
 
 ### Error types
 
-- `*HTTPStatusError{Path, Code, Status}` for non-2xx responses. `Code` is the HTTP status code; callers classify with `errors.As`, not by message. `Error()` is `Steam API <path> returned <status>`. For non-retryable statuses the trimmed body is appended (after key and ID redaction, see [Key and ID redaction](#key-and-id-redaction)). Retryable statuses (429, 500, 503) carry no body text.
+- `*HTTPStatusError{Path, Code, Status}` for non-2xx responses. `Code` is the HTTP status code; callers classify with `errors.As`, not by message. `Error()` is `Steam API <path> returned <status>`. For non-retryable statuses the trimmed body is appended, cut to 4 KiB (`errorBodyLogLimit`) after key and ID redaction (see [Key and ID redaction](#key-and-id-redaction)). Retryable statuses (429, 500, 502, 503, 504) carry no body text.
 - `*EResultError{Path, Code}` for an `x-eresult` header other than 0, 1 or 42.
 
-Other errors are `usererr` values (`internal/usererr`; `Error()` is the text, and `usererr.New` builds them): the app's own user-facing messages, for example `Enter a Steam profile URL, SteamID64 or custom name.`, `No Steam profile was found for that account.`, and `Steam did not return your game list. Your profile's game details may be private.`. Steam's own `message` and `PlayerStats.error` texts are never user-facing: they are wrapped with `usererr.Wrap`, the error text is a fixed sentence (`No Steam profile matches that custom name.`, `Steam did not provide achievements for this game.`), and Steam's text is the cause, kept for the log only (`usererr.LogText`, then `steam.RedactSecrets` when the app logs it). A decode failure is `*badResponseError` (its text is `decode Steam API <path>: ...`, and it unwraps to the decoder error), and an invalid header is also `*badResponseError` (`Steam API <path> returned invalid x-eresult "<value>"`). A failed body read is `*bodyReadError`, which keeps the underlying text.
+Other errors are `usererr` values (`internal/usererr`; `Error()` is the text, and `usererr.New` builds them): the app's own user-facing messages, for example `Enter a Steam profile URL, SteamID64 or custom name.`, `No Steam profile was found for that account.`, and `Steam did not return your game list. Your profile's game details may be private.`. Steam's own `message` and `PlayerStats.error` texts are never user-facing: they are wrapped with `usererr.Wrap`, the error text is a fixed sentence (`No Steam profile matches that custom name.`, `Steam did not provide achievements for this game.`), and Steam's text is the cause, kept for the log only (`usererr.LogText`, then `steam.RedactSecrets` when the app logs it). A decode failure is `*badResponseError` (its text is `decode Steam API <path>: ...`, and it unwraps to the decoder error), and an invalid header is also `*badResponseError` (`Steam API <path> returned invalid x-eresult "<value>"`). A failed body read is `*bodyReadError`. Its text is the underlying read error with the key and IDs redacted, and it unwraps to the original error.
 
 ### User-facing messages
 
@@ -120,7 +121,7 @@ All requests use `GET`, with the query string built by `url.Values.Encode()`. Th
 1. Trim whitespace. Empty input returns `Enter a Steam profile URL, SteamID64 or custom name.`
 2. API-key guard. If the value contains the API key, return `This looks like your Steam Web API key. Enter your profile URL, SteamID64 or custom name instead.` No request. The match ignores case and is skipped when the key is shorter than 8 characters (`minGuardedKeyLen`).
 3. If the value matches `^\d{17}$`, return it unchanged. No request.
-4. If `url.Parse` succeeds and yields a host, scan the path segments in order:
+4. A scheme-less Steam community link (input starting with `steamcommunity.com/` or `www.steamcommunity.com/`, case-insensitive) gets `https://` prepended. Then, if `url.Parse` succeeds and yields a host, scan the path segments in order:
    - `profiles/<17 digits>` returns that id. A `profiles/` segment not followed by 17 digits does not match, and the scan continues.
    - `id/<vanity>` returns the result of `ResolveVanityURL` for that segment. `ResolveVanityURL` repeats the key guard on the decoded name. An `id/` segment with nothing after it does not match, and the scan continues.
    - If no segment matches, the error is `Enter a profile link like steamcommunity.com/profiles/<number> or steamcommunity.com/id/<name>.`.
@@ -128,7 +129,7 @@ All requests use `GET`, with the query string built by `url.Values.Encode()`. Th
 
 `ResolveVanityURL` succeeds only when `response.success == 1` and a `steamid` is returned. Otherwise it returns `No Steam profile matches that custom name.`. When Steam sent a `message` (for example `No match`), it is kept, redacted like any message, as the log cause (`usererr.LogText`, then `steam.RedactSecrets` when the app logs it); the UI gets only the sentence. The sentence does not echo the typed input, so a SteamID64 typed as an `/id/` value or a mistyped name never reaches the error text or the UI.
 
-Note: a URL without a scheme (for example `steamcommunity.com/id/name`) has no host to `url.Parse`, so it is sent to `ResolveVanityURL` as a literal vanity name and fails. Only inputs with `https://` (or another scheme) are parsed as profile URLs.
+Note: `steamcommunity.com/...` and `www.steamcommunity.com/...` links work without a scheme (step 4). Any other input without a scheme, such as `example.com/id/name`, has no host to `url.Parse`, so it is sent to `ResolveVanityURL` as a literal vanity name and fails. The API-key guard (step 2) runs on the raw input before the scheme is added.
 
 Edge case: empty path segments are not skipped. `https://steamcommunity.com/id//name` yields an empty segment after `id`, so `ResolveVanityURL` is called with an empty vanity name. No client-side check rejects it; the outcome is whatever Steam returns for that request.
 
@@ -185,21 +186,37 @@ The Steam payloads mix numbers and strings. Unexported helper types decode them:
 
 `fetchJSON` makes up to 4 attempts per call. A request is retried when:
 
-- the HTTP status is 429, 500 or 503 (`retryableSteamStatus`);
-- the transport call itself fails (`HTTPClient.Do` returns an error, including timeouts and connection resets).
+- the HTTP status is 429, 500, 502, 503 or 504 (`retryableSteamStatus`);
+- the transport call itself fails (`HTTPClient.Do` returns an error, including timeouts and connection resets), unless the context is already done;
+- reading the response body fails (for example `io.ErrUnexpectedEOF`, a connection reset, or the 30 s `HTTPClient` timeout firing mid-body). The decision uses the request context only: a read error is retried while `ctx.Err() == nil`, whatever the error value, and is not retried once the context is done (including a `context.Canceled` or `context.DeadlineExceeded` that comes from a cancelled context).
 
-Statuses 502 and 504 are not retried by this package. Other non-2xx statuses fail immediately with `HTTPStatusError`. A failure to read the response body is returned at once and is not retried.
+Other non-2xx statuses fail immediately with `HTTPStatusError`. A body over the size cap on a 2xx answer fails at once (see [Response size caps](#response-size-caps)); an error status is never failed for its size.
 
 Backoff:
 
 - Before attempts 2, 3 and 4 the client waits `retryDelay(attempt)`.
 - Default: `300ms * 2^(attempt-1)` plus random jitter of 0 to 249 ms. Waits are about 300-550 ms, 600-850 ms and 1200-1450 ms.
 - `SetRetryBackoff` replaces this. A delay of zero or less skips the wait.
-- A cancelled context ends the wait with `ctx.Err()`.
+- A 429 `Retry-After` header replaces the backoff for that wait. It is read in both forms: delay-seconds (`Retry-After: 120`) and an HTTP-date. Each value is capped at 60 s (`maxRetryAfter`). A missing, zero, past or unparsable value falls back to the backoff. `Retry-After` is read only on 429; other statuses use the backoff.
+- The `Retry-After` waits of one `fetchJSON` call share a total budget of 60 s (`retryAfterBudget`). A wait is cut to what is left of the budget; once the budget is spent, a 429 waits the backoff instead. Example: three 429s with `Retry-After: 60` wait 60 s, then the backoff for attempts 3 and 4. `Retry-After: 40` on two 429s waits 40 s, then 20 s.
+- A cancelled context ends the wait with `ctx.Err()`, including during a `Retry-After` wait. Tests replace the wait with the unexported `retrySleep` hook, so they do not sleep.
+
+Worst case for one `fetchJSON` call, leaving out the time each request takes: each of the three waits is either its `Retry-After` or its backoff, never both. The `Retry-After` waits total at most 60 s, so the worst case is 60 s on the first wait, then the backoff for the next two (at most 849 ms and 1449 ms), so under 63 s (about 62.3 s). Each request can also take up to the 30 s `HTTPClient` timeout, so four timed-out attempts add up to 120 s. `GetOwnedGames` makes up to three calls, so its totals are three times these.
 
 After the last attempt, the last error is returned. Retryable statuses therefore surface as `*HTTPStatusError` with the last code.
 
-Response bodies are read through `io.LimitReader` with a 4 MiB cap. A larger body is truncated, which then fails JSON decode.
+### Response size caps
+
+Response bodies are read through `io.LimitReader` with one byte past the cap, so an oversize body is detected, not silently truncated:
+
+- 4 MiB (`maxResponseBytes`) for every endpoint except `GetOwnedGames`;
+- 64 MiB (`maxOwnedGamesResponseBytes`) for `GetOwnedGames`, because a library with extended app info can exceed 4 MiB. The three list requests each use this cap.
+- A `maxBytes` of 0 or less (`fetchOptions`) means `maxResponseBytes`.
+
+The check order in `getJSONBody` is: a body read failure, then a retryable status, then a non-2xx status, then the size check:
+
+- a non-2xx answer (other than the retryable statuses) never fails for its size. It is read only up to `errorBodyWindow` (4 KiB log limit plus the key length and 32 bytes), whatever the cap. When the read reaches that limit, the window may have cut a secret, so the trailing partial UTF-8 rune and the trailing run of token characters are dropped first (`tornTail`). Token characters are letters, digits, `%`, `+`, `-`, `_` and `\`, plus every raw byte of the stored API key, so a key with `.`, `~`, `:`, `/`, `=` or `"` in it is removed whole too. The escaped forms of the key add no byte beyond these. If the strip exposes a partial rune, that is dropped as well. The rest is trimmed and redacted whole, then cut to `errorBodyLogLimit` (4 KiB, rune-safe). A key or SteamID64 that ends inside the window is redacted before the cut, and one the window cuts is already gone, so neither leaves a fragment. The answer is still an `*HTTPStatusError`, so a 403 with an oversize body maps as a 403 and not as an unreadable response;
+- a 2xx answer over its cap is a non-retryable `*badResponseError` with text `Steam API <path> response is larger than <n> bytes`. The body is never part of the error. `UserMessage` maps it to `Steam sent a response the app could not read.`
 
 An empty body with a 2xx status is accepted: `decodeJSONBody` returns nil and the target stays zero. See [syncer.md](syncer.md#surprising-behaviour) for what this means for achievement writes.
 

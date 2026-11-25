@@ -2,6 +2,7 @@ package repository
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -194,11 +195,6 @@ type entryRef struct {
 	GroupID int64
 }
 
-// imageAppIDSQL selects the app id whose store art an entry owns: DLC id when bound, else game id.
-// It drives cover refresh, tag recompute scope and orphan cleanup, not what is displayed.
-// Requires aliases pg (profile_games) and gs (game_sets).
-const imageAppIDSQL = `(case when coalesce(gs.dlcappid,0)<>0 then gs.dlcappid else pg.appid end)`
-
 // effectiveCoverAppIDSQL selects the app id whose cached cover is displayed for an entry. A DLC-bound entry
 // shows its DLC's cover when that cover is cached, otherwise it falls back to the parent game's cover.
 // Non-DLC entries always use the game id. Requires aliases pg (profile_games) and gs (game_sets).
@@ -255,6 +251,22 @@ func boolInt(v bool) int {
 	}
 	return 0
 }
+
+// int64sJSON encodes ids as a JSON array for `... in (select value from json_each(?))`. One bound array keeps a
+// statement under SQLite's bound-variable limit (32766) however long the list is.
+// An empty or nil slice encodes as "[]": json.Marshal(nil) gives "null", and json_each('null') yields one NULL row,
+// which makes `not in` match nothing.
+func int64sJSON(ids []int64) (string, error) {
+	if len(ids) == 0 {
+		return "[]", nil
+	}
+	b, err := json.Marshal(ids)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
 func floatPtr(v sql.NullFloat64) *float64 {
 	if !v.Valid {
 		return nil

@@ -1,4 +1,4 @@
-<script context="module">
+<script module>
   // Counts form instances so each one gets its own domain-hint id.
   let formCount = 0
 </script>
@@ -13,23 +13,19 @@
   const hintId = `key-domain-hint-${++formCount}`
   // saving: a save is in flight (App-wide, so a remounted form still sees it). disabled: the caller blocks saving for
   // another reason (profile validate/save in progress).
-  export let saving = false
-  export let disabled = false
   // autofocus: move focus into the field on mount (forms opened by a toggle, and the missing-key screen).
-  export let autofocus = false
   // showLabel: show the label text. Off by default (screen-reader only); on where the form sits next to another input.
-  export let showLabel = false
-  export let onSave = () => {}
+  let {saving = false, disabled = false, autofocus = false, showLabel = false, onSave = () => {}} = $props()
 
   // The key lives only in this local variable. It is cleared as soon as a save starts (so it is never left in a disabled
   // field), and it is never copied into `error` or rendered as text.
-  let key = ''
-  let error = ''
-  let linkError = ''
+  let key = $state('')
+  let error = $state('')
+  let linkError = $state('')
   let input = null
 
-  $: blocked = saving || disabled
-  $: canSave = !blocked && key.trim() !== ''
+  let blocked = $derived(saving || disabled)
+  let canSave = $derived(!blocked && key.trim() !== '')
 
   onMount(() => {
     if (autofocus) input?.focus()
@@ -57,22 +53,29 @@
       await onSave(value)
     } catch (err) {
       error = formatMessage(err)
-      // The field was disabled during the save, and WebKit drops focus from a disabled field. Put focus back so the user
-      // can correct the key without reaching for the mouse. tick() is defensive: Svelte's update usually lands first,
-      // but it keeps focus() from hitting a still-disabled field if the caller ever awaits after re-enabling.
+      // WebKit drops focus from a field disabled during the save: put it back so the key can be corrected.
       await tick()
       input?.focus()
     }
   }
 </script>
 
-<form class="input-row" on:submit|preventDefault={submit}>
+<form
+  class="input-row"
+  onsubmit={(event) => {
+    event.preventDefault()
+    submit()
+  }}
+>
   <label class="key-field">
     <span class="key-label" class:sr-only={!showLabel}>Steam Web API key</span>
     <input bind:this={input} type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Paste key" bind:value={key} disabled={blocked} />
   </label>
   <button class="primary" type="submit" disabled={!canSave}>{saving ? 'Saving…' : 'Save key'}</button>
 </form>
-<p class="key-note"><a class="key-link" href={KEY_PAGE_URL} rel="noopener noreferrer" aria-describedby={hintId} on:click|preventDefault={openKeyPage}>Get a Steam Web API key</a><span id={hintId} class="key-hint muted">When Steam asks for a domain name, enter localhost.</span></p>
+<p class="key-note"><a class="key-link" href={KEY_PAGE_URL} rel="noopener noreferrer" aria-describedby={hintId} onclick={(event) => {
+    event.preventDefault()
+    openKeyPage()
+  }}>Get a Steam Web API key</a><span id={hintId} class="key-hint muted">When Steam asks for a domain name, enter localhost.</span></p>
 {#if linkError}<p class="error-text" role="alert">{linkError}</p>{/if}
 {#if error}<p class="error-text" role="alert">{error}</p>{/if}

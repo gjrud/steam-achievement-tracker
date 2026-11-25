@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
@@ -19,6 +20,28 @@ var assets embed.FS
 
 //go:embed build/appicon.png
 var icon []byte
+
+// applicationID is the reverse-DNS application id. Linux uses it as the GTK application id (the Wayland app_id, and
+// the name the desktop shell matches to the .desktop file; keep build/linux/Taskfile.yml APP_ID in step). It is also
+// the single-instance UniqueID on every platform: Linux claims it as a D-Bus well-known name, and Windows names its
+// mutex from it.
+const applicationID = "io.github.gjrud.steam-achievement-tracker"
+
+// mainWindow is the main window. main stores it once, after application.New and before app.Run. The second-instance
+// callback runs on a Wails goroutine that can fire before that store, so the pointer is atomic.
+var mainWindow atomic.Pointer[application.WebviewWindow]
+
+// focusMainWindow brings the main window forward for a second launch. It does nothing when there is no window yet,
+// or when the window is hidden: on Linux the window stays hidden until its page has loaded (window.go), and showing
+// it through a focus call before then would expose an unpainted window. It calls Focus only, not Restore: Restore
+// un-maximises the window in Wails v3.1.0, while Focus un-minimises it on GTK and Windows. The second instance's
+// arguments are not used.
+func focusMainWindow(win *application.WebviewWindow) {
+	if win == nil || !win.IsVisible() {
+		return
+	}
+	win.Focus()
+}
 
 func main() {
 	// Create the backend. Its exported methods are bound to the frontend through the service below.
@@ -48,16 +71,28 @@ func main() {
 		Logger: newWailsLogger(logWriter{}),
 		Windows: application.WindowsOptions{
 			// WebView2 profile (browser cache and state) under the app's cache directory, created above. Wails' default
-			// is %AppData%\<exe name>, and releases rename the portable exe per version, so each version would start a
-			// new profile and orphan the old one. This path is fixed. Ignored on Linux. The cache directory is kept on
-			// uninstall (build/windows/nsis/project.nsi).
+			// is %AppData%\<exe name>, but the exe name is not stable: older releases put the version in the portable
+			// exe's name, and a user may rename the file. A profile keyed on the exe name would change with it and
+			// orphan the old one. This path is fixed. Ignored on Linux. The cache directory is kept on uninstall
+			// (build/windows/nsis/project.nsi).
 			WebviewUserDataPath: webviewPath,
 		},
 		Linux: application.LinuxOptions{
 			// Reverse-DNS GTK application id. GTK sends it as the Wayland app_id, and Wails derives the program name
 			// (X11 class) from it. The packaged .desktop file and icons use the same name (APP_ID in
 			// build/linux/Taskfile.yml); keep them in step, or the shell shows the wrong icon.
-			ApplicationID: "io.github.gjrud.steam-achievement-tracker",
+			ApplicationID: applicationID,
+		},
+		// Only one instance runs. A second launch hands its arguments to the first instance, which focuses its window,
+		// and then exits inside application.New, before any window or service starts. On Linux the lock is a D-Bus
+		// session-bus name, so a session without a bus makes application.New fail (see docs/platform.md). The lock is
+		// released when the process exits; the updater starts the new version only after the old process has exited
+		// (see docs/platform.md).
+		SingleInstance: &application.SingleInstanceOptions{
+			UniqueID: applicationID,
+			OnSecondInstanceLaunch: func(application.SecondInstanceData) {
+				focusMainWindow(mainWindow.Load())
+			},
 		},
 		Services: []application.Service{
 			application.NewService(backend),
@@ -92,7 +127,7 @@ func main() {
 	backend.setUpdater(updates)
 	updates.Init()
 
-	setupMainWindow(app, runtime.GOOS)
+	mainWindow.Store(setupMainWindow(app, runtime.GOOS))
 
 	// Run blocks until the application exits. The app quits when its last window closes (the default on Linux).
 	if err := app.Run(); err != nil {

@@ -25,7 +25,7 @@ I built this app for personal use, entirely through vibecoding. I have entry-lev
 
 ## Requirements
 
-- **Linux:** a desktop session with the GTK 4 and WebKitGTK 6.0 runtime libraries, and a Secret Service provider such as GNOME Keyring, unlocked while you use the app. The deb, rpm, and Arch packages install the libraries. If the AppImage fails to start, install them (on Debian and Ubuntu: `libgtk-4-1` and `libwebkitgtk-6.0-4`). No package installs a Secret Service provider.
+- **Linux:** a desktop session (with a D-Bus session bus) with the GTK 4 and WebKitGTK 6.0 runtime libraries, and a Secret Service provider such as GNOME Keyring, unlocked while you use the app. The deb, rpm, and Arch packages install the libraries. If the AppImage fails to start, install them (on Debian and Ubuntu: `libgtk-4-1` and `libwebkitgtk-6.0-4`). No package installs a Secret Service provider.
 - **Windows:** Windows 10 or 11, 64-bit. Windows 10 may need the [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/); the installer adds it when missing, the portable exe does not.
 - **Both:** a Steam Web API key from the account that owns the profile, and network access to Steam and, for update checks, GitHub. The profile can have any privacy setting, including private.
 
@@ -34,7 +34,7 @@ I built this app for personal use, entirely through vibecoding. I have entry-lev
 Download a file from the [GitHub Releases](https://github.com/gjrud/steam-achievement-tracker/releases) page. Each release lists `SHA256SUMS` for its files. Check a download with `sha256sum --check --ignore-missing SHA256SUMS` on Linux, or `Get-FileHash <file> -Algorithm SHA256` in PowerShell.
 
 - **Linux:** a deb, rpm, or Arch (`pkg.tar.zst`) package, or the AppImage. Removing a package removes only the program files.
-- **Windows:** `steam-achievement-tracker-<version>-windows-amd64-setup.exe` (per-user installer, no administrator rights, Start Menu shortcut) or `...-windows-amd64-portable.exe` (runs without installing; same data folder as the installer). The builds are not code-signed, so SmartScreen may show "Windows protected your PC". Choose **More info**, then **Run anyway**.
+- **Windows:** `steam-achievement-tracker-<version>-windows-amd64-setup.exe` (per-user installer, no administrator rights, Start Menu shortcut) or `steam-achievement-tracker-windows-amd64-portable.exe` (runs without installing; same data folder as the installer). Older portable downloads have a version in the file name (`steam-achievement-tracker-<version>-windows-amd64-portable.exe`); in-app updates keep that file name, so it keeps showing the old version. To rename it to `steam-achievement-tracker-windows-amd64-portable.exe`, close the app first; renaming breaks taskbar pins and shortcuts that point to the old name. The builds are not code-signed, so SmartScreen may show "Windows protected your PC". Choose **More info**, then **Run anyway**.
 
 Uninstalling never removes your data, cache, logs, or saved API key.
 
@@ -52,7 +52,7 @@ The key is stored in the system keyring under service `steam-achievement-tracker
 
 ### Connect a profile
 
-With a key saved and no profile active, enter a SteamID64, a profile URL with its scheme (`https://steamcommunity.com/profiles/<steamid64>` or `https://steamcommunity.com/id/<name>`), or a vanity name. Click **Validate** to see the Steam name and avatar the app found, then **Save and sync** to make the profile active and start a sync. Only one profile is active at a time.
+With a key saved and no profile active, enter a SteamID64, a profile URL with its scheme (`https://steamcommunity.com/profiles/<steamid64>` or `https://steamcommunity.com/id/<name>`), or a vanity name. A Steam community link also works without its `https://`, such as `steamcommunity.com/id/<name>` or `www.steamcommunity.com/profiles/<steamid64>`. Click **Validate** to see the Steam name and avatar the app found, then **Save and sync** to make the profile active and start a sync. Only one profile is active at a time.
 
 ![Connect a Steam profile](assets/screenshots/connect-profile.webp)
 
@@ -166,10 +166,12 @@ To erase everything, close the app and delete the three folders, the `steam-achi
 
 ## Troubleshooting
 
-- **Profile or vanity name not found**: check the SteamID64, link or name. A link needs its scheme (`https://steamcommunity.com/profiles/<number>` or `.../id/<name>`); without it, the text is treated as a vanity name.
+- **Profile or vanity name not found**: check the SteamID64, link or name. A `steamcommunity.com` or `www.steamcommunity.com` link works with or without `https://` (`.../profiles/<number>` or `.../id/<name>`); other text without a scheme is treated as a vanity name.
 - **Sync fails or shows no games**: the profile must belong to the account that owns the API key. Any privacy setting works.
 - **"Steam Web API key missing"**: enter the key on the setup screen, or click **Retry key lookup** if you stored it outside the app.
 - **The key does not save on Linux**: unlock your Secret Service keyring and try again.
+- **Starting the app again does not open a second window**: only one copy runs. A second launch brings the open window to the front (on Windows its taskbar button may flash instead) and exits.
+- **The app exits at startup on Linux and shows no window**: the app needs a D-Bus session bus to make sure only one copy runs. Without one it exits before the keyring check, and the D-Bus error goes to stderr, not the log file. Launched from the desktop, nothing is shown: run it from a terminal to see the error.
 - **Startup error screen**: the message names the problem. The log file, shown on the screen, has the details.
 - **App does not start on Windows 10**: install the WebView2 Runtime first.
 - **Covers are blank**: they download on the next sync. If Steam has no image, the card keeps the placeholder until a later sync finds one.

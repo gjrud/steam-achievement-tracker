@@ -147,33 +147,6 @@ function stubGridLayout(overrides = {}) {
   return layout
 }
 
-// Records every HTMLElement.focus call as {el, args} and still runs the real focus, so activeElement stays correct.
-function recordFocusCalls() {
-  const original = HTMLElement.prototype.focus
-  const calls = []
-  vi.spyOn(HTMLElement.prototype, 'focus').mockImplementation(function focus(...args) {
-    calls.push({el: this, args})
-    return original.apply(this, args)
-  })
-  return calls
-}
-
-// jsdom does not scroll. Spies on the APIs that would move the page, so a test can assert the component used none.
-let restoreScroll = () => {}
-
-function spyOnScrolling() {
-  const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
-  const hadScrollIntoView = 'scrollIntoView' in Element.prototype
-  const originalScrollIntoView = Element.prototype.scrollIntoView
-  const scrollIntoView = vi.fn()
-  Element.prototype.scrollIntoView = scrollIntoView
-  restoreScroll = () => {
-    if (hadScrollIntoView) Element.prototype.scrollIntoView = originalScrollIntoView
-    else delete Element.prototype.scrollIntoView
-  }
-  return {scrollTo, scrollIntoView}
-}
-
 const cardCount = () => document.querySelectorAll('.game-card').length
 const moreBox = () => document.querySelector('.grid-more')
 const spacer = () => document.querySelector('.grid-spacer')
@@ -203,8 +176,6 @@ afterEach(() => {
   __resetWailsMocks()
   restoreLayout()
   restoreLayout = () => {}
-  restoreScroll()
-  restoreScroll = () => {}
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -379,6 +350,36 @@ describe('App incremental card grid with IntersectionObserver', () => {
     expect(cardCount()).toBe(96)
   })
 
+  // The reset must run before the DOM update. Otherwise the grid first renders the new list at the old limit: the search
+  // keeps games 100-199 and 145-199 were never mounted, so 55 cards would mount and then be removed. With the reset first,
+  // the first 48 of the new list (100-147) render, and only 145-147 mount.
+  test('a search reset shows 48 cards without first mounting cards at the old limit', async () => {
+    const io = stubIntersectionObserver()
+    __setWailsMocks({GetAppState: vi.fn(async () => batchDashboard({suggestions: manyGames(200, alternatingTags)}))})
+    render(App)
+    await screen.findByRole('button', {name: 'Show more (48 of 200)'})
+    io.fire(true)
+    await waitFor(() => expect(cardCount()).toBe(96))
+    io.fire(true)
+    await waitFor(() => expect(cardCount()).toBe(144))
+
+    // The callback collects the records: a MutationObserver delivers its queue to the callback at the next microtask, so
+    // a callback that ignores them would leave takeRecords() empty by the time the test reads it.
+    const records = []
+    const observer = new MutationObserver((list) => records.push(...list))
+    observer.observe(document.querySelector('.game-grid'), {childList: true, subtree: true})
+    // One input event, so the reset happens once: typing a letter at a time would reset at each keystroke.
+    await fireEvent.input(screen.getByPlaceholderText('Search games in this view'), {target: {value: 'Batch Game 1'}})
+    await tick()
+    records.push(...observer.takeRecords())
+    observer.disconnect()
+    const added = records.flatMap((record) => [...record.addedNodes]).filter((node) => node.tagName === 'ARTICLE')
+
+    expect(screen.getByRole('button', {name: 'Show more (48 of 100)'})).toBeInTheDocument()
+    expect(cardCount()).toBe(48)
+    expect(added.length).toBeLessThanOrEqual(48)
+  })
+
   test('observes only the new sentinel when the button is re-created after the list shrinks and grows again', async () => {
     const io = stubIntersectionObserver()
     const refreshes = [batchDashboard({suggestions: manyGames(30, alternatingTags)}), batchDashboard()]
@@ -411,21 +412,6 @@ describe('App incremental card grid with IntersectionObserver', () => {
     expect(cardCount()).toBe(96)
     expect(io.latest.calls).toContainEqual(['observe', newBox])
     expect([...io.latest.targets]).toEqual([newBox])
-  })
-
-  test('keeps focus where it was when observer-driven growth finishes the list', async () => {
-    const io = stubIntersectionObserver()
-    await renderDashboard()
-    const search = screen.getByPlaceholderText('Search games in this view')
-    search.focus()
-
-    io.fire(true)
-    await waitFor(() => expect(cardCount()).toBe(96))
-    io.fire(true)
-    await waitFor(() => expect(cardCount()).toBe(120))
-
-    expect(showMoreButton(/Show more/)).not.toBeInTheDocument()
-    expect(document.activeElement).toBe(search)
   })
 
   test('keeps the full counts in the All chip and the Completed pill', async () => {
@@ -469,40 +455,6 @@ describe('App incremental card grid without IntersectionObserver', () => {
 
     await waitFor(() => expect(cardCount()).toBe(120))
     expect(showMoreButton(/Show more/)).not.toBeInTheDocument()
-  })
-
-  test('moves focus to the first new card when a manual activation finishes the list', async () => {
-    await renderDashboard()
-    const user = userEvent.setup()
-    const first = screen.getByRole('button', {name: 'Show more (48 of 120)'})
-    first.focus()
-
-    await user.click(first)
-    await waitFor(() => expect(cardCount()).toBe(96))
-    // Not the last step yet: the button stays and keeps focus.
-    const second = screen.getByRole('button', {name: 'Show more (96 of 120)'})
-    expect(document.activeElement).toBe(second)
-
-    await user.click(second)
-    await waitFor(() => expect(cardCount()).toBe(120))
-    expect(showMoreButton(/Show more/)).not.toBeInTheDocument()
-    expect(document.activeElement).toBe(cardNamed('Batch Game 097'))
-    expect(cardNamed('Batch Game 097')).toHaveAttribute('tabindex', '-1')
-  })
-
-  test('does not move focus when the button was clicked without holding focus', async () => {
-    await renderDashboard()
-    const search = screen.getByPlaceholderText('Search games in this view')
-    const button = screen.getByRole('button', {name: 'Show more (48 of 120)'})
-    search.focus()
-
-    // element.click() does not move focus, so the button never holds focus here.
-    button.click()
-    await waitFor(() => expect(cardCount()).toBe(96))
-    screen.getByRole('button', {name: 'Show more (96 of 120)'}).click()
-    await waitFor(() => expect(cardCount()).toBe(120))
-
-    expect(document.activeElement).toBe(search)
   })
 })
 
@@ -664,6 +616,26 @@ describe('App incremental card grid spacer and viewport-sized growth', () => {
     await waitFor(() => expect(spacer()?.style.height).toBe(spacerPx(18 * 300)))
   })
 
+  // The measure effect reads items, so a refresh that changes the list length (same search, tag and limit) re-measures.
+  test('a refresh to a longer list with the same search and limit recomputes the spacer', async () => {
+    stubIntersectionObserver()
+    stubGridLayout()
+    const disable = vi.fn(async () => batchDashboard({suggestions: manyGames(200, alternatingTags)}))
+    __setWailsMocks({GetAppState: vi.fn(async () => batchDashboard()), DisableGame: disable})
+    const user = userEvent.setup()
+    render(App)
+    await waitFor(() => expect(spacer()?.style.height).toBe(spacerPx(18 * 300)))
+
+    await fireEvent.contextMenu(cardNamed('Batch Game 001'))
+    await user.click(await screen.findByRole('button', {name: 'Disable game'}))
+
+    await waitFor(() => expect(disable).toHaveBeenCalledWith(1000, 0))
+    expect(await screen.findByRole('button', {name: 'Show more (48 of 200)'})).toBeInTheDocument()
+    // 200 cards at 4 columns = 50 rows; 48 mounted = 12 rows, so 38 rows of 300px remain, times SPACER_BIAS, minus the 40px button.
+    await waitFor(() => expect(spacer().style.height).toBe(spacerPx(38 * 300)))
+    expect(cardCount()).toBe(48)
+  })
+
   test('the spacer subtracts the top and bottom margins of the button box', async () => {
     stubIntersectionObserver()
     stubGridLayout({moreMarginTop: 12, moreMarginBottom: 8})
@@ -689,54 +661,5 @@ describe('App incremental card grid spacer and viewport-sized growth', () => {
     const trueFullHeight = (120 / 4) * 300 - 16
 
     expect(estimatedTotal).toBeLessThan(trueFullHeight)
-  })
-})
-
-describe('App incremental card grid focus handoff never scrolls', () => {
-  test('after a click finishes the list the focus handoff uses preventScroll and the page does not scroll', async () => {
-    const {scrollTo, scrollIntoView} = spyOnScrolling()
-    await renderDashboard()
-    const user = userEvent.setup()
-    await user.click(screen.getByRole('button', {name: 'Show more (48 of 120)'}))
-    await waitFor(() => expect(cardCount()).toBe(96))
-    const focusCalls = recordFocusCalls()
-    const scrollY = window.scrollY
-
-    await user.click(screen.getByRole('button', {name: 'Show more (96 of 120)'}))
-    await waitFor(() => expect(cardCount()).toBe(120))
-    await waitFor(() => expect(focusCalls.length).toBeGreaterThan(0))
-
-    // First card revealed by the last step is index 96 = Batch Game 097.
-    const card = cardNamed('Batch Game 097')
-    expect(focusCalls.at(-1)).toEqual({el: card, args: [{preventScroll: true}]})
-    expect(document.activeElement).toBe(card)
-    expect(scrollTo).not.toHaveBeenCalled()
-    expect(scrollIntoView).not.toHaveBeenCalled()
-    expect(window.scrollY).toBe(scrollY)
-  })
-
-  test('after an observer hit finishes the list with the button focused the page does not scroll', async () => {
-    const io = stubIntersectionObserver()
-    const {scrollTo, scrollIntoView} = spyOnScrolling()
-    // Grid far above the viewport: one observer hit adds all 72 remaining cards, and the button still holds focus.
-    vi.stubGlobal('innerHeight', 800)
-    stubGridLayout({gridBottom: -3000})
-    await renderDashboard()
-    screen.getByRole('button', {name: 'Show more (48 of 120)'}).focus()
-    const focusCalls = recordFocusCalls()
-    const scrollY = window.scrollY
-
-    io.fire(true)
-    await waitFor(() => expect(cardCount()).toBe(120))
-    // The handoff runs after the DOM update, so wait for it before asserting.
-    await waitFor(() => expect(focusCalls.length).toBeGreaterThan(0))
-
-    // First card revealed by this step is index 48 = Batch Game 049.
-    const card = cardNamed('Batch Game 049')
-    expect(focusCalls.at(-1)).toEqual({el: card, args: [{preventScroll: true}]})
-    expect(document.activeElement).toBe(card)
-    expect(scrollTo).not.toHaveBeenCalled()
-    expect(scrollIntoView).not.toHaveBeenCalled()
-    expect(window.scrollY).toBe(scrollY)
   })
 })

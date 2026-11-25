@@ -24,7 +24,7 @@ Contains constants only; it has no behavior or tests.
 | `DBFileName` | `steam-achievement-tracker.db` | SQLite file name inside the data directory. |
 | `KeyringUser` | `steam-web-api-key` | Keyring user (account) name for the API key. |
 
-Note: `config.AppID` is not the reverse-DNS application id. The Wayland app id and desktop file name use `io.github.gjrud.steam-achievement-tracker` (`ApplicationID` in `main.go`, `APP_ID` in `build/linux/Taskfile.yml`). Do not mix them: the keyring service and directory names must stay `steam-achievement-tracker`.
+Note: `config.AppID` is not the reverse-DNS application id. The Wayland app id and desktop file name use `io.github.gjrud.steam-achievement-tracker` (`applicationID` in `main.go`, also the single-instance `UniqueID`; `APP_ID` in `build/linux/Taskfile.yml`). Do not mix them: the keyring service and directory names must stay `steam-achievement-tracker`.
 
 ## internal/appdata
 
@@ -102,7 +102,7 @@ Deleting the cache folder is safe; see [covers.md](covers.md#cache-layout).
 
 The in-app updater writes outside the three app roots: `<target>.bak`, `<exe>.old.<n>` (Windows) and `wails-update-*` next to the exe or AppImage, `wails-update-<pid>.log` in the OS temp dir, and on Windows the HKCU Apps & Features `DisplayVersion`. Lifetimes and cleanup: [updater.md](updater.md#staging-and-leftover-files), [After an update](updater.md#after-an-update).
 
-The NSIS uninstaller (`build/windows/nsis/project.nsi`) deletes `$INSTDIR\<exe>.old.*` and `$INSTDIR\<exe>.bak` before its non-recursive `RMDir "$INSTDIR"`. It never uses `RMDir /r`, so an unrelated file or a leftover `wails-update-*` folder in the install folder keeps the folder, and the install folder stays behind.
+The NSIS uninstaller (`build/windows/nsis/project.nsi`) deletes `$INSTDIR\<exe>.old.*` and `$INSTDIR\<exe>.bak`. It then handles each `$INSTDIR\wails-update-*` folder: it deletes only that folder's `.artifact` and `*-windows-amd64-portable.exe` files and removes the folder with a non-recursive `RMDir`. A leftover staging folder is therefore removed, and so is the install folder once it is empty. Anything else inside a `wails-update-*` folder keeps that folder, and the install folder then stays behind. The uninstaller never uses `RMDir /r`: an unrelated file in `$INSTDIR` also keeps the install folder.
 
 ## internal/keyring
 
@@ -199,6 +199,27 @@ Gotchas:
 - Use for files another process may briefly hold open (cover server, WebView, antivirus, indexer).
 - Plain `os` calls are fine elsewhere.
 - `transient_windows_test.go` is `//go:build windows` and does not compile on Linux CI. The generic retry tests in `fsretry_test.go` run everywhere.
+
+## Single instance
+
+Only one copy of the app runs. `main.go` sets `application.Options.SingleInstance` with `UniqueID` = `applicationID` (`io.github.gjrud.steam-achievement-tracker`, the same constant as the Linux GTK `ApplicationID`). The locking is done by Wails v3.1.0 (`pkg/application/single_instance_*.go`):
+
+| Platform | Lock | Requirement and failure |
+| --- | --- | --- |
+| Linux | D-Bus well-known name `io.github.gjrud.steam-achievement-tracker.SingleInstance` on the session bus, claimed with "do not queue". | A session bus must be reachable. Without one, `application.New` cannot take the lock and Wails calls its fatal handler: the app exits (status 1) before any window or service starts, and the error goes to stderr, not the log file (`logging.Init` runs after `application.New`). Launched from the desktop there is no terminal, so the app exits silently. The keyring error screen is never reached. |
+| Windows | Named mutex `wails-app-io.github.gjrud.steam-achievement-tracker-sim`. | Any `CreateMutex` error counts as "already running". |
+
+A second launch sends its arguments and working directory to the first instance and exits with `ExitCode` (0). The first instance's `OnSecondInstanceLaunch` calls `focusMainWindow` (`main.go`): it focuses the main window when that window is visible (`Focus`, not `Restore`: `Restore` un-maximises the window in Wails v3.1.0). While the Linux window is still hidden (before its page loads, see [window.go](../window.go)) it does nothing. The arguments are not used and not logged. `EncryptionKey` is unset: the payload is not secret and is not used. On Windows the running app may not be allowed to take focus on a second launch; the taskbar button may only flash.
+
+Effects:
+
+- A second launch exits before `ServiceStartup`, so it does not run `CancelRunningSyncRuns` at init and cannot cancel the first instance's sync.
+
+Updater restart (see [updater.md](updater.md#restart)): the helper waits up to 30 s for the old process to exit (`internal/update` relaunch path, the Wails `updater` helper `wait(parentPID)`) before it swaps the executable and starts the new one. The lock is released when the old process exits (the D-Bus name on Linux, the mutex on Windows), so the new process takes the lock. The helper's abort path relaunches the old executable when the old process is still alive after 30 s; that launch is a second instance: it focuses the still-running window and exits, so the user stays on the old version until the next start. Without the lock, that abort path would start a second copy beside the running one. Risk not verified on a real machine: restart on Linux and Windows with the lock held.
+
+Dev builds share the installed app's lock: both use the same `UniqueID`. If the installed app is open, `wails3 dev` hands off to it and exits with status 0.
+
+Manual check: start the app, start it a second time, and confirm the first window comes forward and no second window opens (on Windows its taskbar button may only flash). On Linux, run from a terminal with `DBUS_SESSION_BUS_ADDRESS` unset and confirm the app exits at startup with a D-Bus error on stderr instead of showing the keyring screen.
 
 ## Testing these packages
 

@@ -98,7 +98,10 @@ type Service struct {
 	emitMu  sync.Mutex
 	stopped bool
 
-	mu            sync.Mutex
+	mu sync.Mutex
+	// shutdown is set by Shutdown, under mu. A successful install that finishes after it stages nothing (see
+	// finishStaged).
+	shutdown      bool
 	unavailable   bool
 	current       string
 	checksEnabled bool   // the cached toggle; meaningful only when checksKnown
@@ -451,10 +454,7 @@ func (s *Service) runInstall(ctx context.Context, want string) error {
 
 	err = s.deps.Updater.DownloadAndInstall(ctx)
 	if err == nil {
-		s.finish(func() {
-			s.phase = PhaseReady
-			s.errText = ""
-		})
+		s.finishStaged(s.deps.Updater.DownloadedPath())
 		return nil
 	}
 	cat := categorize(stepDownload, s.canceledFor(ctx), err)
@@ -523,19 +523,66 @@ func (s *Service) Restart() error {
 	return nil
 }
 
+// finishStaged ends an install the framework reported as staged. staged is the path DownloadedPath returned right after
+// DownloadAndInstall succeeded, read by the caller. The framework does not check the install context while it verifies
+// and installs, so Shutdown can run during that step. Shutdown then sees no ready phase and removes nothing. The
+// shutdown flag is read under the same lock as the transition, so the two orders are both covered: when the flag is
+// set, nothing may stay staged, so the phase goes to idle as Shutdown does for ready, and the staging directory is
+// removed after the lock is released. Otherwise the phase is ready. A Cancel during verification or installation that
+// the framework completes does not stop the install: it still ends in ready and keeps the folder. A Cancel after ready
+// is a no-op.
+func (s *Service) finishStaged(staged string) {
+	removeDir := false
+	s.finish(func() {
+		if s.shutdown {
+			s.phase = PhaseIdle
+			s.latest = nil
+			removeDir = true
+			return
+		}
+		s.phase = PhaseReady
+		s.errText = ""
+	})
+	if removeDir {
+		s.removeStagedUpdate(staged)
+	}
+}
+
+// removeStagedUpdate removes the staging directory of the staged payload at path. Only a directory named wails-update-*
+// is removed (stagingDirFor). It is called without the state lock, with a path read by the caller under it. A failure
+// logs the category only.
+func (s *Service) removeStagedUpdate(path string) {
+	dir := stagingDirFor(path)
+	if dir == "" {
+		return
+	}
+	if err := fsretry.RemoveAll(dir); err != nil {
+		log.Printf("update: remove staged update: %s", catOther)
+	}
+}
+
 // Shutdown is called from the app's service shutdown. It never waits on a running operation. It stops notifications,
 // stops a running install through its context, drops the framework listeners, and, when an update was staged but not
-// applied, moves to idle and removes the staging directory. It removes nothing while restarting: the helper owns that
-// directory.
+// applied, moves to idle and removes the staging directory. An install still verifying or installing when Shutdown
+// runs is handled by finishStaged. It removes nothing while restarting: the helper owns that directory.
 func (s *Service) Shutdown() {
 	s.emitMu.Lock()
 	s.stopped = true
 	s.emitMu.Unlock()
 
 	s.mu.Lock()
+	s.shutdown = true
 	cancel := s.installCancel
 	wasReady := s.phase == PhaseReady
+	var staged string
 	if wasReady {
+		// The framework never holds its own lock while it emits, so reading its path under the state lock cannot wait
+		// on the listener. The read must stay inside this s.mu section: read before taking s.mu, Shutdown could see ""
+		// while finishStaged, after seeing no shutdown flag, moves to ready and leaks the staged folder. Reading after
+		// unlock is also safe, but this is the decision point.
+		if s.deps.Updater != nil {
+			staged = s.deps.Updater.DownloadedPath()
+		}
 		s.phase = PhaseIdle
 		s.latest = nil
 		s.progress = DownloadProgress{}
@@ -550,15 +597,8 @@ func (s *Service) Shutdown() {
 	if cancel != nil {
 		cancel()
 	}
-	if !wasReady || s.deps.Updater == nil {
-		return
-	}
-	dir := stagingDirFor(s.deps.Updater.DownloadedPath())
-	if dir == "" {
-		return
-	}
-	if err := fsretry.RemoveAll(dir); err != nil {
-		log.Printf("update: remove staged update: %s", catOther)
+	if wasReady {
+		s.removeStagedUpdate(staged)
 	}
 }
 

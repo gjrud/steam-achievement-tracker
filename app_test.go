@@ -1504,6 +1504,173 @@ func TestCancelSyncAndWaitWaitsForSyncToFinish(t *testing.T) {
 	}
 }
 
+// waitForClearing waits until a clear has set the clearing gate. The clear itself is blocked by the test's sync, so
+// the gate stays set until the test releases it.
+func waitForClearing(t *testing.T, app *App) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		app.mu.Lock()
+		clearing := app.clearing
+		app.mu.Unlock()
+		if clearing {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("clear did not set the clearing gate")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A forced sync start (SyncNow) during a clear is refused with errSyncAlreadyInProgress, and no sync starts.
+func TestSyncNowDuringClearIsRejected(t *testing.T) {
+	app := newTestApp(t)
+	saveTestProfile(t, app)
+	if err := zk.Set(testKeyringService, testKeyringUser, "fixture-steam-key"); err != nil {
+		t.Fatal(err)
+	}
+	stub, received := newSteamStub(t, forbidSteam)
+	setSteamBaseURL(app, stub.URL)
+
+	if err := app.beginClear(); err != nil {
+		t.Fatalf("beginClear: %v", err)
+	}
+	defer app.endClear()
+	if _, err := app.SyncNow(); !errors.Is(err, errSyncAlreadyInProgress) {
+		t.Fatalf("SyncNow during clear err = %v, want errSyncAlreadyInProgress", err)
+	}
+	assertIdleSync(t, app)
+	if reqs := received(); len(reqs) != 0 {
+		t.Fatalf("Steam requests during clear = %+v, want none", reqs)
+	}
+}
+
+// A background start (startSync(false), as ServiceStartup uses it) during a clear is a quiet no-op.
+// The API key is cached, so without the gate the start would reach the Steam stub.
+func TestStartSyncDuringClearIsQuietNoOp(t *testing.T) {
+	app := newTestApp(t)
+	saveTestProfile(t, app)
+	if err := app.SaveAPIKey("fixture-steam-key"); err != nil {
+		t.Fatal(err)
+	}
+	stub, received := newSteamStub(t, forbidSteam)
+	setSteamBaseURL(app, stub.URL)
+
+	if err := app.beginClear(); err != nil {
+		t.Fatalf("beginClear: %v", err)
+	}
+	defer app.endClear()
+	if err := app.startSync(false); err != nil {
+		t.Fatalf("startSync(false) during clear err = %v, want nil", err)
+	}
+	assertIdleSync(t, app)
+	if reqs := received(); len(reqs) != 0 {
+		t.Fatalf("Steam requests during clear = %+v, want none", reqs)
+	}
+}
+
+// A clear with no active profile returns an error after the gate is taken. The gate must be released on that error
+// return, or every later clear and sync start would be refused.
+func TestClearWithoutActiveProfileReturnsErrorAndReleasesGate(t *testing.T) {
+	app := newTestApp(t)
+
+	_, err := app.ClearActiveUserData(true, false)
+	if !errors.Is(err, errNoProfile) {
+		t.Fatalf("ClearActiveUserData with no profile err = %v, want errNoProfile", err)
+	}
+	app.mu.Lock()
+	clearing := app.clearing
+	app.mu.Unlock()
+	if clearing {
+		t.Fatal("clearing = true after the failed clear, want released")
+	}
+}
+
+// A second clear while one runs is rejected with the generic sentence, and it changes nothing: the profile stays.
+// The first clear is held in cancelSyncAndWait by a sync that ends only when the test releases it. Afterwards the gate
+// is released and a later clear works.
+func TestSecondClearWhileClearingIsRejected(t *testing.T) {
+	app := newTestApp(t)
+	profile := saveTestProfile(t, app)
+	seedTwoSetGame(t, app, profile.ID)
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	ctx, cancel := context.WithCancel(context.Background())
+	app.mu.Lock()
+	app.syncCancel = cancel
+	app.syncWG.Add(1)
+	app.mu.Unlock()
+	go func() {
+		<-ctx.Done()
+		<-release
+		app.syncWG.Done()
+	}()
+
+	firstErr := make(chan error, 1)
+	go func() {
+		_, err := app.ClearActiveUserData(true, false)
+		firstErr <- err
+	}()
+	waitForClearing(t, app)
+
+	_, err := app.ClearActiveUserData(true, false)
+	if err == nil || err.Error() != msgGeneric {
+		t.Fatalf("second clear err = %v, want %q", err, msgGeneric)
+	}
+	if active, err := app.repo.ActiveProfile(); err != nil || active == nil {
+		t.Fatalf("active profile after rejected clear = %+v, %v; want the profile kept", active, err)
+	}
+
+	unblock()
+	if err := <-firstErr; err != nil {
+		t.Fatalf("first clear: %v", err)
+	}
+	waitForSyncWG(t, app)
+	app.mu.Lock()
+	clearing := app.clearing
+	app.mu.Unlock()
+	if clearing {
+		t.Fatal("clearing gate still set after the clear returned")
+	}
+	// The gate is free again: a new clear can take it.
+	if err := app.beginClear(); err != nil {
+		t.Fatalf("beginClear after the first clear returned: %v", err)
+	}
+	app.endClear()
+}
+
+// A sync whose goroutine hits a panic while it runs (the emitter panics on the sync's second event, inside FullSync)
+// does not crash the app. The sync ends, the flag and cancel func are cleared, and the panic log carries no key.
+func TestSyncPanicDuringRunEndsSyncWithoutKeyInLog(t *testing.T) {
+	// The key has the 32-hex shape of a Steam key, which is what the log scrub matches.
+	const key = "0123456789ABCDEF0123456789ABCDEF"
+	app := newTestApp(t)
+	saveTestProfile(t, app)
+	if err := app.SaveAPIKey(key); err != nil {
+		t.Fatal(err)
+	}
+	stub, _ := newSteamStub(t, forbidSteam)
+	setSteamBaseURL(app, stub.URL)
+	logs := captureLog(t)
+
+	var events atomic.Int32
+	app.setEventEmitter(func(string) {
+		if events.Add(1) == 2 {
+			panic(fmt.Errorf("emitter panic carrying %s", key))
+		}
+	})
+	if err := app.startSync(true); err != nil {
+		t.Fatalf("startSync: %v", err)
+	}
+	waitForSyncWG(t, app)
+	assertIdleSync(t, app)
+	assertPanicLogScrubbed(t, logs.String(), key)
+}
+
 func TestGameActionsRequireActiveProfile(t *testing.T) {
 	app := newTestApp(t)
 	actions := map[string]func() (AppState, error){

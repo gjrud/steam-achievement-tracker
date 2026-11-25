@@ -1,5 +1,5 @@
 import {get} from 'svelte/store'
-import {cleanup, render, screen, waitFor} from '@testing-library/svelte'
+import {cleanup, fireEvent, render, screen, waitFor} from '@testing-library/svelte'
 import userEvent from '@testing-library/user-event'
 import {afterEach, describe, expect, test, vi} from 'vitest'
 import UpdateBanner from './UpdateBanner.svelte'
@@ -90,6 +90,15 @@ describe('UpdateBanner phases', () => {
     expect(__openedUrls()).toEqual([releaseURL])
   })
 
+  test('the release link click is cancelled, so the webview does not navigate to the release page', async () => {
+    await renderWith(availableSnapshot())
+
+    const notCancelled = await fireEvent.click(screen.getByRole('link', {name: 'Release notes'}))
+
+    expect(notCancelled).toBe(false)
+    await waitFor(() => expect(__openedUrls()).toEqual([releaseURL]))
+  })
+
   test('downloading with a known total shows a percentage and a determinate meter', async () => {
     await renderWith(updateSnapshot({phase: 'downloading', latest: latestRelease(), progress: {written: 50 * MB, total: 200 * MB}}))
 
@@ -130,7 +139,6 @@ describe('UpdateBanner phases', () => {
     expect(api.cancel).toHaveBeenCalledOnce()
     const canceling = await screen.findByRole('button', {name: 'Canceling…'})
     expect(canceling).toBeDisabled()
-    expect(screen.getByText('Downloading version 1.2.0', visible)).toHaveFocus()
     release()
   })
 
@@ -416,64 +424,7 @@ describe('UpdateBanner checking hold', () => {
   })
 })
 
-describe('UpdateBanner focus and live region', () => {
-  test('Install moves focus to the title when the download replaces the button', async () => {
-    const user = userEvent.setup()
-    let finish
-    const {setSnapshot} = await renderWith(availableSnapshot(), {
-      install: vi.fn(() => new Promise((resolve) => (finish = resolve)))
-    })
-
-    await user.click(await screen.findByRole('button', {name: 'Install'}))
-    setSnapshot(updateSnapshot({phase: 'downloading', latest: latestRelease()}))
-    __emitWailsEvent('update:changed')
-
-    expect(await screen.findByText('Downloading version 1.2.0', visible)).toHaveFocus()
-    finish()
-  })
-
-  test('Try again keeps focus on the title while the retry runs', async () => {
-    const user = userEvent.setup()
-    let finish
-    await renderWith(updateSnapshot({phase: 'error', error: 'Could not check for updates. Try again later.'}), {
-      check: vi.fn(() => new Promise((resolve) => (finish = resolve)))
-    })
-
-    await user.click(await screen.findByRole('button', {name: 'Try again'}))
-
-    expect(screen.getByText('Could not check for updates', visible)).toHaveFocus()
-    finish()
-  })
-
-  test('when a retry clears the banner, focus moves to the host rather than the removed title', async () => {
-    const user = userEvent.setup()
-    let finish
-    const {setSnapshot} = await renderWith(updateSnapshot({phase: 'error', error: 'Could not check for updates. Try again later.'}), {
-      check: vi.fn(() => new Promise((resolve) => (finish = resolve)))
-    })
-    const host = banner().parentElement
-
-    await user.click(await screen.findByRole('button', {name: 'Try again'}))
-    expect(screen.getByText('Could not check for updates', visible)).toHaveFocus()
-
-    setSnapshot(updateSnapshot({phase: 'up-to-date'}))
-    finish()
-
-    await waitFor(() => expect(banner()).not.toBeInTheDocument())
-    expect(document.activeElement).toBe(host)
-  })
-
-  test('Later moves focus to the host instead of dropping it to the body', async () => {
-    const user = userEvent.setup()
-    await renderWith(availableSnapshot())
-    const host = banner().parentElement
-
-    await user.click(await screen.findByRole('button', {name: 'Later'}))
-
-    expect(banner()).not.toBeInTheDocument()
-    expect(document.activeElement).toBe(host)
-  })
-
+describe('UpdateBanner live region', () => {
   test('the host is not a live region; the status region is the one persistent announcer', async () => {
     const {setSnapshot} = await renderWith(availableSnapshot())
     const host = banner().parentElement

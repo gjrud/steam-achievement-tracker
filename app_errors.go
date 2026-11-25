@@ -32,7 +32,9 @@ const (
 // Sentinels for app-level outcomes. They are usererr values, so userFacingError returns them unchanged and callers
 // can still match them with errors.Is.
 var (
-	// errSyncAlreadyInProgress is startSync's error for a forced start while a sync is running.
+	// errSyncAlreadyInProgress is startSync's error for a forced start while a sync is running. Its text is matched
+	// by syncAlreadyRunningMessage in frontend/src/lib/sync.js (checked by sync.test.js); change both together.
+	// Migration 3's syncTextSafeSentences (internal/db/db.go) also lists it but is frozen: do not edit it there.
 	errSyncAlreadyInProgress = usererr.New("A sync is already running. Try again when it finishes.")
 	// errShuttingDown is startSync's error once ServiceShutdown has cancelled the lifetime context. Wails shuts services
 	// down before it closes the windows, so the frontend can still call in while the repository is being closed.

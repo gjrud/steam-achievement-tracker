@@ -1,32 +1,31 @@
 <script>
-  import {onDestroy, onMount} from 'svelte'
-  export let confirmText = ''
-  export let inputValue = ''
-  export let clearing = false
-  export let onCancel = () => {}
-  // onConfirm receives {deleteProfileData, deleteAPIKey}. Both are false unless the user turns them on.
-  export let onConfirm = () => {}
+  import {onDestroy} from 'svelte'
+  let {
+    confirmText = '',
+    // Two-way with App (bind:inputValue): the confirmation field writes it.
+    inputValue = $bindable(''),
+    clearing = false,
+    onCancel = () => {},
+    // onConfirm receives {deleteProfileData, deleteAPIKey}. Both are false unless the user turns them on.
+    onConfirm = () => {}
+  } = $props()
 
   // Both toggles start off. App mounts this modal only while it is open, so each open starts from these defaults.
-  let deleteProfileData = false
-  let deleteAPIKey = false
-  let copied = false
-  let dialog = null
-  // The element that had focus when the modal opened. Focus goes back to it on close, if it is still in the page.
-  let returnFocus = null
+  let deleteProfileData = $state(false)
+  let deleteAPIKey = $state(false)
+  let copied = $state(false)
+  let copyTimer = null
+  let destroyed = false
 
-  $: canConfirm = inputValue === confirmText && !clearing
-  $: anySwitchOn = deleteProfileData || deleteAPIKey
-  $: confirmLabel = confirmButtonLabel(clearing, deleteProfileData, deleteAPIKey)
-  $: outcome = outcomeText(deleteProfileData, deleteAPIKey)
-
-  onMount(() => {
-    returnFocus = document.activeElement
-    dialog?.focus()
-  })
+  let canConfirm = $derived(inputValue === confirmText && !clearing)
+  let anySwitchOn = $derived(deleteProfileData || deleteAPIKey)
+  let confirmLabel = $derived(confirmButtonLabel(clearing, deleteProfileData, deleteAPIKey))
+  let outcome = $derived(outcomeText(deleteProfileData, deleteAPIKey))
 
   onDestroy(() => {
-    if (returnFocus instanceof HTMLElement && returnFocus.isConnected) returnFocus.focus()
+    destroyed = true
+    clearTimeout(copyTimer)
+    copyTimer = null
   })
 
   function confirmButtonLabel(busy, profileData, apiKey) {
@@ -52,22 +51,28 @@
   async function copyConfirmText() {
     try {
       await navigator.clipboard.writeText(confirmText)
+      // The modal may have closed while the write was pending.
+      if (destroyed) return
       copied = true
-      setTimeout(() => (copied = false), 1600)
+      clearTimeout(copyTimer)
+      copyTimer = setTimeout(() => {
+        copyTimer = null
+        copied = false
+      }, 1600)
     } catch {
-      copied = false
+      if (!destroyed) copied = false
     }
   }
 </script>
 
 <div class="modal-backdrop" role="presentation">
-  <div bind:this={dialog} class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="clear-data-title" tabindex="-1">
+  <div class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="clear-data-title" aria-describedby="clear-data-description">
     <div class="confirm-modal-head">
       <p class="eyebrow">Danger zone</p>
       <h2 id="clear-data-title">Remove active profile?</h2>
     </div>
 
-    <p class="muted">This removes the active profile from the app. Nothing else is deleted unless you turn it on.</p>
+    <p id="clear-data-description" class="muted">This removes the active profile from the app. Nothing else is deleted unless you turn it on.</p>
 
     <div class="setting-row">
       <input
@@ -105,7 +110,7 @@
       <span>Type this exact value to continue:</span>
       <div class="confirm-token-row">
         <code id="clear-data-token" class="confirm-token">{confirmText}</code>
-        <button class="confirm-token-copy" type="button" on:click={copyConfirmText} aria-label={copied ? 'Copied confirmation value' : 'Copy confirmation value'} title={copied ? 'Copied' : 'Copy'}>
+        <button class="confirm-token-copy" type="button" onclick={copyConfirmText} aria-label={copied ? 'Copied confirmation value' : 'Copy confirmation value'} title={copied ? 'Copied' : 'Copy'}>
           {#if copied}
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.3 5.7a1 1 0 0 1 0 1.4l-10 10a1 1 0 0 1-1.4 0l-5-5a1 1 0 1 1 1.4-1.4l4.3 4.29 9.3-9.29a1 1 0 0 1 1.4 0Z" /></svg>
           {:else}
@@ -125,12 +130,12 @@
       spellcheck="false"
       disabled={clearing}
       aria-describedby="clear-data-token"
-      on:keydown={(event) => event.key === 'Enter' && confirmClear()}
+      onkeydown={(event) => event.key === 'Enter' && confirmClear()}
     />
 
     <div class="confirm-actions">
-      <button class="secondary" on:click={onCancel} disabled={clearing}>Cancel</button>
-      <button class="danger" on:click={confirmClear} disabled={!canConfirm}>{confirmLabel}</button>
+      <button class="secondary" onclick={onCancel} disabled={clearing}>Cancel</button>
+      <button class="danger" onclick={confirmClear} disabled={!canConfirm}>{confirmLabel}</button>
     </div>
   </div>
 </div>

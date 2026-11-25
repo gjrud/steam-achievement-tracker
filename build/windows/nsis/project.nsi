@@ -194,6 +194,31 @@ Section "uninstall"
     Delete "$INSTDIR\${PRODUCT_EXECUTABLE}.old.*"
     Delete "$INSTDIR\${PRODUCT_EXECUTABLE}.bak"
 
+    # A failed or killed in-app update can leave a wails-update-* staging folder in $INSTDIR. A non-empty folder makes
+    # the RMDir below fail, so the install folder would stay behind. Sweep each such directory (names only, never
+    # recursive): delete the two payload names the updater writes into it, the download (.artifact, renamed after
+    # verification to the portable asset name) and the portable exe (*-windows-amd64-portable.exe, with or without the
+    # version in the name), then RMDir it without /r. Any other file inside keeps that folder. Names that are not
+    # directories are skipped. Residual risk: a reparse point (junction) named wails-update-* is not detected. The two
+    # name patterns apply inside its target, and RMDir then removes only the link, never the target's other contents
+    # (not verified on Windows). Creating one needs write access to $INSTDIR (the installing user in user scope, an
+    # admin in machine scope). Uses $R0 and $R1; nothing else in this section uses them.
+    FindFirst $R0 $R1 "$INSTDIR\wails-update-*"
+    wu_loop:
+        StrCmp $R1 "" wu_done
+        StrCmp $R1 "." wu_next
+        StrCmp $R1 ".." wu_next
+        IfFileExists "$INSTDIR\$R1\*.*" wu_clean wu_next
+    wu_clean:
+        Delete "$INSTDIR\$R1\.artifact"
+        Delete "$INSTDIR\$R1\*-windows-amd64-portable.exe"
+        RMDir "$INSTDIR\$R1"
+    wu_next:
+        FindNext $R0 $R1
+        Goto wu_loop
+    wu_done:
+        FindClose $R0
+
     # Non-recursive: removes $INSTDIR only if it is now empty. Runs after uninstall.exe is deleted.
     RMDir "$INSTDIR"
 
@@ -210,6 +235,6 @@ Section "uninstall"
     #
     # The WebView2 profile moved from Wails' default %AppData%\<exe name> to the cache directory (main.go). Installs
     # made before that move leave an orphaned %AppData%\<exe name> folder (browser state only, no user data). It is
-    # not removed here: the folder name is the exe name of the version that created it, and releases rename the exe
-    # per version, so this uninstaller cannot reliably find it.
+    # not removed here: the folder name is the exe name of the version that created it, and older releases named the
+    # portable exe per version, so this uninstaller cannot reliably find it.
 SectionEnd

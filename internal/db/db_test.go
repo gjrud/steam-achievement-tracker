@@ -28,11 +28,9 @@ func TestOpenAndMigrateFreshDB(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 3)
-	assertMigration(t, conn, 1)
-	assertMigration(t, conn, 2)
-	assertMigration(t, conn, 3)
-	assertCount(t, conn, `select count(*) from schema_migrations`, 3)
+	assertUserVersion(t, conn, latestVersion())
+	assertAllMigrationsRecorded(t, conn)
+	assertCount(t, conn, `select count(*) from schema_migrations`, latestVersion())
 	assertCount(t, conn, `select count(*) from schema_migrations where version=1 and name='initial_schema'`, 1)
 	assertTableList(t, conn, currentTables)
 	assertColumns(t, conn, "games", gamesColumns)
@@ -113,10 +111,8 @@ func TestOpenAndMigrateUnversionedDBWithTablesIsBackedUp(t *testing.T) {
 	}
 	defer conn.Close()
 
-	assertUserVersion(t, conn, 3)
-	assertMigration(t, conn, 1)
-	assertMigration(t, conn, 2)
-	assertMigration(t, conn, 3)
+	assertUserVersion(t, conn, latestVersion())
+	assertAllMigrationsRecorded(t, conn)
 	assertTable(t, conn, "profile_games")
 	assertCount(t, conn, `select count(*) from other where id=7`, 1)
 	entries := backupFiles(t, paths)
@@ -125,7 +121,7 @@ func TestOpenAndMigrateUnversionedDBWithTablesIsBackedUp(t *testing.T) {
 	}
 	backup := openRawDB(t, entries[0])
 	assertUserVersion(t, backup, 0)
-	if tableExists(backup, "profile_games") {
+	if mustTableExists(t, backup, "profile_games") {
 		t.Fatal("backup has the baseline tables, want the pre-migration snapshot")
 	}
 }
@@ -158,7 +154,7 @@ func TestOpenAndMigrateExistingDBBackupContainsOriginalData(t *testing.T) {
 	}
 	defer backup.Close()
 	assertUserVersion(t, backup, 1)
-	if tableExists(backup, "migration_probe") {
+	if mustTableExists(t, backup, "migration_probe") {
 		t.Fatal("backup has migration_probe, want pre-migration snapshot")
 	}
 	assertCount(t, backup, `select count(*) from profiles where steam_id64='11111111111111111' and display_name='User One'`, 1)
@@ -220,8 +216,26 @@ func assertUserVersion(t *testing.T, conn *sql.DB, want int) {
 
 func assertTable(t *testing.T, conn *sql.DB, name string) {
 	t.Helper()
-	if !tableExists(conn, name) {
+	if !mustTableExists(t, conn, name) {
 		t.Fatalf("table %s does not exist", name)
+	}
+}
+
+// mustTableExists is tableExists for tests: a query error fails the test instead of reading as "absent".
+func mustTableExists(t *testing.T, conn *sql.DB, name string) bool {
+	t.Helper()
+	ok, err := tableExists(conn, name)
+	if err != nil {
+		t.Fatalf("check table %s: %v", name, err)
+	}
+	return ok
+}
+
+// assertAllMigrationsRecorded checks that every migration in the list has a schema_migrations row.
+func assertAllMigrationsRecorded(t *testing.T, conn *sql.DB) {
+	t.Helper()
+	for _, m := range migrations {
+		assertMigration(t, conn, m.version)
 	}
 }
 

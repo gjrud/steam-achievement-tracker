@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"time"
@@ -69,6 +70,9 @@ type App struct {
 	apiKeyError    string
 	syncInProgress bool
 	syncCancel     context.CancelFunc
+	// clearing is set while clearActiveUserData runs, from before its sync cancel until it returns. While it is set, no
+	// sync starts: startSync checks it in the same critical section as syncInProgress. Only one clear runs at a time.
+	clearing bool
 	// syncProfileID, syncBaselineRunID and syncBaselineKnown describe the current sync. syncBaselineRunID is the
 	// profile's latest sync run id when the sync started, valid only while syncBaselineKnown is set. A later run of
 	// the same profile with a higher id is the current sync's own run.
@@ -405,6 +409,12 @@ func (a *App) clearActiveUserData(deleteProfileData, deleteAPIKey bool) (AppStat
 	if err := a.ensureInitialized(); err != nil {
 		return AppState{}, err
 	}
+	// The gate is taken before the sync is cancelled, so no sync can start between cancelSyncAndWait and the profile
+	// changes below. The gate is released on every return path.
+	if err := a.beginClear(); err != nil {
+		return AppState{}, err
+	}
+	defer a.endClear()
 	a.cancelSyncAndWait()
 	repo, profile, err := a.activeRepoAndProfile()
 	if err != nil {
@@ -642,6 +652,16 @@ func (a *App) startSync(force bool) error {
 		cancel()
 		return errShuttingDown
 	}
+	// A clear is running (see clearActiveUserData): it has cancelled or is waiting out any sync, and it changes the
+	// profile. No sync starts. An explicit start is refused; a background start is a quiet no-op.
+	if a.clearing {
+		a.mu.Unlock()
+		cancel()
+		if force {
+			return errSyncAlreadyInProgress
+		}
+		return nil
+	}
 	if a.syncInProgress && !force {
 		a.mu.Unlock()
 		cancel()
@@ -710,6 +730,8 @@ func (a *App) startSync(force bool) error {
 	started = true
 	go func(p repository.Profile) {
 		defer done()
+		// Deferred after done, so it runs first: a panic is logged here and the goroutine still ends the sync.
+		defer logSyncPanic()
 		service := syncer.Service{Repo: repo, Steam: client, Images: images.New(paths), OnChange: a.emitSyncChanged}
 		if _, err := service.FullSync(syncCtx, p); err != nil {
 			log.Printf("full sync failed: %s", logText(err))
@@ -799,6 +821,31 @@ func logStartSyncError(err error) {
 	log.Printf("start sync: %s", logText(err))
 }
 
+// errClearAlreadyInProgress is returned by a clear that starts while another one runs. It reuses the generic sentence,
+// so no new user text is added; the cause is kept for the log only, which records the second clear.
+var errClearAlreadyInProgress = usererr.Wrap(msgGeneric, errors.New("a clear of the active profile is already running"))
+
+// beginClear sets the clearing gate. It fails when another clear holds it. It takes only mu, so the caller may hold no
+// lock and it never waits on a sync.
+func (a *App) beginClear() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.clearing {
+		return errClearAlreadyInProgress
+	}
+	a.clearing = true
+	return nil
+}
+
+// endClear releases the clearing gate set by beginClear.
+func (a *App) endClear() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.clearing = false
+}
+
+// cancelSyncAndWait cancels the running sync, if any, and waits for it to end. It is called with the clearing gate
+// held, so no new sync can start while it waits. mu is not held while it waits: the sync's endSync takes mu.
 func (a *App) cancelSyncAndWait() {
 	a.mu.Lock()
 	cancel := a.syncCancel
@@ -806,6 +853,14 @@ func (a *App) cancelSyncAndWait() {
 	if cancel != nil {
 		cancel()
 		a.syncWG.Wait()
+	}
+}
+
+// logSyncPanic is deferred by the sync goroutine. It logs a panic that reached the goroutine, with secrets scrubbed,
+// and returns normally, so the goroutine's done still ends the sync. Deferred after done, it runs first.
+func logSyncPanic() {
+	if r := recover(); r != nil {
+		log.Printf("full sync: panic: %s\n%s", logText(panicError(r)), steam.RedactSecrets(string(debug.Stack())))
 	}
 }
 

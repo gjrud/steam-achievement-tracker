@@ -55,9 +55,10 @@
     flex-wrap: wrap;
   }
 
-  /* Native paint is dropped (WebKitGTK draws its own focus treatment under auto appearance), so every input shows one
-     accent border and a thin ring. Checkboxes reset this in the switch rules (.setting-row input[type="checkbox"]).
-     Unverified in WebKit. */
+  /* Native paint and the UA focus outline are dropped (WebKitGTK draws its own focus treatment under auto
+     appearance). Focus: accent border + 1px same-colour spread shadow = one solid 2px ring that follows the radius
+     and takes no layout space. Keep the shadow opaque: a translucent halo blends with the dark page into a grey
+     band. Switches reset this (.setting-row input[type="checkbox"]). */
   input {
     flex: 1 1 340px;
     min-width: 0;
@@ -74,7 +75,7 @@
 
   input:focus {
     border-color: #66c0f4;
-    box-shadow: 0 0 0 2px rgba(102, 192, 244, 0.25);
+    box-shadow: 0 0 0 1px #66c0f4;
   }
 
   input:disabled {
@@ -841,34 +842,67 @@
     flex-wrap: wrap;
   }
 
-  .search-input {
+  .search-field {
+    position: relative;
     flex: 1 1 320px;
     min-width: 0;
-    padding: 11px 14px;
+  }
+
+  /* Right padding keeps text out from under the clear button (24px hit box + 8px inset + a little air). The fixed
+     line-height makes the height deterministic (20 + 22 padding + 2 border = 44px) so .search-clear can sit at a whole
+     pixel offset: (44 - 24) / 2 = 10px. */
+  .search-input {
+    display: block;
+    width: 100%;
+    padding: 11px 40px 11px 14px;
+    line-height: 20px;
     border: 1px solid #2d4560;
     border-radius: 12px;
     color: #e8f3ff;
     background: #101c2a;
   }
 
-  /* type=search: the global input rule drops its native paint and sets the focus ring. These pseudo-elements are the
-     search-only parts (the native decoration and the clear button). */
+  /* type=search: the global input rule drops its native paint and sets the focus ring. The native decoration and clear
+     button are hidden so no engine paints a second clear icon next to .search-clear. */
   .search-input::-webkit-search-decoration,
   .search-input::-webkit-search-cancel-button {
-    -webkit-appearance: none;
-    appearance: none;
+    display: none;
   }
 
-  .search-input::-webkit-search-cancel-button {
-    height: 14px;
-    width: 14px;
-    margin-left: 8px;
-    cursor: pointer;
-    background: center / contain no-repeat url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14' stroke='%238aa4bd' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M3 3l8 8M11 3l-8 8'/%3E%3C/svg%3E");
+  /* 24x24 hit area around a 16px icon. The global button hover lift and brightness filter are cancelled (same reason as
+     .title-bar button and .link-button: no compositor layer churn next to the blurred covers). The (0,5,1) selector
+     beats the global hover rule (0,4,1). */
+  .search-clear {
+    position: absolute;
+    top: 10px;
+    right: 8px;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border-radius: 6px;
+    color: #8aa4bd;
+    background: transparent;
+    transition: color 120ms ease, background 120ms ease;
   }
 
-  .search-input::-webkit-search-cancel-button:hover {
-    filter: brightness(1.4);
+  .search-clear svg {
+    display: block;
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.75;
+    stroke-linecap: round;
+    shape-rendering: geometricPrecision;
+  }
+
+  button.search-clear:hover:not(:disabled):not(.primary):not(.danger) {
+    color: #e8f3ff;
+    background: rgba(102, 192, 244, 0.16);
+    filter: none;
+    transform: none;
   }
 
   .tag-filter-panel,
@@ -1446,12 +1480,12 @@
     background: #e8f3ff;
   }
 
-  /* The global input:focus ring is for text fields. Switches only show a ring for keyboard focus. */
+  /* The global input:focus ring is for text fields. Switches show their own focus ring (focus-visible, below). */
   .setting-row input[type="checkbox"]:focus {
     box-shadow: none;
   }
 
-  /* Solid accent outline, offset from the switch, so the keyboard ring stays visible in both ON and OFF states. */
+  /* Solid accent outline, offset from the switch, so the focus ring stays visible in both ON and OFF states. */
   .setting-row input[type="checkbox"]:focus-visible {
     outline: 2px solid #66c0f4;
     outline-offset: 2px;
@@ -1593,12 +1627,6 @@
     }
   }
 
-  /* Focus moves here after a click replaces its button; the title and the live region are not controls, so no ring. */
-  .update-host:focus,
-  .update-title:focus {
-    outline: none;
-  }
-
   @media (prefers-reduced-motion: reduce) {
     /* No motion: a striped track, not a solid bar, so the meter does not read as complete. */
     .update-meter.indeterminate .update-meter-fill {
@@ -1671,11 +1699,6 @@
     border: 1px solid #2d4560;
     box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48);
     text-align: left;
-  }
-
-  /* Focused on open so Escape and Tab start inside the dialog. The dialog is a container, so it draws no ring. */
-  .confirm-modal:focus {
-    outline: none;
   }
 
   .confirm-modal-head h2 {

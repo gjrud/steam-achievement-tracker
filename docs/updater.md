@@ -47,7 +47,7 @@ To test the updater locally, stamp a build with an old version. On Windows: `VER
 | `HTTPClient` | the app's client (below) |
 | `BaseURL` | empty in production; tests set it to an `httptest` server |
 
-The GitHub provider requests `GET /repos/{owner}/{repo}/releases/latest`. A 404 counts as "no release". The provider also fetches `SHA256SUMS` when a newer release exists. A check therefore costs up to two API requests. The download goes to `api.github.com/repos/{owner}/{repo}/releases/assets/{id}` with `Accept: application/octet-stream`, and GitHub redirects it to its storage host. The framework strips `Authorization` on a host change; the app sends no token.
+The GitHub provider requests `GET /repos/{owner}/{repo}/releases/latest`. A 404 counts as "no release". The provider also fetches `SHA256SUMS` when a newer release exists. A check therefore costs up to two API requests. The download goes to `api.github.com/repos/{owner}/{repo}/releases/assets/{id}` with `Accept: application/octet-stream`, and GitHub redirects it to its storage host. The provider strips `Authorization` on a host change for the `SHA256SUMS` and asset requests; the app sends no token.
 
 ## Network
 
@@ -67,8 +67,12 @@ The app's client (`newHTTPClient`) has these limits:
 | Response header timeout | 30 s |
 | Total timeout | none |
 | Idle connection timeout | 90 s |
+| Redirects | `https` only, at most 10 requests, i.e. 9 redirects, Go's default (`checkRedirect`). A redirect to plain `http`, or one that would be the 11th request, fails the request. The first request may be any scheme, and the stubs in tests use `http`. |
+| Response body | at most 512 MiB (`maxDownloadBytes`) for every response: the release JSON, `SHA256SUMS` and the asset. A declared length over the cap is refused before any byte is read. A body that grows past it fails the read. Exactly the cap is allowed. |
 
 There is no total timeout, so a large asset on a slow link is not cut off. Cancel and app shutdown end a download. A check has its own timeout (`checkTimeout`, 60 s) that covers both of its API requests. The framework's default client has a 30 s total timeout that would fail large downloads, so the app passes its own client.
+
+The size cap and the redirect rule are the client's own policy, and they apply to every request the client makes: the release JSON and `SHA256SUMS` of a check (and of an Install's re-check), and the asset download. For `SHA256SUMS` and the asset, the provider's redirect wrapper first strips `Authorization` on a host change, then calls the client's redirect check; the release JSON request uses the client directly. A refused redirect or an over-cap body ends that operation as a failure. On a check or a re-check it is the `check-failed` category, and during an Install's re-check the phase goes to `available` with the check sentence, not to `error`. On the asset download it is the `download-failed` category (see [Errors and logging](#errors-and-logging)).
 
 ## Phases
 
@@ -90,7 +94,8 @@ Transitions:
 | `error` | Install (after a failed download) | `downloading` | Retry. |
 | `downloading` | framework `verifying`, then `installing` | `verifying`, `installing` | Framework events, see below. |
 | `downloading`, `verifying`, `installing` | framework finishes | `ready` | The payload is staged. A cancel during verification or installation that the framework completes also ends here. |
-| `downloading`, `verifying`, `installing` | download fails | `error` | Download, verification or folder sentence. |
+| `downloading`, `verifying`, `installing` | download fails | `error` | Download, verification or folder sentence. A failed download leaves no staged folder: the framework removes it (see [Errors and logging](#errors-and-logging)). |
+| `downloading`, `verifying`, `installing` | app shutdown during `verifying` or `installing`, then the framework finishes | `idle` | The framework does not stop these steps, so the install ends with success. Its staged folder is removed and the phase is not `ready` (see [Shutdown and restart safety](#shutdown-and-restart-safety)). |
 | `downloading` | cancel stops the download | `available` | Cancel never sets `error`. A cancel during verification or installation is not stopped by the framework and ends in `ready` (row above). |
 | `downloading` | re-check finds nothing newer | `up-to-date` | The cached release is cleared. This also applies when Cancel was pressed, as long as the re-check itself completed. |
 | `downloading` | re-check finds a newer or unsafe release, a Cancel that aborts the re-check or came after it found a release, or a failed re-check | `available` | A failed re-check also sets the check sentence in the snapshot's `error` field. |
@@ -154,7 +159,7 @@ A refusal makes the release notify-only. The banner then shows the reason and th
 
 | Platform | Asset |
 | --- | --- |
-| Windows amd64 | the asset whose name ends with `-windows-amd64-portable.exe` (for example `steam-achievement-tracker-<version>-windows-amd64-portable.exe`). The installer and any package are never chosen. |
+| Windows amd64 | the asset whose name ends with `-windows-amd64-portable.exe`: `steam-achievement-tracker-windows-amd64-portable.exe` from the first release after v1.2.1 on (no version in the name), and `steam-achievement-tracker-<version>-windows-amd64-portable.exe` in earlier releases. The suffix matches both. The installer and any package are never chosen. |
 | Linux amd64 | exactly `steam-achievement-tracker-linux-x86_64.AppImage`. The release job renames the AppImage to this name before it writes `SHA256SUMS`. |
 | Anything else | none (-1) |
 
@@ -199,14 +204,16 @@ Categories (`errors.go`):
 
 | Category | When | Log line | UI sentence |
 | --- | --- | --- | --- |
-| `check-failed` | check or re-check fails (network, API, bad version) | `update: check failed: check-failed` (manual), `update: startup check failed: check-failed` (startup), or `update: install: check-failed` (re-check during Install) | "Could not check for updates. Try again later." |
+| `check-failed` | check or re-check fails (network, API, bad version), including an over-cap or refused-redirect response for the release JSON or `SHA256SUMS` | `update: check failed: check-failed` (manual), `update: startup check failed: check-failed` (startup), or `update: install: check-failed` (re-check during Install) | "Could not check for updates. Try again later." |
 | `cancelled` | the user cancelled an install, or the app shut down during one | `update: install: cancelled` (a category only, not a failure) | no sentence |
 | `not-writable` | the staging step returns a permission error (`fs.ErrPermission`) | `update: install: not-writable` | "The app folder is not writable, so the update cannot be installed here. Download the new version from the release page." |
-| `download-failed` | download, checksum or staging fails for any other reason | `update: install: download-failed` | "The update could not be downloaded or verified. Try again." |
+| `download-failed` | download, checksum or staging fails for any other reason, including an asset response over the 512 MiB cap (`errTooLarge`) and a refused redirect on the asset download | `update: install: download-failed` | "The update could not be downloaded or verified. Try again." |
 | `restart-failed` | `Restart` returns an error | `update: restart: restart-failed` | "The app could not restart into the update. The update is still ready, so you can try Restart again." |
 | `other` | anything else, including a failed `Updater.Init` and the staged-folder removal at shutdown | `update: unavailable: other`, `update: remove staged update: other` | `The update failed. Try again later.` (`msgOther`). No current path shows it: a failed `Init` gives the unavailable sentence, and the shutdown removal shows nothing. |
 
 Precedence for a download or install step: our own cancel flag or a cancelled context wins (`cancelled`); then a permission error (`not-writable`); then `download-failed`. The framework's error text is never read beyond the `fs.ErrPermission` check. A cancel after `DownloadAndInstall` returned nil, or during verification and installation (which the framework does not check the context in), ends in `ready`.
+
+A failed download needs no cleanup from the app. The framework removes its own staging folder (`wails-update-*`, with the partial file in it) before `DownloadAndInstall` returns an error, for any download error: a network failure, an over-cap body, a refused redirect or a failed checksum. The app's code never removes a partial file during a download.
 
 Other sentences the update service returns (not categories): unavailable ("Updates are not available in this build."), busy, ready-first, not-ready, check-first.
 
@@ -230,18 +237,20 @@ Log lines never contain a full path. Framework messages such as `ErrHelperNotRea
 `App.ServiceShutdown` (`app.go`) runs in this order:
 
 1. Cancels the app lifetime context. Checks and installs derive from it, so they stop.
-2. `Service.Shutdown`: marks the service stopped (so no more `update:changed` events), cancels a running install, unsubscribes from framework events, and, if the phase is `ready`, moves it to `idle`, drops the latest release, and removes the staged folder. Nothing is removed while `restarting`, because the helper owns that folder.
+2. `Service.Shutdown`: marks the service stopped (so no more `update:changed` events), sets the shutdown flag, cancels a running install, unsubscribes from framework events, and, if the phase is `ready`, moves it to `idle`, drops the latest release, and removes the staged folder. Nothing is removed while `restarting`, because the helper owns that folder. A shutdown during an install's `verifying` or `installing` step does not wait: the install itself ends the same way (see below).
 3. Cancels any running sync.
 4. Waits for syncs for at most `syncShutdownWait` (10 s), then logs a warning and continues. The wait is bounded so that a restart (which the helper gives 30 s to exit) cannot time out and relaunch the old version.
 5. Closes the database.
 
 `Shutdown` never waits on an operation. The staged folder is removed by `fsretry.RemoveAll` on `filepath.Dir(Updater.DownloadedPath())`, and only when the directory name starts with `wails-update-`.
 
+The framework does not check the install context while it verifies and installs, so a shutdown can land in that step. Shutdown then sees no `ready` phase and removes nothing, and the install ends with the framework's success. The success path (`finishStaged`) reads the shutdown flag under the same state lock as its transition, so the two orders are both covered: a shutdown before the transition makes the install end in `idle`, not `ready`, and removes the folder after the lock is released; a shutdown after it finds `ready` and removes the folder. A Cancel during verification or installation sets the cancel flag, but the framework does not stop those steps: if it completes them, the install still ends in `ready` and keeps the folder. A Cancel after `ready` is a no-op. The shutdown test runs the real framework against a local stub (`TestShutdownDuringFinaliseRemovesStagedUpdate`).
+
 Consequences:
 
 - A restart cancels a running sync. The sync normally ends in time and its run is recorded as `failed` (see [architecture.md](architecture.md#shutdown)). If it outlives the 10 s bound, the database closes first, so its run row stays `running`. The next start marks it `canceled` (shown as "Sync canceled"). The "Restart now" banner says so.
 - A restart does not lose data: the database closes after the bounded wait, and the new process opens it normally.
-- Closing the app without applying a staged update removes the staged folder, so no full-size copy of the update stays next to the exe or the AppImage.
+- Closing the app without applying a staged update removes the staged folder, so no full-size copy of the update stays next to the exe or the AppImage. This includes closing the app while an install is still verifying or installing: that folder is removed when the install finishes, not left for the startup sweep.
 
 ## After an update
 
@@ -259,27 +268,27 @@ The framework creates a `wails-update-*` directory next to the target (the exe o
 | `<target>.bak` (next to the AppImage on Linux, next to the exe on Windows) | the helper's copy of the previous version. The successful path deletes it, and a restore renames it back. It stays when the helper stops mid-update or a restore fails. |
 | `<exe>.old.<UnixNano>` (Windows, next to the exe) | every successful Windows update while the old file is still in use. A later update's helper, or the app at its next start, removes them when Windows allows. |
 | a `wails-update-*` directory next to the target | a helper failure, a crash or a kill during an update. A staged update that was never applied is removed at shutdown. |
-| `wails-update-<pid>.log` in the OS temp directory | every update attempt that starts the helper. It holds full paths, usually including the OS user name. The framework never removes it; the app does at a later start, once the log is more than 10 minutes old (see below). |
+| `wails-update-<pid>.log` in the OS temp directory | every update attempt that starts the helper. It holds full paths, usually including the OS user name. The framework never removes it; the app does at a later start, once the log is more than 24 hours old (see below). |
 
 The startup sweep (`sweepLeftovers`) runs once per start, five seconds after startup (`cleanupDelay`). The delay lets the helper finish its own cleanup of `.bak` and the staging folder first. Each candidate is checked before it is removed:
 
-- `<target>.bak`: a regular file or symlink, never a directory, last modified more than 10 minutes ago (`leftoverMinAge`).
+- `<target>.bak`: a regular file or symlink, never a directory, last modified more than 24 hours ago (`leftoverMinAge`).
 - on Windows only, `<exe>.old.<digits>` regular files next to the exe. The `<exe>.old.` part matches in any letter case, and the rest must be one or more ASCII digits; any other name stays. There is no age limit: Windows keeps the file until the old process has exited, and its mtime is the old build's time.
-- `wails-update-*` folders next to the target. A folder is removed only when it is flat (regular files only, no subfolders and no symlinks) and neither the folder nor any file in it was changed in the last 10 minutes. It is never the folder that holds the staged payload, and none is removed while an update is downloading, verifying, installing, ready or restarting.
-- `wails-update-<digits>.log` regular files in the OS temp directory (the name must match exactly), once the log was last written more than 10 minutes ago (`leftoverMinAge`). A log from a failed update is therefore removed at the first start at least 10 minutes after it was written; a restart sooner keeps it. The sweep skips the temp logs while the phase is `restarting`, because that log belongs to the live helper.
+- `wails-update-*` folders next to the target. A folder is removed only when it is flat (regular files only, no subfolders and no symlinks) and neither the folder nor any file in it was changed in the last 24 hours. It is never the folder that holds the staged payload, and none is removed while an update is downloading, verifying, installing, ready or restarting.
+- `wails-update-<digits>.log` regular files in the OS temp directory (the name must match exactly), once the log was last written more than 24 hours ago (`leftoverMinAge`). A log from a failed update is therefore removed at the first start more than 24 hours after it was written; a restart sooner keeps it. The sweep skips the temp logs while the phase is `restarting`, because that log belongs to the live helper.
 
-The age and shape checks cover a second instance of the app. There is no single-instance lock, and the target folder can be shared with another app. A concurrent update writes its files continuously, so its in-flight `.bak` and staging folder are young and are left alone. A folder that fails a check is skipped silently, and so is a file that vanished before its removal, or a temp log that another user owns (sticky `/tmp`). Those are not failures.
+The age and shape checks cover another app that shares the target folder and an updater helper still running from a previous start. The app itself runs as a single instance (see [platform.md](platform.md#single-instance)). A concurrent update writes its files continuously, so its in-flight `.bak` and staging folder are young and are left alone. A folder that fails a check is skipped silently, and so is a file that vanished before its removal, or a temp log that another user owns (sticky `/tmp`). Those are not failures.
 
 The sweep never removes the target and never removes a tree. For a staging folder that passes the checks, it lists the folder's entries once, removes each listed file by name, then removes the folder with a non-recursive remove. A file added after the listing makes that last remove fail, so the folder and the new file stay and the failure is counted. If a listed file cannot be removed, the folder is not attempted. The sweep does nothing on a Linux package install (no target). Its log lines are counts only (see [Errors and logging](#errors-and-logging)). Nothing is logged when nothing is found.
 
-A leftover `wails-update-*` directory inside the Windows install folder makes the NSIS uninstaller's non-recursive `RMDir "$INSTDIR"` fail, so the install folder stays (see [platform.md](platform.md#updater-leftovers)). The startup sweep removes such a folder at a later start, once it is flat and unchanged for 10 minutes (rules above).
+The NSIS uninstaller deletes `.artifact` and `*-windows-amd64-portable.exe` from each leftover `wails-update-*` directory inside the Windows install folder, then removes the directory with a non-recursive `RMDir`. Any other entry (file or subfolder) keeps that directory, and so keeps the install folder (see [platform.md](platform.md#updater-leftovers)). While the app stays installed, the startup sweep removes such a folder at a later start, once it is flat and unchanged for 24 hours (rules above).
 
 ## Known limitations
 
 - Update authenticity is not checked. The update is integrity-checked against a sums file from the same release.
 - No rollback for a new version that starts and then crashes. Reinstall the same or a newer version. An older build refuses a database stamped with a newer schema (`internal/db`), so do not reinstall an older version after a newer one has run.
 - A machine-wide (HKLM) install is not supported by the updater, so its Apps & Features entry is never changed.
-- Portable exes keep their versioned download name (`...-<old>-windows-amd64-portable.exe`), so their name shows the old version. The AppImage asset name has no version, so it is unaffected unless the user renamed the file.
+- The first release after v1.2.1 names the portable exe without a version (`steam-achievement-tracker-windows-amd64-portable.exe`), so a self-updated file keeps a stable name. A portable file that already carries a version in its name (`...-<old>-windows-amd64-portable.exe`) keeps that name after an update, because the updater never renames the file. Rename it by hand once (close the app first; renaming breaks taskbar pins and shortcuts that point to the old name). Data, settings and the API key are not tied to the file name.
 - Unauthenticated GitHub rate limit: 60 requests per hour per IP. A check costs up to two requests. An Install costs a re-check (up to two) plus the download (one).
 - Installs into a folder that is not writable (for example a machine-wide Windows install) fail at download with the not-writable sentence and the release link. There is no probe before the download.
 - Linux non-AppImage installs, including packages in `/usr/local/bin`, are notify-only.

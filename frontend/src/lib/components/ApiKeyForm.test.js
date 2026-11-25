@@ -106,6 +106,17 @@ describe('ApiKeyForm', () => {
     expect(onSave).toHaveBeenCalledWith('abc123')
   })
 
+  test('the form submit is cancelled, so a Save never reloads the webview', async () => {
+    const onSave = vi.fn(async () => {})
+    render(ApiKeyForm, {props: {onSave}})
+    await userEvent.setup().type(keyField(), 'abc123')
+
+    const notCancelled = await fireEvent.submit(keyField().closest('form'))
+
+    expect(notCancelled).toBe(false)
+    expect(onSave).toHaveBeenCalledWith('abc123')
+  })
+
   test('Enter in the field submits the trimmed key', async () => {
     const user = userEvent.setup()
     const onSave = vi.fn(async () => {})

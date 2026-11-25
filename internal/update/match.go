@@ -20,7 +20,10 @@ const (
 	// linuxAppImage is the release asset the Linux updater selects. The release job renames the AppImage to this name
 	// before it writes SHA256SUMS.
 	linuxAppImage = "steam-achievement-tracker-linux-x86_64.AppImage"
-	// windowsPortableSuffix matches the portable exe, whose name carries the version (-<version>-windows-amd64-portable.exe).
+	// windowsPortableSuffix matches the portable exe. The first release after v1.2.1 publishes it unversioned
+	// (steam-achievement-tracker-windows-amd64-portable.exe); earlier releases carry the version
+	// (steam-achievement-tracker-<version>-windows-amd64-portable.exe). The suffix matches both, so keep it: an exact
+	// name would stop matching the versioned releases. A self-updated file keeps the name it had.
 	windowsPortableSuffix = "-windows-amd64-portable.exe"
 )
 

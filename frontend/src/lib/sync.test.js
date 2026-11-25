@@ -1,6 +1,10 @@
+import {readFileSync} from 'node:fs'
+import {dirname, resolve} from 'node:path'
+import {fileURLToPath} from 'node:url'
 import {describe, expect, test} from 'vitest'
 import {formatDateTime, integer} from './format.js'
-import {syncBand} from './sync.js'
+import {isSyncAlreadyRunningError, syncAlreadyRunningMessage, syncBand} from './sync.js'
+import {RuntimeError} from '../test/wails-runtime-mock.js'
 
 const startedAt = '2026-05-22T10:00:00Z'
 const finishedAt = '2026-05-22T10:05:00Z'
@@ -220,5 +224,35 @@ describe('syncBand', () => {
       announce: 'Last sync: weird'
     })
     expect(syncBand({...run, status: ''}, false, NOW)).toMatchObject({tone: 'none', icon: 'stop', headline: 'Unknown'})
+  })
+})
+
+describe('isSyncAlreadyRunningError', () => {
+  test('matches the backend refusal for an overlapping SyncNow', () => {
+    expect(isSyncAlreadyRunningError(new RuntimeError(syncAlreadyRunningMessage))).toBe(true)
+  })
+
+  test('does not match other backend errors or plain JavaScript errors with the same text', () => {
+    expect(isSyncAlreadyRunningError(new RuntimeError('Steam is unreachable'))).toBe(false)
+    expect(isSyncAlreadyRunningError(new Error(syncAlreadyRunningMessage))).toBe(false)
+    expect(isSyncAlreadyRunningError(undefined)).toBe(false)
+  })
+
+  // The frontend matches the backend's sentence exactly, so a Go rewording would silently stop the match. This test
+  // fails first and names both sides.
+  test('the Go sentence for an overlapping start is the one isSyncAlreadyRunningError matches', () => {
+    // Not `new URL('../../../app_errors.go', import.meta.url)`: Vite rewrites that literal into an /@fs/ http URL under
+    // vitest, which node:fs refuses. From the file path, ../../../ is the repository root (frontend/src/lib/).
+    // The match is on the declaration itself (errSyncAlreadyInProgress = usererr.New("...")), not the bare sentence,
+    // so a copy of the text in a comment cannot satisfy it: the line must start with the name (after indentation).
+    const goSource = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../app_errors.go'), 'utf8')
+    // gofmt pads the `=` of aligned declarations, so the whitespace around it is not fixed.
+    const escaped = syncAlreadyRunningMessage.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const declaration = new RegExp(`^\\s*errSyncAlreadyInProgress\\s*=\\s*usererr\\.New\\("${escaped}"\\)`, 'm')
+    expect(
+      declaration.test(goSource),
+      `app_errors.go no longer declares errSyncAlreadyInProgress = usererr.New("${syncAlreadyRunningMessage}"). Update syncAlreadyRunningMessage in frontend/src/lib/sync.js ` +
+        'to match the Go sentence.'
+    ).toBe(true)
   })
 })

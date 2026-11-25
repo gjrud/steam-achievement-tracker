@@ -13,7 +13,15 @@ export default defineConfig(({mode}) => ({
     port: Number(process.env.WAILS_VITE_PORT) || 9245,
     strictPort: true
   },
-  plugins: [svelte()],
+  // Runes forced for project files so legacy files fail to compile (export let, $:, $$props are errors).
+  // on: and <slot> only warn; runes-only.test.js fails on those.
+  plugins: [
+    svelte({
+      dynamicCompileOptions({filename}) {
+        if (!/(^|[\\/])node_modules[\\/]/.test(filename)) return {runes: true}
+      }
+    })
+  ],
   resolve: {
     ...(mode === 'test' ? {conditions: ['browser']} : {}),
     alias: mode === 'test'

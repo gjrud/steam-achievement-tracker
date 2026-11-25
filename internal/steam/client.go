@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gjrud/steam-achievement-tracker/internal/usererr"
 )
@@ -32,6 +33,9 @@ type Client struct {
 	ExcludePlayedFreeGames bool
 
 	retryBackoff func(attempt int) time.Duration
+	// retrySleep waits d before a retry, or returns ctx.Err() when ctx is done first. nil uses a timer.
+	// Tests replace it to check Retry-After waits without sleeping.
+	retrySleep func(ctx context.Context, d time.Duration) error
 }
 
 type PlayerSummary struct {
@@ -141,6 +145,22 @@ func (c *Client) inputContainsAPIKey(input string) bool {
 	return strings.Contains(strings.ToLower(input), strings.ToLower(c.APIKey))
 }
 
+// communityLinkPrefixes are the scheme-less starts of a Steam community link, lower case.
+var communityLinkPrefixes = []string{"steamcommunity.com/", "www.steamcommunity.com/"}
+
+// withHTTPSScheme adds https:// to a scheme-less community link (steamcommunity.com/id/name) so url.Parse sees a
+// host. Any other input is returned unchanged, so a bare vanity name or SteamID64 keeps its path. It runs after the
+// API key guard, which checks the raw input.
+func withHTTPSScheme(value string) string {
+	lower := strings.ToLower(value)
+	for _, prefix := range communityLinkPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return "https://" + value
+		}
+	}
+	return value
+}
+
 func (c *Client) ResolveProfileInput(ctx context.Context, input string) (string, error) {
 	value := strings.TrimSpace(input)
 	if value == "" {
@@ -152,7 +172,7 @@ func (c *Client) ResolveProfileInput(ctx context.Context, input string) (string,
 	if steamID64Regexp.MatchString(value) {
 		return value, nil
 	}
-	if parsed, err := url.Parse(value); err == nil && parsed.Host != "" {
+	if parsed, err := url.Parse(withHTTPSScheme(value)); err == nil && parsed.Host != "" {
 		parts := pathParts(parsed.Path)
 		for i, part := range parts {
 			switch part {
@@ -244,7 +264,7 @@ func (c *Client) getOwnedGamesList(ctx context.Context, steamID64 string, includ
 	// include_extended_appinfo adds capsule_filename. language is deliberately not set: with a language,
 	// Steam returns localized art file names for some games.
 	q := url.Values{"key": {c.APIKey}, "steamid": {steamID64}, "include_appinfo": {"true"}, "include_extended_appinfo": {"true"}, "include_played_free_games": {strconv.FormatBool(includePlayedFree)}, "skip_unvetted_apps": {strconv.FormatBool(skipUnvetted)}, "format": {"json"}}
-	if err := c.getJSON(ctx, "/IPlayerService/GetOwnedGames/v0001/", q, &payload); err != nil {
+	if _, err := c.fetchJSON(ctx, "/IPlayerService/GetOwnedGames/v0001/", q, &payload, fetchOptions{maxBytes: maxOwnedGamesResponseBytes}); err != nil {
 		return ownedGamesResponse{}, err
 	}
 	return payload, nil
@@ -376,7 +396,7 @@ func (c *Client) GetPlayerAchievements(ctx context.Context, steamID64 string, ap
 		if payload.PlayerStats.Error != "" {
 			return nil, usererr.Wrap("Steam did not provide achievements for this game.", errors.New(c.redactText(payload.PlayerStats.Error)))
 		}
-		return nil, usererr.New("Steam did not return achievements for this game. Try again later.")
+		return nil, ErrNoAchievementsReturned
 	}
 	ach := make([]PlayerAchievement, 0, len(payload.PlayerStats.Achievements))
 	for _, a := range payload.PlayerStats.Achievements {
@@ -419,6 +439,11 @@ const (
 	eresultOK      = 1
 	eresultNoMatch = 42
 )
+
+// ErrNoAchievementsReturned is the user-facing error for an achievement answer that carries no data. The syncer
+// returns it too, when Steam sends an empty schema for an app whose data is already stored. It is one shared value:
+// its text is the same sentence wherever it is shown.
+var ErrNoAchievementsReturned = usererr.New("Steam did not return achievements for this game. Try again later.")
 
 // HTTPStatusError is a non-2xx Steam response. Code is the HTTP status code. Error() text is
 // unchanged from the earlier string errors; callers classify with errors.As, not by message.
@@ -558,42 +583,79 @@ func (c *Client) GetUserAchievements(ctx context.Context, steamID64 string, appI
 	return result, nil
 }
 
+// Response body caps. maxResponseBytes applies to every endpoint except GetOwnedGames, whose library answer with
+// extended app info can exceed 4 MiB. A 2xx body over its cap fails with an unreadable-response error and is never
+// shown. errorBodyLogLimit caps the body text kept on a non-2xx HTTPStatusError, whatever the 2xx cap.
+const (
+	maxResponseBytes           = 4 << 20
+	maxOwnedGamesResponseBytes = 64 << 20
+	errorBodyLogLimit          = 4 << 10
+)
+
+// maxRetryAfter caps one Retry-After value (parseRetryAfter). retryAfterBudget caps the total of the Retry-After
+// waits in one fetchJSON call, so a server cannot stall a sync: with 4 attempts, three 429s of Retry-After: 60 wait
+// 60 s in all, and the later waits use the backoff.
+const (
+	maxRetryAfter    = 60 * time.Second
+	retryAfterBudget = 60 * time.Second
+)
+
+// fetchOptions selects how fetchJSON reads one endpoint.
+type fetchOptions struct {
+	checkEResult bool  // act on the x-eresult header (see getJSONWithEResult)
+	maxBytes     int64 // body cap; a larger body is an error. 0 or less means maxResponseBytes
+}
+
 func (c *Client) getJSON(ctx context.Context, path string, q url.Values, target any) error {
-	_, err := c.fetchJSON(ctx, path, q, target, false)
+	_, err := c.fetchJSON(ctx, path, q, target, fetchOptions{maxBytes: maxResponseBytes})
 	return err
 }
 
 // getJSONWithEResult is getJSON plus x-eresult header handling: 0/1 decode the body,
 // 42 returns (42, nil) without decoding, any other value is an error.
 func (c *Client) getJSONWithEResult(ctx context.Context, path string, q url.Values, target any) (int, error) {
-	return c.fetchJSON(ctx, path, q, target, true)
+	return c.fetchJSON(ctx, path, q, target, fetchOptions{checkEResult: true, maxBytes: maxResponseBytes})
 }
 
-func (c *Client) fetchJSON(ctx context.Context, path string, q url.Values, target any, checkEResult bool) (int, error) {
+// fetchJSON performs the request with up to 4 attempts. A retryable failure waits (Retry-After on a 429, else
+// the backoff) and tries again; any other failure returns at once. The Retry-After waits of one call share
+// retryAfterBudget: once it is spent, a 429 waits the backoff instead.
+func (c *Client) fetchJSON(ctx context.Context, path string, q url.Values, target any, opts fetchOptions) (int, error) {
 	endpoint := c.endpoint(path, q)
 	var lastErr error
+	var retryAfter, retryAfterSpent time.Duration
 	for attempt := range 4 {
-		if err := c.waitRetry(ctx, attempt); err != nil {
+		wait := retryAfter
+		if wait > 0 {
+			wait = min(wait, retryAfterBudget-retryAfterSpent)
+			if wait <= 0 {
+				wait = 0 // budget spent: fall back to the backoff
+			}
+			retryAfterSpent += wait
+		}
+		if err := c.waitRetry(ctx, attempt, wait); err != nil {
 			return 0, err
 		}
-		body, eresultHeader, retry, err := c.getJSONBody(ctx, path, endpoint)
+		retryAfter = 0
+		res, err := c.getJSONBody(ctx, path, endpoint, opts.maxBytes)
 		if err != nil {
 			lastErr = err
-			if retry {
-				continue
+			if !res.retryable {
+				return 0, err
 			}
-			return 0, err
+			retryAfter = res.retryAfter
+			continue
 		}
-		if !checkEResult {
-			return 0, decodeJSONBody(path, body, target)
+		if !opts.checkEResult {
+			return 0, decodeJSONBody(path, res.body, target)
 		}
-		code, err := parseEResult(path, eresultHeader)
+		code, err := parseEResult(path, res.eresult)
 		if err != nil {
 			return 0, err
 		}
 		switch code {
 		case 0, eresultOK:
-			return code, decodeJSONBody(path, body, target)
+			return code, decodeJSONBody(path, res.body, target)
 		case eresultNoMatch:
 			return code, nil
 		default:
@@ -628,12 +690,19 @@ func (e *badResponseError) Error() string { return e.msg }
 func (e *badResponseError) Unwrap() error { return e.err }
 
 // bodyReadError is a failure reading a response body after its status was received, a transport failure.
-// Error() text is the underlying read error, unchanged.
+// Error() is the underlying read error's text with the key and IDs redacted (text); Unwrap keeps the original
+// chain for errors.Is.
 type bodyReadError struct {
-	err error
+	err  error
+	text string // empty means err.Error()
 }
 
-func (e *bodyReadError) Error() string { return e.err.Error() }
+func (e *bodyReadError) Error() string {
+	if e.text != "" {
+		return e.text
+	}
+	return e.err.Error()
+}
 
 func (e *bodyReadError) Unwrap() error { return e.err }
 
@@ -646,46 +715,134 @@ func (c *Client) endpoint(path string, q url.Values) string {
 	return base + path + separator + q.Encode()
 }
 
-func (c *Client) waitRetry(ctx context.Context, attempt int) error {
+// waitRetry waits before attempt (0-based; attempt 0 never waits). retryAfter is the server's Retry-After wait
+// for the previous attempt, 0 when there was none; it replaces the backoff. A non-positive wait skips the sleep.
+func (c *Client) waitRetry(ctx context.Context, attempt int, retryAfter time.Duration) error {
 	if attempt == 0 {
 		return nil
 	}
-	d := c.retryDelay(attempt)
+	d := retryAfter
+	if d <= 0 {
+		d = c.retryDelay(attempt)
+	}
 	if d <= 0 {
 		return nil
 	}
+	sleep := c.retrySleep
+	if sleep == nil {
+		sleep = sleepContext
+	}
+	return sleep(ctx, d)
+}
+
+// sleepContext waits d, or returns ctx.Err() as soon as ctx is done.
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
 	select {
-	case <-time.After(d):
+	case <-timer.C:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
-// getJSONBody performs one GET. It returns the body, the x-eresult header value (may be empty),
-// whether the failure is retryable, and the error.
-func (c *Client) getJSONBody(ctx context.Context, path, endpoint string) ([]byte, string, bool, error) {
+// bodyAttempt is the outcome of one GET in fetchJSON. retryable and retryAfter matter only when getJSONBody
+// returns an error. retryAfter is the wait a 429 Retry-After header asked for, 0 when absent or invalid.
+type bodyAttempt struct {
+	body       []byte
+	eresult    string // x-eresult header value, may be empty
+	retryable  bool
+	retryAfter time.Duration
+}
+
+// getJSONBody performs one GET and reads at most maxBytes of body (maxResponseBytes when maxBytes is 0 or less).
+// Order of checks: a read failure first; then a retryable status; then a non-2xx status, whose log text is the first
+// errorBodyLogLimit bytes of the body and which never fails on size; only then, for a 2xx answer, a body over
+// maxBytes, a non-retryable badResponseError with no body text. A non-2xx body is read only up to errorBodyWindow,
+// whatever maxBytes is. A body read that fails is retried unless the request context is done, so a read that times
+// out while the context is live (the HTTP client's 30 s timeout) is retried too.
+func (c *Client) getJSONBody(ctx context.Context, path, endpoint string, maxBytes int64) (bodyAttempt, error) {
+	if maxBytes <= 0 {
+		maxBytes = maxResponseBytes
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, "", false, c.redactURLError(err)
+		return bodyAttempt{}, c.redactURLError(err)
 	}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, "", true, c.redactURLError(err)
+		return bodyAttempt{retryable: ctx.Err() == nil}, c.redactURLError(err)
+	}
+	var retryAfter time.Duration
+	if resp.StatusCode == http.StatusTooManyRequests {
+		retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 	}
 	eresult := resp.Header.Get("x-eresult")
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	// A 2xx body reads one byte past the cap, so an oversize body is detected. A non-2xx body reads only its log window.
+	readLimit := maxBytes + 1
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		readLimit = int64(c.errorBodyWindow())
+	}
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, readLimit))
 	resp.Body.Close()
 	if readErr != nil {
-		return nil, "", false, &bodyReadError{err: readErr}
+		// Decided by the request context alone: a timeout or reset during the read is transient while ctx is live.
+		return bodyAttempt{retryable: ctx.Err() == nil, retryAfter: retryAfter}, &bodyReadError{err: readErr, text: c.redactText(readErr.Error())}
 	}
 	if retryableSteamStatus(resp.StatusCode) {
-		return nil, "", true, &HTTPStatusError{Path: path, Code: resp.StatusCode, Status: resp.Status}
+		return bodyAttempt{retryable: true, retryAfter: retryAfter}, &HTTPStatusError{Path: path, Code: resp.StatusCode, Status: resp.Status}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, "", false, &HTTPStatusError{Path: path, Code: resp.StatusCode, Status: resp.Status, body: c.redactBody(strings.TrimSpace(string(body))), hasBody: true}
+		// Two steps keep a secret out of the log text. First tornTail drops the raw bytes the window may have cut
+		// (a secret token split at readLimit, a partial rune), before any trimming or redaction shifts positions.
+		// Then the rest is trimmed, redacted whole and cut to errorBodyLogLimit, so no fragment of a whole secret
+		// can be left at the cut.
+		text := cutBytes(c.redactBody(strings.TrimSpace(string(c.tornTail(body, readLimit)))), errorBodyLogLimit)
+		return bodyAttempt{}, &HTTPStatusError{Path: path, Code: resp.StatusCode, Status: resp.Status, body: text, hasBody: true}
 	}
-	return body, eresult, false, nil
+	if int64(len(body)) > maxBytes {
+		return bodyAttempt{}, &badResponseError{msg: fmt.Sprintf("Steam API %s response is larger than %d bytes", path, maxBytes)}
+	}
+	return bodyAttempt{body: body, eresult: eresult}, nil
+}
+
+// parseRetryAfter reads a Retry-After header value, in delay-seconds or as an HTTP-date relative to now. It returns
+// the wait capped at maxRetryAfter. It returns 0 for an empty, zero, past or invalid value, so the caller uses the
+// normal backoff.
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if isDigits(value) {
+		secs, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || secs >= int64(maxRetryAfter/time.Second) {
+			return maxRetryAfter
+		}
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	when, err := http.ParseTime(value)
+	if err != nil {
+		return 0
+	}
+	d := when.Sub(now)
+	if d <= 0 {
+		return 0
+	}
+	return min(d, maxRetryAfter)
+}
+
+func isDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
 }
 
 // queryIdentityParam matches the query parameters of a Steam request URL that carry the API key or a profile
@@ -765,9 +922,96 @@ func (c *Client) redactBody(body string) string {
 	return c.redactText(body)
 }
 
+// errorBodyWindow is how many bytes of a non-2xx body are read and redacted: errorBodyLogLimit plus the key length
+// and 32 more. Any key or SteamID64 that starts before the log cut then ends inside the window, so redaction removes
+// it whole before the cut. One the window itself cuts is removed by tornTail first.
+func (c *Client) errorBodyWindow() int {
+	return errorBodyLogLimit + len(c.APIKey) + 32
+}
+
+// cutBytes returns the first n bytes of s, or fewer so the cut does not split a UTF-8 sequence.
+func cutBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// tornTail returns body without the bytes a read stopped at readLimit may have split. A body shorter than readLimit
+// was read whole and is returned unchanged. Otherwise the source may run on past the limit, so the bytes at the end
+// are dropped: a partial trailing UTF-8 rune, then the whole trailing run of secret-token bytes (secretTokenBytes),
+// then a partial rune the run exposed. A secret token cut at the limit has its in-body head in that run, so the head
+// goes too. A run is removed whole, never from its middle, so a complete token ending at the run is not left as a
+// fragment either. Removing the run may drop more text than the secret; that is accepted.
+func (c *Client) tornTail(body []byte, readLimit int64) []byte {
+	if int64(len(body)) < readLimit {
+		return body
+	}
+	body = dropPartialRune(body)
+	secret := c.secretTokenBytes()
+	end := len(body)
+	for end > 0 && secret[body[end-1]] {
+		end--
+	}
+	// The strip can stop on the continuation byte of a rune whose lead is not a token byte (key "ж" is D0 B6, so
+	// "Ѷ" = D1 B6 loses B6 and keeps D1). That exposes a partial rune, which is cut here. One more cut is enough:
+	// the byte it leaves is not part of a secret, since a secret head is contiguous with the body end and no
+	// non-token byte lies inside it.
+	return dropPartialRune(body[:end])
+}
+
+// dropPartialRune cuts a trailing incomplete UTF-8 rune from b. It looks back at most utf8.UTFMax bytes for the start
+// of the last rune, and cuts there when that rune is not complete. Otherwise b is returned unchanged.
+func dropPartialRune(b []byte) []byte {
+	for i := len(b) - 1; i >= 0 && i >= len(b)-utf8.UTFMax; i-- {
+		if utf8.RuneStart(b[i]) {
+			if !utf8.FullRune(b[i:]) {
+				return b[:i]
+			}
+			break
+		}
+	}
+	return b
+}
+
+// secretTokenBytes returns the bytes that can belong to a secret token: every byte isSecretTokenByte accepts, plus
+// every raw byte of the client's API key. The key bytes matter because a key may hold characters such as '.', '~',
+// ':', '/', '=' or '"' that a bare token does not. The query-escaped and path-escaped forms of the key add no byte:
+// an escaped byte is '%', '+' or an uppercase hex digit, all already in isSecretTokenByte, and every other byte of
+// those forms is copied unchanged from the raw key. An empty key adds nothing, and a hex key adds nothing new, since
+// its bytes are already letters and digits.
+func (c *Client) secretTokenBytes() [256]bool {
+	var set [256]bool
+	for b := range set {
+		set[b] = isSecretTokenByte(byte(b))
+	}
+	for i := 0; i < len(c.APIKey); i++ {
+		set[c.APIKey[i]] = true
+	}
+	return set
+}
+
+// isSecretTokenByte reports whether b can belong to a bare secret or its escaped form: an ASCII letter or digit, or
+// one of '%', '+', '-', '_' and '\' (percent escapes, a space as '+', URL-safe characters, JSON escapes). '=', '&',
+// '?' and other separators are not in the set, so the name of a query parameter is never removed with its value.
+// secretTokenBytes adds the bytes of the stored API key on top of this set.
+func isSecretTokenByte(b byte) bool {
+	switch {
+	case 'a' <= b && b <= 'z', 'A' <= b && b <= 'Z', '0' <= b && b <= '9':
+		return true
+	case b == '%', b == '+', b == '-', b == '_', b == '\\':
+		return true
+	}
+	return false
+}
+
 func retryableSteamStatus(status int) bool {
 	switch status {
-	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable:
+	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway,
+		http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		return true
 	default:
 		return false

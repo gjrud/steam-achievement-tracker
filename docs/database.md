@@ -58,10 +58,10 @@ Build DSNs only through `sqliteDSN`. Do not concatenate paths into DSN strings (
 
 ### Mechanism
 
-- `migrations` is an ordered slice of `migration{version, name, sql, compact}` in `db.go`. Currently three entries: `{version: 1, name: "initial_schema", sql: initialSchemaSQL}`, `{version: 2, name: "cover_cached_flag", sql: coverCachedFlagSQL, compact: true}` and `{version: 3, name: "rewrite_stored_sync_text", sql: rewriteStoredSyncTextSQL, compact: true}`.
+- `migrations` is an ordered slice of `migration{version, name, sql, compact}` in `db.go`. Currently four entries: `{version: 1, name: "initial_schema", sql: initialSchemaSQL}`, `{version: 2, name: "cover_cached_flag", sql: coverCachedFlagSQL, compact: true}`, `{version: 3, name: "rewrite_stored_sync_text", sql: rewriteStoredSyncTextSQL, compact: true}` and `{version: 4, name: "add_lookup_indexes_and_prune_snapshots", sql: lookupIndexesAndPruneSnapshotsSQL}`.
 - `latestVersion()` is the maximum `version` in that slice. A fully migrated database has `user_version = latestVersion()` and a `schema_migrations` row for every version.
 - `schema_migrations(version integer primary key, name text not null, applied_at text not null)` is created by `ensureMigrationsTable` inside the migration transaction (`CREATE TABLE IF NOT EXISTS`). `applied_at` is UTC RFC3339.
-- `inspectSchema` reads `PRAGMA user_version`, whether `schema_migrations` exists, whether any user table exists, and `max(version)` from `schema_migrations` (0 if absent). The user-table check is `name not like 'sqlite_%'`. In SQL `LIKE`, `_` is a one-character wildcard, so the pattern also excludes names that start with `sqlite` followed by any single character; `LIKE` matching is ASCII case-insensitive. No table in the schema is affected.
+- `inspectSchema` reads `PRAGMA user_version`, whether `schema_migrations` exists, whether any user table exists, and `max(version)` from `schema_migrations` (0 if absent). A failed query is returned as an error, never read as "absent": `tableExists` and `hasUserTables` return `(bool, error)`, and a database whose check fails is not treated as empty (which would skip the backup and run the baseline over existing data). The user-table check is `name not like 'sqlite_%'`. In SQL `LIKE`, `_` is a one-character wildcard, so the pattern also excludes names that start with `sqlite` followed by any single character; `LIKE` matching is ASCII case-insensitive. No table in the schema is affected.
 - `migrate`:
   1. Read state.
   2. If `max(version, user_version) > latestVersion()`, return an error: `database schema version N is newer than this build supports (M)`. This runs before any backup or write. A newer database is never touched (downgrade protection).
@@ -89,6 +89,13 @@ Build DSNs only through `sqliteDSN`. Do not concatenate paths into DSN strings (
   The list lives in the migration SQL (`syncTextSafeSentences`). It is append-only: new app sentences are added (see [Adding tests](testing.md#adding-tests)); entries are never removed or edited. It is not a pattern list because the raw texts vary (endpoints, status lines, URLs, decode messages) and an unlisted raw form would survive a pattern rule. The trade-off: a sentence that the app wrote in an earlier version and that is not on the list becomes the generic sentence. Re-running the migration SQL changes nothing. `compact` removes the old text from the free pages.
 - `compact: true` on a migration means that after its transaction commits, `compact` runs `VACUUM` and then `PRAGMA wal_checkpoint(TRUNCATE)`. `VACUUM` cannot run inside the transaction. Without it the dropped or rewritten bytes stay in free pages and in the WAL. `compact` runs only when a compacting migration ran in this open and the database already had user tables before the open (a fresh install holds no dropped data, so it is skipped). A failure is logged as `migration committed; compact database: …` (path-redacted) and not returned: `OpenAndMigrate` succeeds, the migration itself stays committed, and `compact` is not retried on the next open. An incomplete `wal_checkpoint(TRUNCATE)` (busy, or log ≠ checkpointed frames) also counts as a failure. The dropped or rewritten bytes then stay in free pages and the WAL until SQLite reuses them or a later `VACUUM` runs.
 
+- Migration 4 `add_lookup_indexes_and_prune_snapshots` (`lookupIndexesAndPruneSnapshotsSQL`, not compact) has two parts, in this order, in the migration transaction:
+  1. Prune `game_snapshots` (`pruneSnapshotsSQL`). For each `(profile_id, appid, groupid)` it keeps the row with the highest `id` (the latest) and the row with the highest `id` among rows with `is_completed=1`, and deletes the rest. Order is by `id` (autoincrement), not `synced_at`. The readers need only whether a completed row exists, whether any row exists, and which appids have rows. The latest row is kept because it is the newest state of the entry. Nothing references `game_snapshots` by foreign key, so the delete fires no FK checks. Running the SQL again deletes nothing.
+  2. Create the lookup indexes (`lookupIndexesSQL`, `CREATE INDEX IF NOT EXISTS`), listed under [Lookup indexes](#lookup-indexes-migration-4).
+- Not compact: there is no `VACUUM` at startup. The pruned rows stay in free pages in the file until a later `VACUUM` or reuse. The data is not sensitive and nothing reads it.
+- Downgrade is not supported. A database at version 4 is refused by older builds with the "newer than this build supports" error. The pre-upgrade backup is at version 3, so restoring it (with a build that opens version 3) is the only way back to the full history.
+- Timing (development Linux machine, WAL): about 1 s at 1M snapshot rows for the prune and index SQL; about 1 s at 1M snapshot rows for `OpenAndMigrate`, including the pre-migration backup (`TestMigration4TimingAtOneMillionSnapshots`, run with `-v`). `OpenAndMigrate` runs during `ServiceStartup`, before the window opens.
+
 ### Backup before migration
 
 Runs only when a migration is pending and the database already contains user tables.
@@ -101,7 +108,7 @@ Runs only when a migration is pending and the database already contains user tab
 - A backup failure (directory, checkpoint, copy) aborts the open: no migration runs and `OpenAndMigrate` returns the error.
 - No retention or pruning. Backups accumulate; nothing in the code deletes them.
 - The backup is not rolled back or restored automatically. A failed migration leaves the backup file behind for manual recovery.
-- Backups keep data as it was before the upgrade: one made before migration 2 holds absolute cover paths (`cover_images.path`); one made before migration 3 holds raw `last_error` and `sync_runs.error` text, which can include request URLs with a SteamID64. The app never reads or deletes backups; users must delete them from `<data>/backups/` (see the README "Data and privacy" section).
+- Backups keep data as it was before the upgrade: one made before migration 2 holds absolute cover paths (`cover_images.path`); one made before migration 3 holds raw `last_error` and `sync_runs.error` text, which can include request URLs with a SteamID64; one made before migration 4 holds the full `game_snapshots` history that migration 4 prunes. The app never reads or deletes backups; users must delete them from `<data>/backups/` (see the README "Data and privacy" section).
 
 ### Adding a migration
 
@@ -115,7 +122,7 @@ Runs only when a migration is pending and the database already contains user tab
 
 ## Schema reference
 
-All tables are created by migration 1 (`initial_schema`), except `schema_migrations`, which `migrate` creates. Migration 2 changes only `cover_images` (its `path` column is replaced by `cached`). Migration 3 changes no columns; it rewrites the text in `profile_games.last_error` and `sync_runs.error`. Columns are listed in definition order. "PK" is primary key; "FK" is foreign key. No `ON DELETE` or `ON UPDATE` actions are declared anywhere, so the default `NO ACTION` applies: deleting a referenced parent row fails while children exist. The repository deletes children first (see `ClearProfileData` in [repository.md](repository.md)). Besides primary keys, `NOT NULL` and foreign keys, the only uniqueness constraint is `UNIQUE` on `profiles.steam_id64`. There are no `CHECK` constraints.
+All tables are created by migration 1 (`initial_schema`), except `schema_migrations`, which `migrate` creates. Migration 2 changes only `cover_images` (its `path` column is replaced by `cached`). Migration 3 changes no columns; it rewrites the text in `profile_games.last_error` and `sync_runs.error`. Migration 4 changes no columns; it deletes older `game_snapshots` rows and adds indexes (see [Lookup indexes](#lookup-indexes-migration-4)). Columns are listed in definition order. "PK" is primary key; "FK" is foreign key. No `ON DELETE` or `ON UPDATE` actions are declared anywhere, so the default `NO ACTION` applies: deleting a referenced parent row fails while children exist. The repository deletes children first (see `ClearProfileData` in [repository.md](repository.md)). Besides primary keys, `NOT NULL` and foreign keys, the only uniqueness constraint is `UNIQUE` on `profiles.steam_id64`. There are no `CHECK` constraints.
 
 ### `settings`
 
@@ -171,6 +178,8 @@ Shared Steam app metadata. Not per profile.
 ### `game_sets`
 
 Achievement-set catalogue of a game. One row per `(appid, groupid)`. Not per profile.
+
+Lifecycle: a sync upserts the rows it reports and deletes this app's rows it no longer reports, unless a `profile_games` row (any profile) still references the set. See `SaveGameSync` step 6 in [repository.md](repository.md#savegamesyncgamesyncupdate-error).
 
 | Column | Type | Null | Key | Default | Notes |
 | --- | --- | --- | --- | --- | --- |
@@ -272,7 +281,7 @@ Composite FK: `(appid, apiname)` references `achievements(appid, apiname)`.
 
 ### `game_snapshots`
 
-Append-only history: one row per entry per successful game sync. Used to derive `was_completed` for entries whose `profile_games` row was later pruned. `MarkGamePreviouslyCompleted` also reads it (see [repository.md](repository.md#flag-methods)) to compute `was_completed` and `newly_incomplete` for an existing entry.
+History of entry state: one row per entry each time its state changes (total, unlocked or completed) on a successful game sync. A sync that finds the latest snapshot unchanged adds no row. Migration 4 pruned the table to the latest row and the latest completed row per `(profile_id, appid, groupid)`, so older rows are gone. Used to derive `was_completed` for entries whose `profile_games` row was later pruned. `MarkGamePreviouslyCompleted` also reads it (see [repository.md](repository.md#flag-methods)) to compute `was_completed` and `newly_incomplete` for an existing entry.
 
 | Column | Type | Null | Key | Default | Notes |
 | --- | --- | --- | --- | --- | --- |
@@ -287,7 +296,7 @@ Append-only history: one row per entry per successful game sync. Used to derive 
 | `is_completed` | integer | no | | | |
 | `synced_at` | text | no | | | |
 
-Rows are removed only by `ClearProfileData`. No pruning exists, so the table grows with every sync.
+Apart from migration 4's one-time prune, rows are removed only by `ClearProfileData`. The table grows with every state change (not with every sync).
 
 ### `sync_runs`
 
@@ -340,6 +349,24 @@ Cached dashboard tags per entry, recomputed by the repository. See [repository.m
 | `computed_at` | text | no | | |
 
 Index: `idx_profile_game_tags_profile_tag (profile_id, tag)`.
+
+### Lookup indexes (migration 4)
+
+Created by migration 4 with `CREATE INDEX IF NOT EXISTS`. Each serves a lookup that otherwise scans a whole table (the profile-leading primary keys do not cover appid lookups). Names follow `idx_<table>_<cols>`.
+
+| Index | Columns | Used by |
+| --- | --- | --- |
+| `idx_profile_achievements_appid_apiname` | `profile_achievements(appid, apiname)` | Orphan checks for `achievements` and `games`, and the foreign key check when an `achievements` row is deleted. |
+| `idx_profile_games_appid` | `profile_games(appid)` | `HasSetData`, the `game_sets` orphan delete, the stale `game_sets` prune in `SaveGameSync`, the `games` orphan check, and the foreign key check when a `games` row is deleted. |
+| `idx_profile_owned_games_appid` | `profile_owned_games(appid)` | Orphan check for `games`. |
+| `idx_profile_game_flags_appid` | `profile_game_flags(appid)` | Orphan check for `games`. |
+| `idx_profile_game_tags_appid` | `profile_game_tags(appid)` | Orphan check for `games`. |
+| `idx_game_snapshots_appid` | `game_snapshots(appid)` | Orphan check for `games`. |
+| `idx_game_snapshots_profile_id_appid_groupid_is_completed` | `game_snapshots(profile_id, appid, groupid, is_completed)` | `MarkGamePreviouslyCompleted`, `profileGameHistory`, profile removal, and the latest-row dedupe lookup in `SaveGameSync` (its leading three columns). |
+| `idx_game_sets_dlcappid` | `game_sets(dlcappid)` | DLC branch of the cover lookups: `entriesForImageAppSQL` and `orphanCoverRowsSQL` (`repository/covers.go`, `repository/cleanup.go`). |
+| `idx_sync_runs_profile_id` | `sync_runs(profile_id)` | `LatestSyncRun`, profile removal. |
+
+`TestLookupQueriesUseIndexes` checks the query plans (`EXPLAIN QUERY PLAN` shows `SEARCH ... USING INDEX`). The orphan deletes in `cleanup.go` are checked by `TestCleanupQueriesUseIndexes` in `internal/repository`, against the shipped SQL.
 
 ### Relationships
 

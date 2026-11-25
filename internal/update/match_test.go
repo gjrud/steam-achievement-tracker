@@ -11,31 +11,50 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/updater/providers/github"
 )
 
-// Asset names as the release publishes them. The deb, rpm and Arch package names and the versioned Windows names are
-// the ones on the current release; the AppImage has two names: the old one that the current release still carries (the
-// matcher must never pick it) and the renamed one the release job publishes from the next release on.
+// Asset names as the release publishes them. The deb, rpm and Arch package names and the versioned Windows setup name
+// are the ones on the current release; the AppImage has two names: the old one that the current release still carries
+// (the matcher must never pick it) and the renamed one the release job publishes from the next release on. The portable
+// exe has two names too: the unversioned one the release job publishes from the first release after v1.2.1 on, and the
+// versioned one that earlier releases carried. realAssets uses the unversioned name (the next release's list); the
+// versioned name is covered by TestMatchAssetPortableNames and by a provider-level test. The matcher picks either; the
+// setup exe is never picked.
 const (
-	assetDeb           = "steam-achievement-tracker.deb"
-	assetRPM           = "steam-achievement-tracker.rpm"
-	assetArch          = "steam-achievement-tracker.pkg.tar.zst"
-	assetOldAppImage   = "steam-achievement-tracker-x86_64.AppImage"
-	assetPortable      = "steam-achievement-tracker-1.0.1-windows-amd64-portable.exe"
-	assetSetup         = "steam-achievement-tracker-1.0.1-windows-amd64-setup.exe"
-	assetSourceTarball = "steam-achievement-tracker-1.0.1-source.tar.gz"
-	assetSHA256SUMS    = "SHA256SUMS"
+	assetDeb                 = "steam-achievement-tracker.deb"
+	assetRPM                 = "steam-achievement-tracker.rpm"
+	assetArch                = "steam-achievement-tracker.pkg.tar.zst"
+	assetOldAppImage         = "steam-achievement-tracker-x86_64.AppImage"
+	assetPortable            = "steam-achievement-tracker-1.0.1-windows-amd64-portable.exe"
+	assetPortableUnversioned = "steam-achievement-tracker-windows-amd64-portable.exe"
+	assetSetup               = "steam-achievement-tracker-1.0.1-windows-amd64-setup.exe"
+	assetSourceTarball       = "steam-achievement-tracker-1.0.1-source.tar.gz"
+	assetSHA256SUMS          = "SHA256SUMS"
 )
 
-// realAssets mirrors a release's asset list after the AppImage rename. stubGitHub serves these names.
+// realAssets mirrors the next release's asset list: the renamed AppImage and the unversioned portable exe.
+// stubGitHub serves these names by default.
 var realAssets = []string{
 	assetDeb,
 	assetRPM,
 	assetArch,
 	assetOldAppImage,
 	linuxAppImage,
-	assetPortable,
+	assetPortableUnversioned,
 	assetSetup,
 	assetSourceTarball,
 	assetSHA256SUMS,
+}
+
+// assetsWithPortable returns realAssets with the portable exe swapped for name. It models a release that still
+// carries the versioned portable name.
+func assetsWithPortable(name string) []string {
+	out := make([]string, len(realAssets))
+	for i, n := range realAssets {
+		if n == assetPortableUnversioned {
+			n = name
+		}
+		out[i] = n
+	}
+	return out
 }
 
 func assetsOf(names ...string) []github.ReleaseAsset {
@@ -63,7 +82,7 @@ func TestMatchAsset(t *testing.T) {
 		assets []string
 		want   int
 	}{
-		{"windows amd64 picks portable", "windows", "amd64", realAssets, indexOf(realAssets, assetPortable)},
+		{"windows amd64 picks portable", "windows", "amd64", realAssets, indexOf(realAssets, assetPortableUnversioned)},
 		{"windows amd64 never picks setup", "windows", "amd64", []string{assetSetup}, -1},
 		{"windows amd64 never picks source tarball", "windows", "amd64", []string{assetSourceTarball}, -1},
 		{"windows amd64 never picks a linux AppImage", "windows", "amd64", []string{linuxAppImage}, -1},
@@ -83,6 +102,31 @@ func TestMatchAsset(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := matchAsset(tc.goos, tc.goarch, assetsOf(tc.assets...)); got != tc.want {
 				t.Fatalf("matchAsset(%s, %s) = %d, want %d", tc.goos, tc.goarch, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMatchAssetPortableNames covers both portable exe names: the unversioned one (from the first release after v1.2.1)
+// and the versioned one (earlier releases). The suffix match takes both. A release publishes one portable name, so both
+// on one list is not expected; if it happens, the first one in list order is chosen. The setup exe is never chosen.
+func TestMatchAssetPortableNames(t *testing.T) {
+	cases := []struct {
+		name   string
+		assets []string
+		want   int
+	}{
+		{"unversioned portable alone", []string{assetPortableUnversioned}, 0},
+		{"versioned portable alone (earlier release)", []string{assetPortable}, 0},
+		{"unversioned portable beside setup", []string{assetSetup, assetPortableUnversioned}, 1},
+		{"versioned portable beside setup", []string{assetSetup, assetPortable}, 1},
+		{"setup alone is never picked", []string{assetSetup}, -1},
+		{"both names, unversioned listed first", []string{assetPortableUnversioned, assetPortable}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := matchAsset("windows", "amd64", assetsOf(tc.assets...)); got != tc.want {
+				t.Fatalf("matchAsset(windows, amd64) = %d, want %d", got, tc.want)
 			}
 		})
 	}

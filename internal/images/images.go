@@ -3,14 +3,17 @@ package images
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gjrud/steam-achievement-tracker/internal/appdata"
 	"github.com/gjrud/steam-achievement-tracker/internal/fsretry"
@@ -41,7 +44,39 @@ const (
 	storeItemsEndpoint   = "https://api.steampowered.com/IStoreBrowseService/GetItems/v1/"
 	storeItemsBatchSize  = 100
 	maxCoverBytes        = 5 << 20
+	// maxRedirects is the redirect limit of the cache client, the same as net/http's default.
+	maxRedirects = 10
+	// maxLoggedBodyBytes caps the Steam response body quoted in an error, so logs stay short.
+	maxLoggedBodyBytes = 256
 )
+
+// allowedRedirectHosts are the only hosts a redirect may lead to: the two Steam CDN
+// hosts the cover chain uses and the Steam store API host. Matched on the lowercase
+// host name, without port. Tests exercise the real list.
+var allowedRedirectHosts = map[string]bool{
+	"shared.akamai.steamstatic.com": true,
+	"shared.steamstatic.com":        true,
+	"api.steampowered.com":          true,
+}
+
+// errRedirectNotAllowed is wrapped by every redirect the policy rejects.
+var errRedirectNotAllowed = errors.New("redirect not allowed")
+
+// checkRedirect is the CheckRedirect policy of the cache client. A redirect is followed
+// only when it stays under maxRedirects, uses https and leads to an allowed host. The
+// redirect limit wraps errRedirectNotAllowed so store lookups treat it as permanent (no retry).
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("%w: stopped after %d redirects", errRedirectNotAllowed, maxRedirects)
+	}
+	if req.URL.Scheme != "https" {
+		return fmt.Errorf("%w: scheme %q", errRedirectNotAllowed, req.URL.Scheme)
+	}
+	if !allowedRedirectHosts[strings.ToLower(req.URL.Hostname())] {
+		return fmt.Errorf("%w: host %q", errRedirectNotAllowed, req.URL.Hostname())
+	}
+	return nil
+}
 
 type Cache struct {
 	Paths      appdata.Paths
@@ -125,7 +160,7 @@ type storeItemsResponse struct {
 }
 
 func New(paths appdata.Paths) *Cache {
-	return &Cache{Paths: paths, HTTPClient: &http.Client{Timeout: 30 * time.Second}}
+	return &Cache{Paths: paths, HTTPClient: &http.Client{Timeout: 30 * time.Second, CheckRedirect: checkRedirect}}
 }
 
 // StoreItemAssets looks up store assets for app ids in batches of up to 100.
@@ -314,11 +349,13 @@ func (c *Cache) writeCover(imageAppID int64, fileName string, body io.Reader) (s
 		return "", err
 	}
 	path := filepath.Join(dir, fileName)
-	tmp := path + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	// A unique temp name per write (os.CreateTemp, mode 0600) so two writes for the same file never share a
+	// temp file, and a leftover from an earlier crash is never reused.
+	out, err := os.CreateTemp(dir, fileName+".*.tmp")
 	if err != nil {
 		return "", err
 	}
+	tmp := out.Name()
 	written, copyErr := io.Copy(out, io.LimitReader(body, maxCoverBytes+1))
 	closeErr := out.Close()
 	// The temp file is closed above; removing it before Close would fail on Windows.
@@ -340,6 +377,22 @@ func (c *Cache) writeCover(imageAppID int64, fileName string, body io.Reader) (s
 	}
 	_ = os.Chmod(path, 0o600)
 	return path, nil
+}
+
+// RemoveCover deletes the stored cover file fileName of imageAppID. Only the known cover file names are
+// accepted. A file that is already gone is not an error. The syncer uses it to undo a download whose
+// database row could not be saved. A file the cover server still holds open is retried briefly (fsretry).
+func (c *Cache) RemoveCover(imageAppID int64, fileName string) error {
+	if imageAppID <= 0 {
+		return fmt.Errorf("invalid image app id %d", imageAppID)
+	}
+	if _, ok := kindForFileName(fileName); !ok {
+		return fmt.Errorf("unknown cover file %q", fileName)
+	}
+	if err := fsretry.Remove(c.coverPath(imageAppID, fileName)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // removeOtherCovers deletes known cover files other than keep (e.g. a stale
@@ -480,7 +533,8 @@ func (c *Cache) doStoreItemsRequest(ctx context.Context, endpoint, encodedForm s
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, true, err
+		// A redirect the policy rejects is permanent: retrying it would only repeat the rejection.
+		return nil, !errors.Is(err, errRedirectNotAllowed), err
 	}
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	resp.Body.Close()
@@ -491,9 +545,22 @@ func (c *Cache) doStoreItemsRequest(ctx context.Context, endpoint, encodedForm s
 		return nil, true, fmt.Errorf("Steam store items returned %s", resp.Status)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, false, fmt.Errorf("Steam store items returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return nil, false, fmt.Errorf("Steam store items returned %s: %s", resp.Status, truncateForLog(strings.TrimSpace(string(body)), maxLoggedBodyBytes))
 	}
 	return body, false, nil
+}
+
+// truncateForLog returns s unchanged when it is at most limit bytes. Otherwise it returns the longest prefix of at
+// most limit bytes that ends on a rune boundary, followed by "...", so the cut never splits a UTF-8 sequence.
+func truncateForLog(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }
 
 func storeItemsRetryStatus(status int) bool {

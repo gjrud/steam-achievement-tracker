@@ -13,8 +13,20 @@ import (
 // means no active profile: SaveProfile always writes the row and nothing deletes it, so there is no other way to reach
 // that state.
 func (r *Repository) ActiveProfile() (*Profile, error) {
+	return activeProfile(r.db)
+}
+
+// querier is the read side shared by *sql.DB and *sql.Tx. Reads that run inside a transaction take the tx: the
+// database has one connection (SetMaxOpenConns(1)), so a read on the *sql.DB while a tx is open waits forever.
+type querier interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// activeProfile is ActiveProfile on q. ClearProfileData calls it with its transaction.
+func activeProfile(q querier) (*Profile, error) {
 	var activeID string
-	err := r.db.QueryRow(`select value from settings where key='active_profile_id'`).Scan(&activeID)
+	err := q.QueryRow(`select value from settings where key='active_profile_id'`).Scan(&activeID)
 	switch {
 	case err == sql.ErrNoRows:
 		return nil, nil
@@ -24,7 +36,7 @@ func (r *Repository) ActiveProfile() (*Profile, error) {
 	if activeID == "" {
 		return nil, nil
 	}
-	return scanProfile(r.db.QueryRow(`select id, steam_id64, display_name, avatar_url, created_at, updated_at, last_synced_at from profiles where id=?`, activeID))
+	return scanProfile(q.QueryRow(`select id, steam_id64, display_name, avatar_url, created_at, updated_at, last_synced_at from profiles where id=?`, activeID))
 }
 
 // DeactivateProfile sets no profile as active without touching any profile data. The setting row is kept with an
@@ -67,25 +79,28 @@ func (r *Repository) SaveProfile(steamID64, displayName, avatarURL string) (*Pro
 // that is re-added starts from DefaultLibrarySettings.
 // If this profile is the active one, the active setting is set to an empty value (no active profile) instead of
 // being deleted.
+//
+// Every read runs inside the transaction, before any delete. A sync that writes shared games, achievements, game_sets
+// or cover_images rows cannot insert them between the reads that pick the candidates and the delete that cleans them.
 func (r *Repository) ClearProfileData(profileID int64) ([]int64, error) {
-	active, err := r.ActiveProfile()
-	if err != nil {
-		return nil, err
-	}
-	wasActive := active != nil && active.ID == profileID
-	appIDs, err := r.profileAppIDs(profileID)
-	if err != nil {
-		return nil, err
-	}
-	imageAppIDs, err := r.profileDLCImageAppIDs(profileID)
-	if err != nil {
-		return nil, err
-	}
 	tx, err := r.db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	active, err := activeProfile(tx)
+	if err != nil {
+		return nil, err
+	}
+	wasActive := active != nil && active.ID == profileID
+	appIDs, err := profileAppIDs(tx, profileID)
+	if err != nil {
+		return nil, err
+	}
+	imageAppIDs, err := profileDLCImageAppIDs(tx, profileID)
+	if err != nil {
+		return nil, err
+	}
 	for _, stmt := range []string{
 		`delete from profile_achievements where profile_id=?`,
 		`delete from profile_game_flags where profile_id=?`,
@@ -122,8 +137,8 @@ func (r *Repository) ClearProfileData(profileID int64) ([]int64, error) {
 	return removed, nil
 }
 
-func (r *Repository) profileDLCImageAppIDs(profileID int64) ([]int64, error) {
-	rows, err := r.db.Query(`select distinct gs.dlcappid from profile_games pg
+func profileDLCImageAppIDs(q querier, profileID int64) ([]int64, error) {
+	rows, err := q.Query(`select distinct gs.dlcappid from profile_games pg
 		join game_sets gs on gs.appid=pg.appid and gs.groupid=pg.groupid
 		where pg.profile_id=? and gs.dlcappid<>0 order by gs.dlcappid`, profileID)
 	if err != nil {
@@ -154,8 +169,8 @@ func mergeAppIDs(a, b []int64) []int64 {
 	return merged
 }
 
-func (r *Repository) profileAppIDs(profileID int64) ([]int64, error) {
-	rows, err := r.db.Query(`select distinct appid from (
+func profileAppIDs(q querier, profileID int64) ([]int64, error) {
+	rows, err := q.Query(`select distinct appid from (
 		select appid from profile_games where profile_id=?
 		union select appid from profile_achievements where profile_id=?
 		union select appid from profile_game_flags where profile_id=?

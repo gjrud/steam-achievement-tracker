@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"time"
@@ -26,13 +27,39 @@ type Service struct {
 	// status write, whether or not the write succeeded. It is called from the sync and worker goroutines, so it must
 	// be goroutine-safe. It is never called while a fullSyncRun lock is held.
 	OnChange func()
+	// ProgressInterval is the minimum time between two per-game progress writes of a run, and so between two
+	// progress OnChange calls. Zero means defaultProgressInterval (500 ms). Negative means no throttling: every
+	// finished game writes (tests use this). The first progress write of a run is never throttled. An update that
+	// is throttled is written by a trailing flush once the workers are done.
+	ProgressInterval time.Duration
+	// now is the throttle clock. Nil means time.Now. Tests set it to drive time without sleeping.
+	now func() time.Time
 }
+
+// defaultProgressInterval is the zero-value Service.ProgressInterval.
+const defaultProgressInterval = 500 * time.Millisecond
 
 // changed reports a sync state change to OnChange. It is nil-safe.
 func (s *Service) changed() {
 	if s.OnChange != nil {
 		s.OnChange()
 	}
+}
+
+// progressInterval returns the effective throttle interval (negative: no throttling).
+func (s *Service) progressInterval() time.Duration {
+	if s.ProgressInterval == 0 {
+		return defaultProgressInterval
+	}
+	return s.ProgressInterval
+}
+
+// clock returns the time for the progress throttle.
+func (s *Service) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 type Result struct {
@@ -48,16 +75,47 @@ type fullSyncRun struct {
 	profile repository.Profile
 	runID   int64
 	result  Result
-	mu      sync.Mutex
+	// mu guards result (the counters). It is held only for in-memory work: never across DB I/O or OnChange.
+	mu sync.Mutex
+
+	// progressMu orders progress decisions and their writes. Under it the run decides whether a write is due, then
+	// takes the counter snapshot (under mu) and writes, so the row receives writes in decision order and each write
+	// holds the latest counts. It is taken before mu, never while mu is held. OnChange is called after it is released.
+	progressMu sync.Mutex
+	// progressDirty: an update was skipped by the throttle and not written since.
+	progressDirty bool
+	// progressWrote: a progress write was attempted (the first write of a run is never throttled).
+	progressWrote bool
+	// lastProgress is the clock time of the last progress write attempt.
+	lastProgress time.Time
 }
 
-func (s *Service) FullSync(ctx context.Context, profile repository.Profile) (Result, error) {
+// FullSync runs one sync of the profile's library. A panic in the run ends it as failed (its stored error is the
+// generic sentence; the panic is logged). A panic inside one game is recovered per game (see syncGameSafely) and
+// does not reach this function.
+func (s *Service) FullSync(ctx context.Context, profile repository.Profile) (result Result, err error) {
+	var run *fullSyncRun
+	defer func() {
+		p := recover()
+		if p == nil {
+			return
+		}
+		log.Printf("sync run panic: %s", panicStackText(p))
+		err = newPanicError(p)
+		if run == nil {
+			// No run row exists yet: nothing to finish, so the caller gets the error and the generic sentence.
+			text := steam.UserMessage(err)
+			result = Result{Status: "failed", Error: &text}
+			return
+		}
+		result, err = run.fail(err)
+	}()
 	runID, err := s.Repo.StartSyncRun(profile.ID)
 	if err != nil {
 		return Result{}, err
 	}
 	s.changed()
-	run := &fullSyncRun{s: s, profile: profile, runID: runID, result: Result{Status: "success"}}
+	run = &fullSyncRun{s: s, profile: profile, runID: runID, result: Result{Status: "success"}}
 
 	owned, err := s.prepareOwnedGames(ctx, profile)
 	if err != nil {
@@ -77,20 +135,39 @@ func (s *Service) FullSync(ctx context.Context, profile repository.Profile) (Res
 	return run.result, nil
 }
 
+// panicError is a recovered panic. Its text carries the panic value for the log only. Stored and shown, it is the
+// generic sentence from steam.UserMessage: a panic is an internal failure, not a Steam answer.
+type panicError struct {
+	value any
+}
+
+func newPanicError(value any) error {
+	return &panicError{value: value}
+}
+
+func (e *panicError) Error() string {
+	return fmt.Sprintf("panic: %v", e.value)
+}
+
+// panicStackText formats a recovered panic value and its stack for the log. Secrets are scrubbed by pattern, as for
+// other logged text. Paths are kept as-is, like callBound and logSyncPanic; release builds use -trimpath.
+func panicStackText(p any) string {
+	return steam.RedactSecrets(fmt.Sprintf("%v\n%s", p, debug.Stack()))
+}
+
 func (s *Service) prepareOwnedGames(ctx context.Context, profile repository.Profile) ([]steam.OwnedGame, error) {
 	owned, err := s.Steam.GetOwnedGames(ctx, profile.SteamID64)
 	if err != nil {
 		return nil, err
 	}
-	ownedIDs := make([]int64, 0, len(owned))
+	records := make([]repository.GameRecord, 0, len(owned))
 	for _, g := range owned {
-		ownedIDs = append(ownedIDs, g.AppID)
-		if err := s.Repo.UpsertOwnedGame(profile.ID, gameRecord(g)); err != nil {
-			log.Printf("upsert owned game %d: %v", g.AppID, redact.Paths(err))
-		}
+		records = append(records, gameRecord(g))
 	}
-	if err := s.Repo.DisableMissingOwnedGames(profile.ID, ownedIDs); err != nil {
-		log.Printf("disable missing games: %v", redact.Paths(err))
+	// One transaction for the whole list and its not-owned sweep: a failure writes nothing, and the run fails.
+	if err := s.Repo.SaveOwnedGames(profile.ID, records); err != nil {
+		log.Printf("save owned games: %v", redact.Paths(err))
+		return nil, err
 	}
 	return owned, nil
 }
@@ -120,6 +197,8 @@ func (r *fullSyncRun) syncGames(ctx context.Context, games []steam.OwnedGame) er
 	err := dispatchSyncJobs(ctx, jobs, games)
 	close(jobs)
 	wg.Wait()
+	// Updates the throttle skipped are written now, so the row holds the final counters even if FinishSyncRun fails.
+	r.flushProgress()
 	if err == nil {
 		// Cancel can land after every game was handed off: dispatch then has no error, but in-flight games
 		// were interrupted and skipped. The run must still end as canceled, not as success.
@@ -131,16 +210,40 @@ func (r *fullSyncRun) syncGames(ctx context.Context, games []steam.OwnedGame) er
 func (r *fullSyncRun) syncWorker(ctx context.Context, jobs <-chan steam.OwnedGame, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for game := range jobs {
-		if err := r.s.syncGame(ctx, r.profile, game); err != nil {
-			// Interrupted by cancellation, not a game failure: no warning, and the game keeps its stored data.
-			// On a failed (canceled) run, games interrupted mid-sync count as neither synced nor failed.
-			if ctx.Err() == nil {
-				r.recordGameFailure(game, err)
-			}
-			continue
-		}
-		r.recordGameSuccess()
+		r.syncJob(ctx, game)
 	}
+}
+
+// syncJob runs one game and its bookkeeping. The bookkeeping (recordGameFailure, recordGameSuccess) runs on this
+// goroutine and calls the repository and OnChange, so a panic there would crash the process unless it is caught
+// here. The guard only logs. It does not record a game failure: that bookkeeping may be what panicked.
+func (r *fullSyncRun) syncJob(ctx context.Context, game steam.OwnedGame) {
+	defer func() {
+		if p := recover(); p != nil {
+			log.Printf("appid %d: worker panic: %s", game.AppID, panicStackText(p))
+		}
+	}()
+	if err := r.syncGameSafely(ctx, game); err != nil {
+		// Interrupted by cancellation, not a game failure: no warning, and the game keeps its stored data.
+		// On a failed (canceled) run, games interrupted mid-sync count as neither synced nor failed.
+		if ctx.Err() == nil {
+			r.recordGameFailure(game, err)
+		}
+		return
+	}
+	r.recordGameSuccess()
+}
+
+// syncGameSafely runs syncGame for one game. A panic becomes this game's error, so the worker goes on with the next
+// game. A worker that died instead would leave dispatchSyncJobs blocked on the unbuffered jobs channel.
+func (r *fullSyncRun) syncGameSafely(ctx context.Context, game steam.OwnedGame) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			log.Printf("appid %d: sync panic: %s", game.AppID, panicStackText(p))
+			err = newPanicError(p)
+		}
+	}()
+	return r.s.syncGame(ctx, r.profile, game)
 }
 
 func dispatchSyncJobs(ctx context.Context, jobs chan<- steam.OwnedGame, games []steam.OwnedGame) error {
@@ -164,28 +267,69 @@ func (r *fullSyncRun) recordGameFailure(game steam.OwnedGame, err error) {
 	}
 	r.mu.Lock()
 	r.result.GamesFailed++
-	total, synced, failed := r.progressLocked()
 	r.mu.Unlock()
-	r.updateProgress(total, synced, failed)
+	r.updateProgress()
 }
 
 func (r *fullSyncRun) recordGameSuccess() {
 	r.mu.Lock()
 	r.result.GamesSynced++
-	total, synced, failed := r.progressLocked()
 	r.mu.Unlock()
-	r.updateProgress(total, synced, failed)
+	r.updateProgress()
 }
 
+// progressLocked returns the counters for a progress write. The caller holds r.mu.
 func (r *fullSyncRun) progressLocked() (int, int, int) {
 	return r.result.GamesTotal, r.result.GamesSynced, r.result.GamesFailed
 }
 
-func (r *fullSyncRun) updateProgress(total, synced, failed int) {
+// updateProgress is called after a game's counters changed. It writes them when the throttle allows. Otherwise it
+// marks the run dirty for flushProgress. OnChange fires only after a write.
+func (r *fullSyncRun) updateProgress() {
+	if r.progressWrite(false) {
+		r.s.changed()
+	}
+}
+
+// flushProgress writes the counters once more if an update was skipped and not written since. It runs after the
+// workers are done, so nothing else writes concurrently.
+func (r *fullSyncRun) flushProgress() {
+	if r.progressWrite(true) {
+		r.s.changed()
+	}
+}
+
+// progressWrite decides and writes under progressMu, so writes are ordered and each snapshot is the latest. It reports
+// whether it wrote. A game update (flush false) is due when no write has happened yet, when the interval has passed,
+// or when throttling is off; otherwise it is skipped and the run is marked dirty. A flush writes only a dirty run.
+// A failed write still counts as a write attempt, and its error is logged.
+func (r *fullSyncRun) progressWrite(flush bool) bool {
+	r.progressMu.Lock()
+	defer r.progressMu.Unlock()
+	if flush && !r.progressDirty {
+		return false
+	}
+	now := r.s.clock()
+	if !flush && !r.progressDue(now) {
+		r.progressDirty = true
+		return false
+	}
+	r.progressDirty = false
+	r.progressWrote = true
+	r.lastProgress = now
+	r.mu.Lock()
+	total, synced, failed := r.progressLocked()
+	r.mu.Unlock()
 	if err := r.s.Repo.UpdateSyncRunProgress(r.runID, total, synced, failed); err != nil {
 		log.Printf("update sync progress: %v", redact.Paths(err))
 	}
-	r.s.changed()
+	return true
+}
+
+// progressDue reports whether a game update may write at now. The caller holds progressMu.
+func (r *fullSyncRun) progressDue(now time.Time) bool {
+	interval := r.s.progressInterval()
+	return !r.progressWrote || interval < 0 || now.Sub(r.lastProgress) >= interval
 }
 
 func (r *fullSyncRun) finalize() {
@@ -205,11 +349,20 @@ func (r *fullSyncRun) touchProfileSynced() {
 	}
 }
 
+// fail ends the run with err. A user cancel (or app shutdown) ends it as "canceled", not "failed". A deadline or any other
+// error ends it as "failed". The stored error is the user-safe sentence (The request was canceled., for a cancel). A run
+// that synced at least one game still counts as a sync of the profile.
 func (r *fullSyncRun) fail(err error) (Result, error) {
 	// The stored run error is exposed in AppState, so it gets the user-safe sentence. The caller logs the raw err.
 	errText := steam.UserMessage(err)
 	r.result.Status = "failed"
+	if errors.Is(err, context.Canceled) {
+		r.result.Status = "canceled"
+	}
 	r.result.Error = &errText
+	if r.result.GamesSynced > 0 {
+		r.touchProfileSynced()
+	}
 	r.finish()
 	return r.result, err
 }
@@ -276,8 +429,19 @@ func (s *Service) syncGameLegacy(ctx context.Context, profile repository.Profile
 	return s.saveEntries(ctx, profile, game, entries, now)
 }
 
-// saveGameWithoutAchievements stores the game as no_achievements with its group-0 entry only.
+// saveGameWithoutAchievements stores the game as no_achievements with its group-0 entry only. An empty schema is
+// also what a failed or partial answer from Steam looks like, so when the profile already has achievement data for
+// the app it is not taken as "no achievements": nothing is pruned, and the sync fails for this game with
+// steam.ErrNoAchievementsReturned (a warning, so the run ends partial). A developer who really removed every
+// achievement therefore keeps the warning on every sync.
 func (s *Service) saveGameWithoutAchievements(ctx context.Context, profile repository.Profile, game steam.OwnedGame, now string) error {
+	stored, err := s.Repo.HasStoredAchievementData(profile.ID, game.AppID)
+	if err != nil {
+		return err
+	}
+	if stored {
+		return steam.ErrNoAchievementsReturned
+	}
 	prev, err := s.Repo.ProfileGame(profile.ID, game.AppID, 0)
 	if err != nil {
 		return err
@@ -561,9 +725,9 @@ func wasCompletedBefore(prev repository.ProfileGameState) bool {
 
 // shouldFallbackToLegacy reports whether a GetGameAchievements failure should switch to the legacy API.
 // Endpoints are undocumented, so a non-transient HTTP status (4xx other than 429, or any other status that is
-// not transient) or an EResult error falls back. Transient statuses (429, 500, 502, 503, 504) never fall back:
-// 429/500/503 were already retried by the client, 502/504 are not retried, and all surface as a normal failure.
-// Transport, context and decode errors surface too.
+// not transient) or an EResult error falls back. Transient statuses (429, 500, 502, 503, 504) never fall back.
+// The client retries all five (429 honors Retry-After), so one reaching here has used up its attempts and
+// surfaces as a normal failure. Transport, context and decode errors surface too.
 func shouldFallbackToLegacy(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
@@ -654,10 +818,19 @@ func (s *Service) saveCover(imageAppID int64, res images.Result) error {
 	// SaveCover overwrites kind, file, cached and source; RefreshCover returns the kept file's values when
 	// it could not download, so the stored cover stays consistent with what is on disk. The file path itself
 	// is not stored: Cached only records that a file exists under the game images directory.
-	return s.Repo.SaveCover(repository.CoverUpdate{
+	err := s.Repo.SaveCover(repository.CoverUpdate{
 		ImageAppID: imageAppID, Kind: res.Kind, FileName: res.FileName, Cached: res.Path != "",
 		SourceURL: res.SourceURL, Downloaded: res.Downloaded,
 	})
+	// A file downloaded in this run under a new name is referenced by no row once the save fails, so it is removed.
+	// When the name is unchanged, the file overwrote the stored one that the row still points at, so it is kept.
+	// A kept file (Downloaded false) was never written in this run and is never touched.
+	if err != nil && res.Downloaded && res.Changed {
+		if rmErr := s.Images.RemoveCover(imageAppID, res.FileName); rmErr != nil {
+			log.Printf("warn: remove cover %d after failed save: %v", imageAppID, redact.Paths(rmErr))
+		}
+	}
+	return err
 }
 
 func (s *Service) storedCover(imageAppID int64) (images.Stored, error) {

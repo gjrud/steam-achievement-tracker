@@ -92,12 +92,27 @@ func scanCover(scanner rowScanner) (CoverRecord, error) {
 	return c, nil
 }
 
+// entriesForImageAppSQL is the lookup behind entriesForImageApp, and it takes imageAppID twice. A single
+// `owner = ? or pg.appid = ?` predicate, with owner the DLC-or-game case expression, defeats index use and forces
+// SCAN pg. The lookup is therefore split into two index-searched branches.
+//
+// Branch 1 selects every entry of app imageAppID. Branch 2 selects every entry bound to imageAppID as its DLC: a bound
+// entry's owner is gs.dlcappid, and the `<> 0` guard keeps plain sets (dlcappid 0) out. The owner = pg.appid case
+// without a DLC binding is already covered by branch 1. UNION drops a row matched by both branches, so each entry is
+// returned once.
+//
+// Expected plans: SEARCH pg USING INDEX idx_profile_games_appid (both branches) and
+// SEARCH gs USING INDEX idx_game_sets_dlcappid (branch 2).
+const entriesForImageAppSQL = `select pg.profile_id, pg.appid, pg.groupid from profile_games pg where pg.appid = ?
+	union
+	select pg.profile_id, pg.appid, pg.groupid from game_sets gs
+		join profile_games pg on pg.appid=gs.appid and pg.groupid=gs.groupid
+		where gs.dlcappid = ? and gs.dlcappid <> 0`
+
 // entriesForImageApp lists profile entries whose cover may change when imageAppID's cover changes: entries that
 // own imageAppID's store art, and every entry of game imageAppID, since its DLC entries fall back to the game cover.
 func entriesForImageApp(tx *sql.Tx, imageAppID int64) ([]profileEntry, error) {
-	rows, err := tx.Query(`select pg.profile_id, pg.appid, pg.groupid from profile_games pg
-		left join game_sets gs on gs.appid=pg.appid and gs.groupid=pg.groupid
-		where `+imageAppIDSQL+` = ? or pg.appid = ?`, imageAppID, imageAppID)
+	rows, err := tx.Query(entriesForImageAppSQL, imageAppID, imageAppID)
 	if err != nil {
 		return nil, err
 	}
