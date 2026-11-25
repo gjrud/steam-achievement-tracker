@@ -102,7 +102,7 @@ Deleting the cache folder is safe; see [covers.md](covers.md#cache-layout).
 
 The in-app updater writes outside the three app roots: `<target>.bak`, `<exe>.old.<n>` (Windows) and `wails-update-*` next to the exe or AppImage, `wails-update-<pid>.log` in the OS temp dir, and on Windows the HKCU Apps & Features `DisplayVersion`. Lifetimes and cleanup: [updater.md](updater.md#staging-and-leftover-files), [After an update](updater.md#after-an-update).
 
-The NSIS uninstaller (`build/windows/nsis/project.nsi`) deletes `$INSTDIR\<exe>.old.*` and `$INSTDIR\<exe>.bak` before its non-recursive `RMDir "$INSTDIR"`. It never uses `RMDir /r`, so an unrelated file or a leftover `wails-update-*` folder in the install folder keeps the folder, and the install folder stays behind.
+The NSIS uninstaller (`build/windows/nsis/project.nsi`) deletes `$INSTDIR\<exe>.old.*` and `$INSTDIR\<exe>.bak`. It then handles each `$INSTDIR\wails-update-*` folder: it deletes only that folder's `.artifact` and `*-windows-amd64-portable.exe` files and removes the folder with a non-recursive `RMDir`. A leftover staging folder is therefore removed, and so is the install folder once it is empty. Anything else inside a `wails-update-*` folder keeps that folder, and the install folder then stays behind. The uninstaller never uses `RMDir /r`: an unrelated file in `$INSTDIR` also keeps the install folder.
 
 ## internal/keyring
 

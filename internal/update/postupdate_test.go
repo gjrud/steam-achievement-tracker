@@ -29,11 +29,11 @@ func makeDir(t *testing.T, p string) {
 	}
 }
 
-// ageFiles sets the mtime of each path to an hour ago, so the sweep's age gate sees it as idle. Call it after a
-// directory's entries are made: adding an entry moves the directory's own mtime.
+// ageFiles sets the mtime of each path to just past leftoverMinAge ago, so the sweep's age gate sees it as idle. Call
+// it after a directory's entries are made: adding an entry moves the directory's own mtime.
 func ageFiles(t *testing.T, paths ...string) {
 	t.Helper()
-	old := time.Now().Add(-time.Hour)
+	old := time.Now().Add(-(leftoverMinAge + time.Hour))
 	for _, p := range paths {
 		if err := os.Chtimes(p, old, old); err != nil {
 			t.Fatal(err)
@@ -370,7 +370,8 @@ func TestSweepTempLogsOnlyRegularFiles(t *testing.T) {
 }
 
 // A helper log younger than leftoverMinAge may belong to a live helper of another app or instance, so it stays. Once
-// it is older than that, the sweep removes it.
+// it is older than that, the sweep removes it. Two hours old is under the one-day gate, so it stays even though it is
+// far past the old ten-minute gate.
 func TestSweepTempLogNeedsIdleAge(t *testing.T) {
 	tmp := t.TempDir()
 	target := filepath.Join(t.TempDir(), "steam-achievement-tracker.AppImage")
@@ -378,7 +379,11 @@ func TestSweepTempLogNeedsIdleAge(t *testing.T) {
 	old := filepath.Join(tmp, "wails-update-59.log")
 	touchFile(t, young)
 	touchFile(t, old)
-	when := time.Now().Add(-(leftoverMinAge + time.Minute))
+	youngWhen := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(young, youngWhen, youngWhen); err != nil {
+		t.Fatal(err)
+	}
+	when := time.Now().Add(-(leftoverMinAge + time.Hour))
 	if err := os.Chtimes(old, when, when); err != nil {
 		t.Fatal(err)
 	}
@@ -391,6 +396,35 @@ func TestSweepTempLogNeedsIdleAge(t *testing.T) {
 	}
 	if pathExists(old) {
 		t.Error("idle temp log not removed")
+	}
+}
+
+// The age gate is one day. Files idle for less stay; a file idle for more than a day is removable. The boundary itself
+// is not tested: file systems round mtimes, so an exact 24 h value is not reliable.
+func TestLeftoverMinAgeIsOneDay(t *testing.T) {
+	if leftoverMinAge != 24*time.Hour {
+		t.Fatalf("leftoverMinAge = %v, want 24h", leftoverMinAge)
+	}
+	bak := filepath.Join(t.TempDir(), "steam-achievement-tracker.AppImage.bak")
+	touchFile(t, bak)
+	now := time.Now()
+	cases := []struct {
+		age  time.Duration
+		want bool
+	}{
+		{10 * time.Minute, false},
+		{2 * time.Hour, false},
+		{23 * time.Hour, false},
+		{25 * time.Hour, true},
+	}
+	for _, tc := range cases {
+		when := now.Add(-tc.age)
+		if err := os.Chtimes(bak, when, when); err != nil {
+			t.Fatal(err)
+		}
+		if got := bakRemovable(bak, now); got != tc.want {
+			t.Errorf("bakRemovable at age %v = %v, want %v", tc.age, got, tc.want)
+		}
 	}
 }
 

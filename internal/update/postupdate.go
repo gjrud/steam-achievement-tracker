@@ -18,10 +18,10 @@ import (
 var cleanupDelay = 5 * time.Second
 
 // leftoverMinAge is how long a staging directory (its own mtime and its entries'), a .bak file and a helper log must be
-// idle before the sweep removes them. There is no single-instance lock, and the target folder and the temp directory
-// can be shared with another app or a second instance of this app. A concurrent update writes its files continuously,
-// so a young file is left alone.
-var leftoverMinAge = 10 * time.Minute
+// idle before the sweep removes them. The age gate guards against another app that shares the target or temp folder,
+// or a helper left running from an earlier start. A concurrent update writes its files continuously, so a young file
+// is left alone. The age is 24 hours, so a failed update's files stay for a day after they were written.
+var leftoverMinAge = 24 * time.Hour
 
 // removeFile removes one file or symlink for the sweep. Tests replace it to simulate a file that vanished or is held.
 var removeFile = fsretry.Remove
